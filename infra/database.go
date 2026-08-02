@@ -42,8 +42,13 @@ type neonProjectArgs struct {
 	Org_id pulumi.StringPtrInput `pulumi:"org_id"`
 }
 
+type neonProjectArgsValue struct {
+	Name   *string `pulumi:"name"`
+	Org_id *string `pulumi:"org_id"`
+}
+
 func (neonProjectArgs) ElementType() reflect.Type {
-	return reflect.TypeOf((*neonProjectArgs)(nil)).Elem()
+	return reflect.TypeOf((*neonProjectArgsValue)(nil)).Elem()
 }
 
 func registerNeonProject(ctx *pulumi.Context, name string, args *neonProjectArgs, opts ...pulumi.ResourceOption) (*neonProject, error) {
