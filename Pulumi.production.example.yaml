@@ -12,10 +12,10 @@ config:
   sub2api-vps-deploy:appProbePath: /api/ready
   sub2api-vps-deploy:neonResourceMode: existing
   sub2api-vps-deploy:upstashResourceMode: existing
-  # Managed Neon creates a Project, Branch, Role, Database, and Endpoint.
-  # It uses resourceNamespace for names and defaults neonRegionId to
-  # aws-us-east-1. Set neonResourceMode to create and provide neonApiToken.
-  # neonOrgId and neonRegionId are optional managed-resource overrides.
+  # Managed Neon creates a Project; Neon provisions its default Branch, Role,
+  # Database, and Endpoint. It uses resourceNamespace for the project name.
+  # Set neonResourceMode to create and provide neonApiToken. neonOrgId is an
+  # optional override.
   # Managed Upstash derives upstashDatabaseName from resourceNamespace and
   # defaults upstashRegion to us-east-1. Set upstashResourceMode to create and
   # provide upstashApiKey plus upstashEmail.

@@ -24,7 +24,6 @@ export interface DeploymentInput {
   neonDsn?: string;
   neonApiToken?: string;
   neonOrgId?: string;
-  neonRegionId?: string;
   neonPort?: number;
   neonUser?: string;
   neonPassword?: string;
@@ -56,7 +55,6 @@ export interface DeploymentConfig extends DeploymentInput {
   postgresUser: string;
   postgresDb: string;
   neonPort: number;
-  neonRegionId: string;
   neonUser: string;
   neonDb: string;
   redisPort: number;
@@ -113,7 +111,6 @@ export function validateDeploymentConfig(input: DeploymentInput): DeploymentConf
     postgresUser: input.postgresUser?.trim() || "sub2api",
     postgresDb: input.postgresDb?.trim() || "sub2api",
     neonPort: input.neonPort ?? 5432,
-    neonRegionId: input.neonRegionId?.trim() || "aws-us-east-1",
     neonUser: input.neonUser?.trim() || "sub2api",
     neonDb: input.neonDb?.trim() || "sub2api",
     redisPort: input.redisPort ?? 6379,
@@ -190,7 +187,6 @@ export function loadDeploymentConfig(): DeploymentConfig {
     neonDsn: configuredSecret("neonDsn"),
     neonApiToken: configuredSecret("neonApiToken"),
     neonOrgId: get("neonOrgId"),
-    neonRegionId: get("neonRegionId"),
     neonPort: get("neonPort") ? Number(get("neonPort")) : undefined,
     neonUser: get("neonUser"),
     neonPassword: configuredSecret("neonPassword"),

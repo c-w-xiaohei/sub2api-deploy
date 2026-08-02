@@ -61,7 +61,6 @@ describe("validateDeploymentConfig", () => {
       neonPassword: undefined,
       neonResourceMode: "create",
       neonApiToken: "neon-api-token",
-      neonRegionId: "aws-us-east-1",
     });
     expect(result.neonResourceMode).toBe("create");
     expect(result.resourceNamespace).toBe("sub2api");
