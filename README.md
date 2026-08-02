@@ -1,7 +1,8 @@
 # Sub2API VPS Deployment
 
-This is a direct Pulumi project for one VPS. `pulumi up` runs on the VPS itself,
-uses `command.local.Command`, and invokes the local Docker Compose CLI. It does
+This is a direct Pulumi project for one VPS. The Pulumi program is Go and is
+loaded from the prebuilt `bin/pulumi-program`; `pulumi up` runs on the VPS
+itself, uses `command.local.Command`, and invokes the local Docker Compose CLI. It does
 not use SST, a remote Docker daemon, the Pulumi Docker provider, a Tunnel,
 Kubernetes, weighted canaries, or a hosted deployment bridge.
 
@@ -10,7 +11,8 @@ Kubernetes, weighted canaries, or a hosted deployment bridge.
 - Docker Engine
 - Docker Compose v2
 - Pulumi CLI
-- Node.js or Bun
+- A release bundle containing the matching Linux `pulumi-program` binary
+- Node.js or Bun for the shell-invoked `tsx` runtime helpers
 - An active Cloudflare zone and a scoped Cloudflare API token
 - Credentials for the selected PostgreSQL and Redis services
 
@@ -21,13 +23,33 @@ DNS-01 certificates, and Cloudflare Full (strict).
 
 ## Basic setup
 
-Install dependencies and initialize the Pulumi stack on the VPS:
+Download the release bundle for the VPS architecture, then install the
+TypeScript runtime helpers and initialize the Pulumi stack:
 
 ```bash
-npm install
+VERSION=v0.1.0
+ARCH=amd64 # use arm64 for an ARM VPS
+gh release download "$VERSION" \
+  --pattern "sub2api-vps-deploy-${VERSION}-linux-${ARCH}.tar.gz" \
+  --dir /tmp
+tar -xzf "/tmp/sub2api-vps-deploy-${VERSION}-linux-${ARCH}.tar.gz"
+cd "sub2api-vps-deploy-${VERSION}-linux-${ARCH}"
+npm ci
 cp Pulumi.production.example.yaml Pulumi.production.yaml
 ${EDITOR:-vi} Pulumi.production.yaml
 pulumi stack init production
+```
+
+`Pulumi.yaml` points to `./bin/pulumi-program`, so the VPS does not compile the
+Go program during `pulumi preview` or `pulumi up`. Before using a real stack,
+run the offline checks on a build machine:
+
+```bash
+go test ./...
+go vet ./...
+go build -o /tmp/sub2api-pulumi-go ./infra
+npm test
+npm run build
 ```
 
 Edit the ordinary values directly in `Pulumi.production.yaml`: the resource
@@ -55,12 +77,33 @@ pulumi config set --secret jwtSecret '...'
 pulumi config set --secret totpEncryptionKey '...'
 ```
 
-Review the deployment plan before applying it:
+Export and inspect the existing state before any production operation. Do not
+use `--show-secrets`:
+
+```bash
+pulumi stack export > /tmp/sub2api-stack.json
+```
+
+Review a preview against the existing stack before applying it:
 
 ```bash
 pulumi preview
 pulumi up
 ```
+
+## Release Artifacts
+
+Pushing a version tag triggers `.github/workflows/release.yml`. CI verifies the
+Go program and runtime helpers, builds Linux `amd64` and `arm64` binaries, and
+publishes architecture-specific deployment bundles plus SHA-256 files:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow never runs `pulumi preview` or `pulumi up`; it only builds
+and packages the deployment program.
 
 `pulumi up` runs directly on the target VPS and uses its local Docker Compose
 CLI. It does not use a remote deployment bridge.
@@ -104,12 +147,11 @@ Sub2API tenant, schema, or runtime database setting. Treat it as immutable after
 managed resources are created; changing it creates a different resource set,
 not a data rename.
 
-Managed Neon uses the pinned native Go provider `v0.0.1-alpha.1`. The matching
-Node SDK is vendored under `vendor/pulumi-neon`; its Pulumi package metadata
-causes Pulumi to download the matching Linux provider binary automatically.
-The VPS does not need Go or a manual `pulumi plugin install` step. Keep the
-SDK and provider versions paired; do not replace the vendored package with the
-older parameterized `pulumi-neon` npm package.
+Managed Neon uses the pinned native Go alpha SDK pseudo-version
+`v0.0.0-20241217015548-601a1132b220`, paired with the alpha.1 provider binary.
+The Go SDK uses its root package for the provider and its `/resource` package
+for `Project`; generated field names such as `Connection_uri` are intentional.
+Keep the SDK and provider versions paired and do not use the Neon beta SDK.
 
 ### Sub2API native configuration
 
@@ -123,8 +165,8 @@ infrastructure reconciliation and may replace it. When a deployment needs a
 native setting that is not exposed yet, add it explicitly rather than creating
 a second generic configuration system:
 
-1. Add an optional input and default to `src/config.ts`.
-2. Add the value to `runtimePayload` in `src/index.ts` using the upstream
+1. Add an optional input and default to `infra/config.go`.
+2. Add the value to `runtimePayload` in `infra/main.go` using the upstream
    environment variable name, such as `TZ` or `GATEWAY_*`.
 3. Add the ordinary value or `pulumi config set --secret` instruction to
    `Pulumi.production.example.yaml` and this README.
@@ -219,6 +261,9 @@ The project can be checked without contacting Cloudflare, Neon, Upstash, a VPS,
 or creating cloud resources:
 
 ```bash
+go test ./...
+go vet ./...
+go build -o /tmp/sub2api-pulumi-go ./infra
 npm test
 npm run build
 bash -n scripts/*.sh

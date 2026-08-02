@@ -1,0 +1,115 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify Go program
+        run: |
+          go test -count=1 ./...
+          go vet ./...
+          go build -o /tmp/sub2api-pulumi-go ./infra
+          go mod verify
+
+      - name: Verify runtime helpers
+        run: |
+          npm ci
+          npm test
+          npm run build
+          bash -n scripts/*.sh
+          bash scripts/validate-compose.sh
+
+  build:
+    name: Build ${{ matrix.arch }} release
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+
+      - name: Build Pulumi binary
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: scripts/build-pulumi-release.sh "dist/pulumi-program-linux-${{ matrix.arch }}"
+
+      - name: Assemble deployment bundle
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          archive="sub2api-vps-deploy-${VERSION}-linux-${{ matrix.arch }}"
+          bundle="release/${archive}"
+          mkdir -p "${bundle}/bin"
+          install -m 0755 "dist/pulumi-program-linux-${{ matrix.arch }}" "${bundle}/bin/pulumi-program"
+          cp Pulumi.yaml Pulumi.production.example.yaml README.md package.json package-lock.json go.mod go.sum "${bundle}/"
+          cp -R compose infra scripts src traefik "${bundle}/"
+          tar -C release -czf "release/${archive}.tar.gz" "${archive}"
+          (cd release && sha256sum "${archive}.tar.gz" > "${archive}.tar.gz.sha256")
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: release/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            --verify-tag \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}"

@@ -9,16 +9,7 @@
     "lint": "tsc --noEmit",
     "pulumi:preview": "pulumi preview"
   },
-  "dependencies": {
-    "@dkisler/pulumi-neon": "file:vendor/pulumi-neon",
-    "@pulumi/cloudflare": "^6.5.0",
-    "@pulumi/command": "^1.0.1",
-    "@pulumi/pulumi": "^3.150.0",
-    "@upstash/pulumi": "^0.5.0",
-    "js-yaml": "^4.1.0"
-  },
   "devDependencies": {
-    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
