@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { renderActiveRoute } from "../scripts/render-route.js";
 
 const read = (name: string) => readFileSync(new URL(`../compose/${name}`, import.meta.url), "utf8");
 const readPath = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
@@ -25,11 +26,29 @@ describe("compose deployment contract", () => {
     expect(override).not.toContain("container_name: sub2api");
     expect(read("edge.yml")).toContain("80:80");
     expect(read("edge.yml")).toContain("443:443");
+    expect(read("edge.yml")).toContain("host.docker.internal:host-gateway");
     expect(readPath("../traefik/traefik.yml")).toContain("/etc/traefik/dynamic");
     expect(readPath("../traefik/traefik.yml")).toContain("acme.json");
-    expect(readPath("../traefik/dynamic/active.yml")).toContain("sub2api-${SLOT}:8080");
+    const activeRoute = readPath("../traefik/dynamic/active.yml");
+    expect(activeRoute).toContain("sub2api-${SLOT}:8080");
+    expect(activeRoute).toContain("HostSNI(`www.cloudflare.com`)");
+    expect(activeRoute).toContain("passthrough: true");
+    expect(activeRoute).toContain('address: "host.docker.internal:8443"');
     expect(override).toContain("ports: !reset []");
     expect(override).toContain("depends_on: !reset []");
+  });
+
+  it("preserves sing-box passthrough when rendering an active HTTP slot", () => {
+    const rendered = renderActiveRoute(
+      readPath("../traefik/dynamic/active.yml"),
+      "code2.contextid.cn",
+      "green",
+    );
+
+    expect(rendered).toContain("Host(`code2.contextid.cn`)");
+    expect(rendered).toContain("http://sub2api-green:8080");
+    expect(rendered).toContain("HostSNI(`www.cloudflare.com`)");
+    expect(rendered).toContain('address: "host.docker.internal:8443"');
   });
 
   it("renders both slots with the upstream health and hardening contract", () => {
@@ -56,5 +75,6 @@ describe("compose deployment contract", () => {
       expect.stringContaining("/runtime/"),
       expect.stringContaining("/traefik/"),
     ]));
+    expect(config.services.traefik.extra_hosts).toEqual(["host.docker.internal=host-gateway"]);
   });
 });
