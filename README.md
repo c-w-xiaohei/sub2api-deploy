@@ -11,7 +11,8 @@ Kubernetes, weighted canaries, or a hosted deployment bridge.
 - Docker Engine
 - Docker Compose v2
 - Pulumi CLI
-- A release bundle containing the matching Linux `pulumi-program` binary
+- A release bundle containing the matching Linux `pulumi-program` binary and
+  bundled Pulumi runtime helpers
 - Node.js or Bun for the shell-invoked `tsx` runtime helpers
 - An active Cloudflare zone and a scoped Cloudflare API token
 - Credentials for the selected PostgreSQL and Redis services
@@ -27,7 +28,7 @@ Download the release bundle for the VPS architecture, then install the
 TypeScript runtime helpers and initialize the Pulumi stack:
 
 ```bash
-VERSION=v0.1.0
+VERSION=v0.1.3
 ARCH=amd64 # use arm64 for an ARM VPS
 gh release download "$VERSION" \
   --pattern "sub2api-vps-deploy-${VERSION}-linux-${ARCH}.tar.gz" \
@@ -37,12 +38,15 @@ cd "sub2api-vps-deploy-${VERSION}-linux-${ARCH}"
 npm ci
 cp Pulumi.production.example.yaml Pulumi.production.yaml
 ${EDITOR:-vi} Pulumi.production.yaml
-pulumi stack init production
+./bin/pulumi stack init production
 ```
 
 `Pulumi.yaml` points to `./bin/pulumi-program`, so the VPS does not compile the
-Go program during `pulumi preview` or `pulumi up`. Before using a real stack,
-run the offline checks on a build machine:
+Go program during `pulumi preview` or `pulumi up`. The bundle also includes
+`bin/go`, a metadata-only compatibility shim used by Pulumi's Go language host,
+and `bin/pulumi`, which invokes the installed Pulumi CLI with the bundle on
+`PATH`. Go itself is not required on the VPS. Before using a real stack, run
+the offline checks on a build machine:
 
 ```bash
 go test ./...
@@ -64,31 +68,31 @@ write each secret required by the selected modes. For the default
 `docker/docker` configuration:
 
 ```bash
-pulumi config set --secret cloudflareApiToken '...'
-pulumi config set --secret postgresPassword '...'
-pulumi config set --secret redisPassword '...'
+./bin/pulumi config set --secret cloudflareApiToken '...'
+./bin/pulumi config set --secret postgresPassword '...'
+./bin/pulumi config set --secret redisPassword '...'
 ```
 
 Optional Sub2API bootstrap credentials are set the same way:
 
 ```bash
-pulumi config set --secret adminPassword '...'
-pulumi config set --secret jwtSecret '...'
-pulumi config set --secret totpEncryptionKey '...'
+./bin/pulumi config set --secret adminPassword '...'
+./bin/pulumi config set --secret jwtSecret '...'
+./bin/pulumi config set --secret totpEncryptionKey '...'
 ```
 
 Export and inspect the existing state before any production operation. Do not
 use `--show-secrets`:
 
 ```bash
-pulumi stack export > /tmp/sub2api-stack.json
+./bin/pulumi stack export > /tmp/sub2api-stack.json
 ```
 
 Review a preview against the existing stack before applying it:
 
 ```bash
-pulumi preview
-pulumi up
+./bin/pulumi preview
+./bin/pulumi up
 ```
 
 ## Release Artifacts
@@ -98,8 +102,8 @@ Go program and runtime helpers, builds Linux `amd64` and `arm64` binaries, and
 publishes architecture-specific deployment bundles plus SHA-256 files:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 The release workflow never runs `pulumi preview` or `pulumi up`; it only builds
@@ -196,7 +200,7 @@ For example, when connecting to an existing Neon database, keep the mode in
 the YAML file and provide the DSN as a Pulumi secret:
 
 ```bash
-pulumi config set --secret neonDsn 'postgresql://user:password@host:5432/database?sslmode=require'
+./bin/pulumi config set --secret neonDsn 'postgresql://user:password@host:5432/database?sslmode=require'
 ```
 
 For a fully managed Neon plus Upstash deployment, no Project, Branch, Redis
@@ -204,15 +208,15 @@ database, or DSN needs to be created beforehand. Set the modes and provider
 credentials; the namespace and default regions supply the resource names:
 
 ```bash
-pulumi config set resourceNamespace tenant-a
-pulumi config set postgresMode neon
-pulumi config set neonResourceMode create
-pulumi config set --secret neonApiToken '...'
-pulumi config set redisMode upstash
-pulumi config set upstashResourceMode create
-pulumi config set upstashEmail ops@example.com
-pulumi config set --secret upstashApiKey '...'
-pulumi up
+./bin/pulumi config set resourceNamespace tenant-a
+./bin/pulumi config set postgresMode neon
+./bin/pulumi config set neonResourceMode create
+./bin/pulumi config set --secret neonApiToken '...'
+./bin/pulumi config set redisMode upstash
+./bin/pulumi config set upstashResourceMode create
+./bin/pulumi config set upstashEmail ops@example.com
+./bin/pulumi config set --secret upstashApiKey '...'
+./bin/pulumi up
 ```
 
 The native Neon provider lets Neon choose the project region; set `neonOrgId`

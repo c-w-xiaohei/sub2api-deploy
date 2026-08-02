@@ -81,6 +81,8 @@ jobs:
           bundle="release/${archive}"
           mkdir -p "${bundle}/bin"
           install -m 0755 "dist/pulumi-program-linux-${{ matrix.arch }}" "${bundle}/bin/pulumi-program"
+          install -m 0755 scripts/pulumi-go-shim.sh "${bundle}/bin/go"
+          install -m 0755 scripts/pulumi-cli-wrapper.sh "${bundle}/bin/pulumi"
           cp Pulumi.yaml Pulumi.production.example.yaml README.md package.json package-lock.json go.mod go.sum "${bundle}/"
           cp -R compose infra scripts src traefik "${bundle}/"
           tar -C release -czf "release/${archive}.tar.gz" "${archive}"
