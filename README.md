@@ -104,6 +104,13 @@ Sub2API tenant, schema, or runtime database setting. Treat it as immutable after
 managed resources are created; changing it creates a different resource set,
 not a data rename.
 
+Managed Neon uses the pinned native Go provider `v0.0.1-alpha.1`. The matching
+Node SDK is vendored under `vendor/pulumi-neon`; its Pulumi package metadata
+causes Pulumi to download the matching Linux provider binary automatically.
+The VPS does not need Go or a manual `pulumi plugin install` step. Keep the
+SDK and provider versions paired; do not replace the vendored package with the
+older parameterized `pulumi-neon` npm package.
+
 ### Sub2API native configuration
 
 This project intentionally does not mirror every Sub2API environment variable
@@ -138,7 +145,7 @@ The four independent data combinations (`docker/docker`, `neon/docker`,
 | --- | --- | --- |
 | PostgreSQL `docker` | `postgresMode: docker` | `postgresPassword` |
 | Neon `existing` | `postgresMode: neon`, `neonResourceMode: existing`, optional split connection fields | `neonDsn` or `neonPassword` |
-| Neon `create` | `postgresMode: neon`, `neonResourceMode: create`, optional `neonOrgId` and `neonRegionId` | `neonApiToken` |
+| Neon `create` | `postgresMode: neon`, `neonResourceMode: create`, optional `neonOrgId` | `neonApiToken` |
 | Redis `docker` | `redisMode: docker` | `redisPassword` |
 | Upstash `existing` | `redisMode: upstash`, `upstashResourceMode: existing`, `upstashHost`, `upstashPort` and connection fields | `upstashPassword` |
 | Upstash `create` | `redisMode: upstash`, `upstashResourceMode: create`, `upstashEmail` and optional `upstashDatabaseName`/`upstashRegion` | `upstashApiKey` |
@@ -166,14 +173,15 @@ pulumi config set --secret upstashApiKey '...'
 pulumi up
 ```
 
-Managed Neon defaults to `aws-us-east-1`; managed Upstash defaults to
-`us-east-1`. Set `neonRegionId`, `neonOrgId`, or `upstashRegion` when those
-defaults are not appropriate.
+The native Neon provider lets Neon choose the project region; set `neonOrgId`
+when the API key can access multiple organizations. Set `upstashRegion` when
+the default `us-east-1` is not appropriate.
 
 `existing` connects to a data service without managing its lifecycle. `create`
 allows Pulumi to manage the selected Neon or Upstash resource. Managed Neon
-creates a namespaced Project, Branch, Role, Database, and Endpoint from
-`neonApiToken`; it does not require manually created Project or Branch IDs.
+creates one namespaced Project from `neonApiToken`; Neon provisions its default
+Branch, Database, Role, and Endpoint and returns the connection URI. It does
+not require manually created Project or Branch IDs.
 Managed Upstash creates a namespaced Redis database from `upstashApiKey` and
 `upstashEmail`. The application receives the upstream split variables
 (`DATABASE_*` and `REDIS_*`), not a URL. Neon uses

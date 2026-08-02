@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as pulumi from "@pulumi/pulumi";
-import { createNeonConnection, managedNeonResourceNames, parsePostgresDsn } from "../src/database.js";
+import { createNeonConnection, managedNeonProjectName, parsePostgresDsn } from "../src/database.js";
 import type { DeploymentConfig } from "../src/config.js";
 
 const resources: Array<{ type: string; name: string }> = [];
@@ -8,21 +8,17 @@ pulumi.runtime.setMocks({
   newResource: (args) => {
     resources.push({ type: args.type, name: args.name });
     const state = { ...args.inputs } as Record<string, unknown>;
-    if (args.type === "neon:index/role:Role") state.password = "generated-password";
-    if (args.type === "neon:index/endpoint:Endpoint") state.host = "ep.generated.neon.tech";
+    if (args.type === "neon:resource:Project") {
+      state.connection_uri = "postgresql://tenant-a:p%40ss@ep.generated.neon.tech/tenant-a?sslmode=require";
+    }
     return { id: `${args.name}-id`, state };
   },
   call: (args) => args.inputs,
 }, "sub2api", "test");
 
 describe("managed PostgreSQL resources", () => {
-  it("derives distinct names from the resource namespace", () => {
-    expect(managedNeonResourceNames("tenant-a")).toEqual({
-      projectName: "tenant-a-postgres",
-      branchName: "tenant-a",
-      roleName: "tenant-a",
-      databaseName: "tenant-a",
-    });
+  it("derives a distinct managed Neon project name from the namespace", () => {
+    expect(managedNeonProjectName("tenant-a")).toBe("tenant-a-postgres");
   });
 
   it("parses a PostgreSQL DSN into the upstream split connection contract", () => {
@@ -41,7 +37,7 @@ describe("managed PostgreSQL resources", () => {
     expect(() => parsePostgresDsn("postgresql://user:pass@host/db?sslmode=disable")).toThrow(/sslmode=require/);
   });
 
-  it("registers the complete managed Neon resource chain", async () => {
+  it("registers the native managed Neon Project resource and exposes its connection", async () => {
     resources.length = 0;
     const config = {
       resourceNamespace: "tenant-a",
@@ -56,7 +52,6 @@ describe("managed PostgreSQL resources", () => {
       acmeEmail: "ops@example.com",
       postgresUser: "sub2api",
       postgresDb: "sub2api",
-      neonRegionId: "aws-us-east-1",
       neonUser: "sub2api",
       neonDb: "sub2api",
       neonPort: 5432,
@@ -72,12 +67,11 @@ describe("managed PostgreSQL resources", () => {
     const connection = createNeonConnection(config, "neon-api-key");
     await (connection.host as pulumi.Output<string> & { promise(): Promise<string> }).promise();
 
-    expect(resources.filter(({ type }) => type.startsWith("neon:index/")).map(({ type }) => type)).toEqual([
-      "neon:index/project:Project",
-      "neon:index/branch:Branch",
-      "neon:index/role:Role",
-      "neon:index/database:Database",
-      "neon:index/endpoint:Endpoint",
+    expect(resources.filter(({ type }) => type.startsWith("neon:")).map(({ type }) => type)).toEqual([
+      "neon:resource:Project",
     ]);
+    expect(await (connection.host as pulumi.Output<string> & { promise(): Promise<string> }).promise()).toBe(
+      "ep.generated.neon.tech",
+    );
   });
 });

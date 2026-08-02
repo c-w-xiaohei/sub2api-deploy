@@ -1,6 +1,6 @@
 import type { DeploymentConfig } from "./config.js";
 import * as pulumi from "@pulumi/pulumi";
-import * as neon from "pulumi-neon/bin/index.js";
+import * as neon from "@dkisler/pulumi-neon";
 
 export interface DatabaseConnection {
   host: string;
@@ -20,20 +20,8 @@ export interface DatabaseConnectionInputs {
   sslmode: "disable" | "require";
 }
 
-export interface NeonResourceNames {
-  projectName: string;
-  branchName: string;
-  roleName: string;
-  databaseName: string;
-}
-
-export function managedNeonResourceNames(namespace: string): NeonResourceNames {
-  return {
-    projectName: `${namespace}-postgres`,
-    branchName: namespace,
-    roleName: namespace,
-    databaseName: namespace,
-  };
+export function managedNeonProjectName(namespace: string): string {
+  return `${namespace}-postgres`;
 }
 
 export function parsePostgresDsn(dsn: string): DatabaseConnection {
@@ -101,39 +89,11 @@ export function createNeonConnection(
   config: DeploymentConfig,
   apiToken: pulumi.Input<string>,
 ): DatabaseConnectionInputs {
-  const provider = new neon.Provider("neon", { token: apiToken });
-  const names = managedNeonResourceNames(config.resourceNamespace);
+  const provider = new neon.Provider("neon", { api_key: apiToken });
   const project = new neon.Project(`${config.resourceNamespace}-neon-project`, {
-    name: names.projectName,
-    orgId: config.neonOrgId,
-    regionId: config.neonRegionId,
+    name: managedNeonProjectName(config.resourceNamespace),
+    org_id: config.neonOrgId,
   }, { provider });
-  const branch = new neon.Branch(`${config.resourceNamespace}-neon-branch`, {
-    projectId: project.id,
-    name: names.branchName,
-  }, { provider, dependsOn: project });
-  const role = new neon.Role(`${config.resourceNamespace}-neon-role`, {
-    projectId: project.id,
-    branchId: branch.id,
-    name: names.roleName,
-  }, { provider, dependsOn: branch });
-  const database = new neon.Database(`${config.resourceNamespace}-neon-database`, {
-    projectId: project.id,
-    branchId: branch.id,
-    ownerName: role.name,
-    name: names.databaseName,
-  }, { provider, dependsOn: role });
-  const endpoint = new neon.Endpoint(`${config.resourceNamespace}-neon-endpoint`, {
-    projectId: project.id,
-    branchId: branch.id,
-  }, { provider, dependsOn: database });
 
-  return {
-    host: endpoint.host,
-    port: 5432,
-    user: role.name,
-    password: pulumi.secret(role.password),
-    dbname: database.name,
-    sslmode: "require",
-  };
+  return buildDsnDatabaseConnection(pulumi.secret(project.connection_uri));
 }

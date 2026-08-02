@@ -20,7 +20,6 @@ const base = {
   neonPort: 5432,
   neonUser: "neon-user",
   neonDb: "neon-db",
-  neonRegionId: "aws-us-east-1",
   neonHost: "ep.example.neon.tech",
   neonPassword: "neon-secret",
   neonDsn: undefined,
