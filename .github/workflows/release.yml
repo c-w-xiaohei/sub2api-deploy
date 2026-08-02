@@ -90,7 +90,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}
-          path: release/*
+          path: |
+            release/*.tar.gz
+            release/*.sha256
           if-no-files-found: error
 
   release:
@@ -109,7 +111,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" release-assets/* \
+          gh release create "${GITHUB_REF_NAME}" release-assets/*.tar.gz release-assets/*.sha256 \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --generate-notes \
