@@ -91,7 +91,7 @@ jobs:
           test -f "${bundle}/scripts/pulumi-plugins/neon/pulumi-plugin.json"
           neon_module="$(${bundle}/bin/go list -m -json github.com/kislerdm/pulumi-sdk-neon)"
           case "${neon_module}" in
-            *"Dir":"${GITHUB_WORKSPACE}/${bundle}/scripts/pulumi-plugins/neon"*) ;;
+            *scripts/pulumi-plugins/neon*) ;;
             *) printf 'Neon metadata was not resolved from the assembled bundle\n' >&2; exit 1 ;;
           esac
           tar -C release -czf "release/${archive}.tar.gz" "${archive}"
