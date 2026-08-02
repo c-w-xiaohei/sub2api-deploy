@@ -21,24 +21,43 @@ DNS-01 certificates, and Cloudflare Full (strict).
 
 ## Basic setup
 
-Install dependencies and select the Pulumi stack on the VPS. The basic operator
-decisions are the domain, origin IP, explicit zone ID, ACME email, immutable
-application image, the two data modes, and credentials for the selected modes:
+Install dependencies and initialize the Pulumi stack on the VPS:
 
 ```bash
 npm install
+cp Pulumi.production.example.yaml Pulumi.production.yaml
+${EDITOR:-vi} Pulumi.production.yaml
 pulumi stack init production
-pulumi config set domain sub2api.example.com
-pulumi config set originIp 203.0.113.10
-pulumi config set cloudflareZoneId replace-with-zone-id
-pulumi config set acmeEmail ops@example.com
-pulumi config set appProbePath /api/ready
-pulumi config set sub2apiImage 'weishaw/sub2api@sha256:IMMUTABLE_DIGEST'
-pulumi config set postgresMode docker
-pulumi config set redisMode docker
+```
+
+Edit the ordinary values directly in `Pulumi.production.yaml`: the domain,
+origin IP, explicit Cloudflare zone ID, ACME email, immutable application image,
+application probe path, and PostgreSQL/Redis modes. The example file defaults
+to local Docker PostgreSQL and Redis. `Pulumi.production.yaml` is ignored by
+Git; only `Pulumi.production.example.yaml` is committed.
+
+Do not type plaintext credentials into the YAML file. Let Pulumi encrypt and
+write each secret required by the selected modes. For the default
+`docker/docker` configuration:
+
+```bash
 pulumi config set --secret cloudflareApiToken '...'
 pulumi config set --secret postgresPassword '...'
 pulumi config set --secret redisPassword '...'
+```
+
+Optional Sub2API bootstrap credentials are set the same way:
+
+```bash
+pulumi config set --secret adminPassword '...'
+pulumi config set --secret jwtSecret '...'
+pulumi config set --secret totpEncryptionKey '...'
+```
+
+Review the deployment plan before applying it:
+
+```bash
+pulumi preview
 pulumi up
 ```
 
@@ -65,10 +84,11 @@ check. `neonResourceMode` and `upstashResourceMode` retain their `existing` or
 `create` behavior. These advanced inputs do not change the basic `pulumi up`
 workflow.
 
-Every password or token represented by `...` must be set with `pulumi config
-set --secret`. The Pulumi program passes secrets only to the local command,
-writes `runtime/runtime.env` atomically with mode `0600`, sets Command logging
-to `none`, and exports no credentials as stack outputs.
+Every password, token, or API key must be written with `pulumi config set
+--secret`; ordinary values are edited directly in `Pulumi.production.yaml`.
+The Pulumi program passes secrets only to the local command, writes
+`runtime/runtime.env` atomically with mode `0600`, sets Command logging to
+`none`, and exports no credentials as stack outputs.
 
 `cloudflareZoneId` is explicit and is never inferred from hostname labels.
 `acmeEmail` is a non-secret Pulumi config value. `appProbePath` must be a real
@@ -77,18 +97,31 @@ check. The direct-origin probe temporarily resolves the origin IP; the normal
 post-switch probe follows public DNS without `--resolve`.
 
 The four independent data combinations (`docker/docker`, `neon/docker`,
-`docker/upstash`, and `neon/upstash`) use the same `pulumi up` command:
+`docker/upstash`, and `neon/upstash`) all use the same `pulumi preview` and
+`pulumi up` workflow. Select them by editing ordinary values in
+`Pulumi.production.yaml`, then set only the corresponding credentials with
+`pulumi config set --secret`:
+
+| Service mode | Ordinary YAML values | Secret config |
+| --- | --- | --- |
+| PostgreSQL `docker` | `postgresMode: docker` | `postgresPassword` |
+| Neon `existing` | `postgresMode: neon`, `neonResourceMode: existing`, `neonHost` and connection fields | `neonPassword` |
+| Neon `create` | `postgresMode: neon`, `neonResourceMode: create`, `neonProjectId`, `neonBranchId` | `neonApiToken` |
+| Redis `docker` | `redisMode: docker` | `redisPassword` |
+| Upstash `existing` | `redisMode: upstash`, `upstashResourceMode: existing`, `upstashHost`, `upstashPort` and connection fields | `upstashPassword` |
+| Upstash `create` | `redisMode: upstash`, `upstashResourceMode: create`, `upstashEmail`, `upstashDatabaseName`, `upstashRegion` | `upstashApiKey` |
+
+For example, when connecting to an existing Neon database, edit the PostgreSQL
+fields in the YAML file and run only:
 
 ```bash
-pulumi config set postgresMode docker && pulumi config set redisMode docker && pulumi up
-pulumi config set postgresMode neon && pulumi config set neonHost ep.example.neon.tech && pulumi config set --secret neonPassword '...' && pulumi config set redisMode docker && pulumi up
-pulumi config set postgresMode docker && pulumi config set redisMode upstash && pulumi config set upstashHost example.upstash.io && pulumi config set upstashPort 6380 && pulumi config set --secret upstashPassword '...' && pulumi up
-pulumi config set postgresMode neon && pulumi config set neonHost ep.example.neon.tech && pulumi config set --secret neonPassword '...' && pulumi config set redisMode upstash && pulumi config set upstashHost example.upstash.io && pulumi config set upstashPort 6380 && pulumi config set --secret upstashPassword '...' && pulumi up
+pulumi config set --secret neonPassword '...'
 ```
 
-Neon and Upstash are existing-resource connection modes. This project does not
-silently create or destroy production data resources. The application receives
-the upstream split variables (`DATABASE_*` and `REDIS_*`), not a URL. Neon uses
+`existing` connects to a data service without managing its lifecycle. `create`
+allows Pulumi to manage the selected Neon or Upstash resource and therefore
+requires its provider API credential. The application receives the upstream
+split variables (`DATABASE_*` and `REDIS_*`), not a URL. Neon uses
 `DATABASE_SSLMODE=require`; Upstash uses Redis TLS.
 
 The first deployment starts blue with `AUTO_SETUP=true`, probes it, then keeps
