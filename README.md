@@ -96,6 +96,30 @@ application path and cannot be `/health`, which is only the upstream liveness
 check. The direct-origin probe temporarily resolves the origin IP; the normal
 post-switch probe follows public DNS without `--resolve`.
 
+### Sub2API native configuration
+
+This project intentionally does not mirror every Sub2API environment variable
+into Pulumi. The pinned upstream Compose file remains the source of truth for
+Sub2API configuration semantics and defaults. If a native setting is not
+explicitly exposed by this project, Sub2API receives the upstream default.
+
+Do not edit `runtime/runtime.env` by hand. Pulumi generates that file during
+infrastructure reconciliation and may replace it. When a deployment needs a
+native setting that is not exposed yet, add it explicitly rather than creating
+a second generic configuration system:
+
+1. Add an optional input and default to `src/config.ts`.
+2. Add the value to `runtimePayload` in `src/index.ts` using the upstream
+   environment variable name, such as `TZ` or `GATEWAY_*`.
+3. Add the ordinary value or `pulumi config set --secret` instruction to
+   `Pulumi.production.example.yaml` and this README.
+4. Add a focused behavior test, then run the offline verification commands.
+
+Keep deployment-owned values such as database and Redis connection settings,
+`AUTO_SETUP`, slot variables, and image selection under this project. Do not
+edit `compose/upstream.yml` for a per-deployment setting; it is pinned to an
+upstream commit and should only change when the upstream baseline is upgraded.
+
 The four independent data combinations (`docker/docker`, `neon/docker`,
 `docker/upstash`, and `neon/upstash`) all use the same `pulumi preview` and
 `pulumi up` workflow. Select them by editing ordinary values in
