@@ -85,6 +85,15 @@ jobs:
           install -m 0755 scripts/pulumi-cli-wrapper.sh "${bundle}/bin/pulumi"
           cp Pulumi.yaml Pulumi.production.example.yaml README.md package.json package-lock.json go.mod go.sum "${bundle}/"
           cp -R compose infra scripts src traefik "${bundle}/"
+          test -x "${bundle}/bin/go"
+          test -x "${bundle}/bin/pulumi"
+          test -x "${bundle}/bin/pulumi-program"
+          test -f "${bundle}/scripts/pulumi-plugins/neon/pulumi-plugin.json"
+          neon_module="$(${bundle}/bin/go list -m -json github.com/kislerdm/pulumi-sdk-neon)"
+          case "${neon_module}" in
+            *"Dir":"${GITHUB_WORKSPACE}/${bundle}/scripts/pulumi-plugins/neon"*) ;;
+            *) printf 'Neon metadata was not resolved from the assembled bundle\n' >&2; exit 1 ;;
+          esac
           tar -C release -czf "release/${archive}.tar.gz" "${archive}"
           (cd release && sha256sum "${archive}.tar.gz" > "${archive}.tar.gz.sha256")
 

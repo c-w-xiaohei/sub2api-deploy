@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 
 	neon "github.com/kislerdm/pulumi-sdk-neon"
-	neonresource "github.com/kislerdm/pulumi-sdk-neon/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -27,6 +27,31 @@ type DatabaseConnectionInputs struct {
 	Password pulumi.StringInput
 	DBName   pulumi.StringInput
 	SSLMode  string
+}
+
+// neonProject is registered directly because the alpha provider schema uses
+// neon:provider:Project while the generated SDK wrapper uses the stale
+// neon:resource:Project token.
+type neonProject struct {
+	pulumi.CustomResourceState
+	Connection_uri pulumi.StringOutput `pulumi:"connection_uri"`
+}
+
+type neonProjectArgs struct {
+	Name   pulumi.StringPtrInput `pulumi:"name"`
+	Org_id pulumi.StringPtrInput `pulumi:"org_id"`
+}
+
+func (neonProjectArgs) ElementType() reflect.Type {
+	return reflect.TypeOf((*neonProjectArgs)(nil)).Elem()
+}
+
+func registerNeonProject(ctx *pulumi.Context, name string, args *neonProjectArgs, opts ...pulumi.ResourceOption) (*neonProject, error) {
+	var project neonProject
+	if err := ctx.RegisterResource("neon:provider:Project", name, args, &project, opts...); err != nil {
+		return nil, err
+	}
+	return &project, nil
 }
 
 func ManagedNeonProjectName(namespace string) string {
@@ -119,13 +144,13 @@ func CreateNeonConnection(ctx *pulumi.Context, config DeploymentConfig, apiToken
 	if err != nil {
 		return DatabaseConnectionInputs{}, err
 	}
-	args := &neonresource.ProjectArgs{
+	args := &neonProjectArgs{
 		Name: pulumi.StringPtr(ManagedNeonProjectName(config.ResourceNamespace)),
 	}
 	if config.NeonOrgID != "" {
 		args.Org_id = pulumi.StringPtr(config.NeonOrgID)
 	}
-	project, err := neonresource.NewProject(ctx, config.ResourceNamespace+"-neon-project", args, pulumi.Provider(provider), pulumi.Version("0.0.1-alpha.1"))
+	project, err := registerNeonProject(ctx, config.ResourceNamespace+"-neon-project", args, pulumi.Provider(provider), pulumi.Version("0.0.1-alpha.1"))
 	if err != nil {
 		return DatabaseConnectionInputs{}, err
 	}
