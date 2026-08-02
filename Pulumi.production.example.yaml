@@ -1,3 +1,5 @@
+# The Pulumi program uses the prebuilt Go binary declared by Pulumi.yaml.
+# Run the offline checks and pulumi preview before applying a real stack.
 config:
   sub2api-vps-deploy:resourceNamespace: sub2api
   sub2api-vps-deploy:domain: sub2api.example.com
