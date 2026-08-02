@@ -11,6 +11,7 @@ Kubernetes, weighted canaries, or a hosted deployment bridge.
 - Docker Engine
 - Docker Compose v2
 - Pulumi CLI
+- sing-box listening on the host at `8443`, not public `443`
 - A release bundle containing the matching Linux `pulumi-program` binary and
   bundled Pulumi runtime helpers
 - Node.js or Bun for the shell-invoked `tsx` runtime helpers
@@ -22,13 +23,27 @@ deployment adds only the slot, edge, data-mode, and local runtime overrides.
 The default edge path is proxied Cloudflare DNS to the public origin, Traefik
 DNS-01 certificates, and Cloudflare Full (strict).
 
+Traefik owns the public host ports `80` and `443`. HTTPS requests for the
+configured Sub2API domain, such as `code2.contextid.cn`, terminate at Traefik
+and route to the active blue/green slot. TLS connections with SNI
+`www.cloudflare.com` are passed through unchanged to sing-box at
+`host.docker.internal:8443`.
+
+Before the first `pulumi up`, migrate the existing sing-box listener from
+`0.0.0.0:443` to the host's `8443` port and verify it is listening there. This
+is an explicit host operation outside Pulumi; the deployment does not edit,
+stop, or restart sing-box. Do not start Traefik while sing-box still owns
+`0.0.0.0:443`, because Docker cannot publish Traefik's `443:443` binding until
+that port is free. After migration, Traefik becomes the sole public listener on
+443 and forwards matching Reality SNI traffic to sing-box on 8443.
+
 ## Basic setup
 
 Download the release bundle for the VPS architecture, then install the
 TypeScript runtime helpers and initialize the Pulumi stack:
 
 ```bash
-VERSION=v0.1.3
+VERSION=v0.1.7
 ARCH=amd64 # use arm64 for an ARM VPS
 gh release download "$VERSION" \
   --pattern "sub2api-vps-deploy-${VERSION}-linux-${ARCH}.tar.gz" \
@@ -102,8 +117,8 @@ Go program and runtime helpers, builds Linux `amd64` and `arm64` binaries, and
 publishes architecture-specific deployment bundles plus SHA-256 files:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.7
+git push origin v0.1.7
 ```
 
 The release workflow never runs `pulumi preview` or `pulumi up`; it only builds

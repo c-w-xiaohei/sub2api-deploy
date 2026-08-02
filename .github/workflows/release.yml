@@ -89,6 +89,16 @@ jobs:
           test -x "${bundle}/bin/pulumi"
           test -x "${bundle}/bin/pulumi-program"
           test -f "${bundle}/scripts/pulumi-plugins/neon/pulumi-plugin.json"
+          edge_config="$(<"${bundle}/compose/edge.yml")"
+          active_route="$(<"${bundle}/traefik/dynamic/active.yml")"
+          case "${edge_config}" in
+            *host.docker.internal:host-gateway*) ;;
+            *) printf 'Host gateway mapping missing from assembled bundle\n' >&2; exit 1 ;;
+          esac
+          case "${active_route}" in
+            *'HostSNI(`www.cloudflare.com`)'*host.docker.internal:8443*) ;;
+            *) printf 'sing-box TCP passthrough missing from assembled bundle\n' >&2; exit 1 ;;
+          esac
           neon_module="$(${bundle}/bin/go list -m -json github.com/kislerdm/pulumi-sdk-neon)"
           case "${neon_module}" in
             *scripts/pulumi-plugins/neon*) ;;
