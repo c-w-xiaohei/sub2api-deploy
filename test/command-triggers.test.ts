@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildInfraTriggers, buildReleaseTriggers } from "../src/command-triggers.js";
 
 const infra = () => buildInfraTriggers({
+  resourceNamespace: "sub2api",
   domain: "sub2api.example.com",
   originIp: "203.0.113.10",
   postgresMode: "docker",

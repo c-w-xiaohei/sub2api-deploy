@@ -20,6 +20,10 @@ export interface RedisConnectionInputs {
   enableTls: pulumi.Input<boolean>;
 }
 
+export function managedUpstashDatabaseName(namespace: string, explicitName?: string): string {
+  return explicitName?.trim() || `${namespace}-redis`;
+}
+
 export function buildRedisConnection(config: DeploymentConfig): RedisConnection {
   if (config.redisMode === "docker") {
     return {
@@ -49,8 +53,8 @@ export function createUpstashConnection(
     apiKey,
     email: config.upstashEmail!,
   });
-  const database = new upstash.RedisDatabase("sub2api-upstash-redis", {
-    databaseName: config.upstashDatabaseName!,
+  const database = new upstash.RedisDatabase(`${config.resourceNamespace}-upstash-redis`, {
+    databaseName: managedUpstashDatabaseName(config.resourceNamespace, config.upstashDatabaseName),
     region: config.upstashRegion!,
     tls: true,
   }, { provider });

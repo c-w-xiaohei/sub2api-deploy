@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { buildDatabaseConnection } from "../src/database.js";
-import { buildRedisConnection } from "../src/redis.js";
+import { buildRedisConnection, managedUpstashDatabaseName } from "../src/redis.js";
 import type { DeploymentConfig } from "../src/config.js";
 
 const base = {
+  resourceNamespace: "sub2api",
   domain: "sub2api.example.com",
   originIp: "203.0.113.10",
   postgresMode: "docker" as const,
@@ -19,8 +20,10 @@ const base = {
   neonPort: 5432,
   neonUser: "neon-user",
   neonDb: "neon-db",
+  neonRegionId: "aws-us-east-1",
   neonHost: "ep.example.neon.tech",
   neonPassword: "neon-secret",
+  neonDsn: undefined,
   redisPort: 6379,
   redisUsername: "",
   redisPassword: "redis-secret",
@@ -28,6 +31,8 @@ const base = {
   upstashUsername: "default",
   upstashHost: "upstash.example.com",
   upstashPassword: "upstash-secret",
+  upstashDatabaseName: "tenant-a-redis",
+  upstashRegion: "us-east-1",
   adminEmail: "admin@example.com",
   appProbePath: "/api/ready",
   drainSeconds: 10,
@@ -36,6 +41,11 @@ const base = {
 } satisfies DeploymentConfig;
 
 describe("runtime connection factories", () => {
+  it("derives managed Upstash names without overriding explicit names", () => {
+    expect(managedUpstashDatabaseName("tenant-a")).toBe("tenant-a-redis");
+    expect(managedUpstashDatabaseName("tenant-a", "shared-cache")).toBe("shared-cache");
+  });
+
   it.each([
     ["docker", "docker", "postgres", 5432, "redis", 6379, "disable", false],
     ["neon", "docker", "ep.example.neon.tech", 5432, "redis", 6379, "require", false],

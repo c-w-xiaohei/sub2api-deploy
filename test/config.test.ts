@@ -61,10 +61,10 @@ describe("validateDeploymentConfig", () => {
       neonPassword: undefined,
       neonResourceMode: "create",
       neonApiToken: "neon-api-token",
-      neonProjectId: "project-id",
-      neonBranchId: "branch-id",
+      neonRegionId: "aws-us-east-1",
     });
     expect(result.neonResourceMode).toBe("create");
+    expect(result.resourceNamespace).toBe("sub2api");
   });
 
   it("allows Upstash create mode with provider inputs instead of existing connection fields", () => {
@@ -92,5 +92,39 @@ describe("validateDeploymentConfig", () => {
   it("requires a zone id and ACME email", () => {
     expect(() => validateDeploymentConfig({ ...valid, cloudflareZoneId: undefined })).toThrow(/cloudflareZoneId is required/);
     expect(() => validateDeploymentConfig({ ...valid, acmeEmail: undefined })).toThrow(/acmeEmail is required/);
+  });
+
+  it("rejects namespaces that cannot safely name cloud resources", () => {
+    expect(() => validateDeploymentConfig({ ...valid, resourceNamespace: "Sub2API prod" })).toThrow(
+      /resourceNamespace must contain only lowercase letters, numbers, and hyphens/,
+    );
+  });
+
+  it("accepts an external Neon DSN without project or branch IDs", () => {
+    const result = validateDeploymentConfig({
+      ...valid,
+      postgresMode: "neon",
+      postgresPassword: undefined,
+      neonHost: undefined,
+      neonPassword: undefined,
+      neonDsn: "postgresql://sub2api:secret@ep.example.neon.tech/sub2api?sslmode=require",
+    });
+    expect(result.neonDsn).toContain("postgresql://");
+  });
+
+  it("derives managed Upstash names from the namespace", () => {
+    const result = validateDeploymentConfig({
+      ...valid,
+      resourceNamespace: "tenant-a",
+      redisMode: "upstash",
+      redisPassword: undefined,
+      upstashHost: undefined,
+      upstashPassword: undefined,
+      upstashResourceMode: "create",
+      upstashApiKey: "upstash-api-key",
+      upstashEmail: "ops@example.com",
+    });
+    expect(result.upstashDatabaseName).toBe("tenant-a-redis");
+    expect(result.upstashRegion).toBe("us-east-1");
   });
 });

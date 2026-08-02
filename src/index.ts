@@ -3,7 +3,7 @@ import * as pulumi from "@pulumi/pulumi";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { buildDatabaseConnection, createNeonConnection, type DatabaseConnectionInputs } from "./database.js";
+import { buildDatabaseConnection, buildDsnDatabaseConnection, createNeonConnection, type DatabaseConnectionInputs } from "./database.js";
 import { buildRedisConnection, createUpstashConnection, type RedisConnectionInputs } from "./redis.js";
 import { createDomainResources, createStrictSslSetting } from "./cloudflare.js";
 import { loadDeploymentConfig } from "./config.js";
@@ -19,12 +19,14 @@ const secretValue = (key: string, required: boolean): pulumi.Input<string> => {
 };
 const postgresPassword = config.postgresMode === "docker"
   ? secretValue("postgresPassword", true)
-  : config.neonResourceMode === "create" ? "" : secretValue("neonPassword", true);
+  : config.neonResourceMode === "create" || config.neonDsn ? "" : secretValue("neonPassword", true);
 const redisPassword = config.redisMode === "docker"
   ? secretValue("redisPassword", true)
   : config.upstashResourceMode === "create" ? "" : secretValue("upstashPassword", true);
 const databaseInputs: DatabaseConnectionInputs = config.postgresMode === "neon" && config.neonResourceMode === "create"
   ? createNeonConnection(config, pulumiConfig.requireSecret("neonApiToken"))
+  : config.postgresMode === "neon" && config.neonDsn
+    ? buildDsnDatabaseConnection(pulumiConfig.requireSecret("neonDsn"))
   : buildDatabaseConnection(config);
 const redisInputs: RedisConnectionInputs = config.redisMode === "upstash" && config.upstashResourceMode === "create"
   ? createUpstashConnection(config, pulumiConfig.requireSecret("upstashApiKey"))
@@ -36,7 +38,7 @@ const runtimePayload = pulumi.secret(pulumi.all({
   DATABASE_HOST: databaseInputs.host,
   DATABASE_PORT: databaseInputs.port,
   DATABASE_USER: databaseInputs.user,
-  DATABASE_PASSWORD: config.postgresMode === "neon" && config.neonResourceMode === "create" ? databaseInputs.password : postgresPassword,
+  DATABASE_PASSWORD: config.postgresMode === "neon" && (config.neonResourceMode === "create" || config.neonDsn) ? databaseInputs.password : postgresPassword,
   POSTGRES_PASSWORD: config.postgresMode === "docker" ? postgresPassword : "postgres-profile-disabled",
   POSTGRES_USER: databaseInputs.user,
   POSTGRES_DB: databaseInputs.dbname,
@@ -93,6 +95,7 @@ const domain = createDomainResources({
 
 // Infra reconciliation owns runtime.env, local data profiles, Traefik, and first blue.
 const infraTriggers = buildInfraTriggers({
+  resourceNamespace: config.resourceNamespace,
   domain: config.domain,
   originIp: config.originIp,
   postgresMode: config.postgresMode,

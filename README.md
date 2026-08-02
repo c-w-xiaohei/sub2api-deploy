@@ -30,7 +30,8 @@ ${EDITOR:-vi} Pulumi.production.yaml
 pulumi stack init production
 ```
 
-Edit the ordinary values directly in `Pulumi.production.yaml`: the domain,
+Edit the ordinary values directly in `Pulumi.production.yaml`: the resource
+namespace, domain,
 origin IP, explicit Cloudflare zone ID, ACME email, immutable application image,
 application probe path, and PostgreSQL/Redis modes. The example file defaults
 to local Docker PostgreSQL and Redis. `Pulumi.production.yaml` is ignored by
@@ -96,6 +97,13 @@ application path and cannot be `/health`, which is only the upstream liveness
 check. The direct-origin probe temporarily resolves the origin IP; the normal
 post-switch probe follows public DNS without `--resolve`.
 
+`resourceNamespace` is the naming boundary for one managed Neon/Upstash
+resource set. Use a different lowercase namespace, such as `customer-a`, for a
+separate stack or environment. It changes cloud resource names; it is not a
+Sub2API tenant, schema, or runtime database setting. Treat it as immutable after
+managed resources are created; changing it creates a different resource set,
+not a data rename.
+
 ### Sub2API native configuration
 
 This project intentionally does not mirror every Sub2API environment variable
@@ -129,30 +137,54 @@ The four independent data combinations (`docker/docker`, `neon/docker`,
 | Service mode | Ordinary YAML values | Secret config |
 | --- | --- | --- |
 | PostgreSQL `docker` | `postgresMode: docker` | `postgresPassword` |
-| Neon `existing` | `postgresMode: neon`, `neonResourceMode: existing`, `neonHost` and connection fields | `neonPassword` |
-| Neon `create` | `postgresMode: neon`, `neonResourceMode: create`, `neonProjectId`, `neonBranchId` | `neonApiToken` |
+| Neon `existing` | `postgresMode: neon`, `neonResourceMode: existing`, optional split connection fields | `neonDsn` or `neonPassword` |
+| Neon `create` | `postgresMode: neon`, `neonResourceMode: create`, optional `neonOrgId` and `neonRegionId` | `neonApiToken` |
 | Redis `docker` | `redisMode: docker` | `redisPassword` |
 | Upstash `existing` | `redisMode: upstash`, `upstashResourceMode: existing`, `upstashHost`, `upstashPort` and connection fields | `upstashPassword` |
-| Upstash `create` | `redisMode: upstash`, `upstashResourceMode: create`, `upstashEmail`, `upstashDatabaseName`, `upstashRegion` | `upstashApiKey` |
+| Upstash `create` | `redisMode: upstash`, `upstashResourceMode: create`, `upstashEmail` and optional `upstashDatabaseName`/`upstashRegion` | `upstashApiKey` |
 
-For example, when connecting to an existing Neon database, edit the PostgreSQL
-fields in the YAML file and run only:
+For example, when connecting to an existing Neon database, keep the mode in
+the YAML file and provide the DSN as a Pulumi secret:
 
 ```bash
-pulumi config set --secret neonPassword '...'
+pulumi config set --secret neonDsn 'postgresql://user:password@host:5432/database?sslmode=require'
 ```
 
+For a fully managed Neon plus Upstash deployment, no Project, Branch, Redis
+database, or DSN needs to be created beforehand. Set the modes and provider
+credentials; the namespace and default regions supply the resource names:
+
+```bash
+pulumi config set resourceNamespace tenant-a
+pulumi config set postgresMode neon
+pulumi config set neonResourceMode create
+pulumi config set --secret neonApiToken '...'
+pulumi config set redisMode upstash
+pulumi config set upstashResourceMode create
+pulumi config set upstashEmail ops@example.com
+pulumi config set --secret upstashApiKey '...'
+pulumi up
+```
+
+Managed Neon defaults to `aws-us-east-1`; managed Upstash defaults to
+`us-east-1`. Set `neonRegionId`, `neonOrgId`, or `upstashRegion` when those
+defaults are not appropriate.
+
 `existing` connects to a data service without managing its lifecycle. `create`
-allows Pulumi to manage the selected Neon or Upstash resource and therefore
-requires its provider API credential. The application receives the upstream
-split variables (`DATABASE_*` and `REDIS_*`), not a URL. Neon uses
+allows Pulumi to manage the selected Neon or Upstash resource. Managed Neon
+creates a namespaced Project, Branch, Role, Database, and Endpoint from
+`neonApiToken`; it does not require manually created Project or Branch IDs.
+Managed Upstash creates a namespaced Redis database from `upstashApiKey` and
+`upstashEmail`. The application receives the upstream split variables
+(`DATABASE_*` and `REDIS_*`), not a URL. Neon uses
 `DATABASE_SSLMODE=require`; Upstash uses Redis TLS.
 
 The first deployment starts blue with `AUTO_SETUP=true`, probes it, then keeps
-the runtime configuration at `AUTO_SETUP=false`. The upstream setup may need a
-PostgreSQL maintenance connection and `CREATE DATABASE`; a Neon role without
-those permissions must be prepared separately or setup must be completed by
-the upstream supported path.
+the runtime configuration at `AUTO_SETUP=false`. An external PostgreSQL
+connection may need a maintenance connection and `CREATE DATABASE`; a role
+without those permissions must be prepared separately or setup must be
+completed by the upstream supported path. Managed Neon creates its database
+and role before the application starts.
 
 ## Image Updates And Rollback
 

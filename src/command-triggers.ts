@@ -1,4 +1,5 @@
 export interface InfraTriggerInputs {
+  resourceNamespace: string;
   domain: string;
   originIp: string;
   postgresMode: string;
@@ -14,6 +15,7 @@ export interface InfraTriggerInputs {
 export function buildInfraTriggers(input: InfraTriggerInputs): string[] {
   return [
     "infra-reconcile-v1",
+    input.resourceNamespace,
     input.domain,
     input.originIp,
     input.postgresMode,

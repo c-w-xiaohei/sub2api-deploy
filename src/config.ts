@@ -5,6 +5,7 @@ export type RedisMode = "docker" | "upstash";
 export type ResourceMode = "existing" | "create";
 
 export interface DeploymentInput {
+  resourceNamespace?: string;
   domain: string;
   originIp: string;
   postgresMode: PostgresMode;
@@ -20,9 +21,10 @@ export interface DeploymentInput {
   postgresPassword?: string;
   postgresDb?: string;
   neonHost?: string;
+  neonDsn?: string;
   neonApiToken?: string;
-  neonProjectId?: string;
-  neonBranchId?: string;
+  neonOrgId?: string;
+  neonRegionId?: string;
   neonPort?: number;
   neonUser?: string;
   neonPassword?: string;
@@ -48,17 +50,21 @@ export interface DeploymentInput {
 }
 
 export interface DeploymentConfig extends DeploymentInput {
+  resourceNamespace: string;
   postgresMode: PostgresMode;
   redisMode: RedisMode;
   postgresUser: string;
   postgresDb: string;
   neonPort: number;
+  neonRegionId: string;
   neonUser: string;
   neonDb: string;
   redisPort: number;
   redisUsername: string;
   upstashPort: number;
   upstashUsername: string;
+  upstashDatabaseName: string;
+  upstashRegion: string;
   adminEmail: string;
   appProbePath: string;
   drainSeconds: number;
@@ -89,8 +95,13 @@ function resourceMode(value: unknown, name: string): ResourceMode {
 export function validateDeploymentConfig(input: DeploymentInput): DeploymentConfig {
   const postgresMode = selectedMode(input.postgresMode, "postgresMode") as PostgresMode;
   const redisMode = selectedMode(input.redisMode, "redisMode") as RedisMode;
+  const resourceNamespace = input.resourceNamespace?.trim() || "sub2api";
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(resourceNamespace)) {
+    throw new Error("resourceNamespace must contain only lowercase letters, numbers, and hyphens and be 1-32 characters");
+  }
   const config: DeploymentConfig = {
     ...input,
+    resourceNamespace,
     domain: required(input.domain, "domain"),
     originIp: required(input.originIp, "originIp"),
     sub2apiImage: required(input.sub2apiImage, "sub2apiImage"),
@@ -102,12 +113,15 @@ export function validateDeploymentConfig(input: DeploymentInput): DeploymentConf
     postgresUser: input.postgresUser?.trim() || "sub2api",
     postgresDb: input.postgresDb?.trim() || "sub2api",
     neonPort: input.neonPort ?? 5432,
+    neonRegionId: input.neonRegionId?.trim() || "aws-us-east-1",
     neonUser: input.neonUser?.trim() || "sub2api",
     neonDb: input.neonDb?.trim() || "sub2api",
     redisPort: input.redisPort ?? 6379,
     redisUsername: input.redisUsername ?? "",
     upstashPort: input.upstashPort ?? 6379,
     upstashUsername: input.upstashUsername ?? "default",
+    upstashDatabaseName: input.upstashDatabaseName?.trim() || `${resourceNamespace}-redis`,
+    upstashRegion: input.upstashRegion?.trim() || "us-east-1",
     adminEmail: input.adminEmail?.trim() || "admin@sub2api.local",
     appProbePath: input.appProbePath?.trim() || "",
     drainSeconds: input.drainSeconds ?? 10,
@@ -129,9 +143,7 @@ export function validateDeploymentConfig(input: DeploymentInput): DeploymentConf
   if (postgresMode === "neon") {
     if (config.neonResourceMode === "create") {
       required(input.neonApiToken, "neonApiToken");
-      required(input.neonProjectId, "neonProjectId");
-      required(input.neonBranchId, "neonBranchId");
-    } else {
+    } else if (!input.neonDsn) {
       required(input.neonHost, "neonHost");
       required(input.neonPassword, "neonPassword");
     }
@@ -142,8 +154,6 @@ export function validateDeploymentConfig(input: DeploymentInput): DeploymentConf
     if (config.upstashResourceMode === "create") {
       required(input.upstashApiKey, "upstashApiKey");
       required(input.upstashEmail, "upstashEmail");
-      required(input.upstashDatabaseName, "upstashDatabaseName");
-      required(input.upstashRegion, "upstashRegion");
     } else {
       required(input.upstashHost, "upstashHost");
       required(input.upstashPassword, "upstashPassword");
@@ -161,6 +171,7 @@ export function loadDeploymentConfig(): DeploymentConfig {
     config.getSecret(key) ? "__configured_secret__" : undefined;
 
   return validateDeploymentConfig({
+    resourceNamespace: get("resourceNamespace"),
     domain: config.require("domain"),
     originIp: config.require("originIp"),
     postgresMode: (get("postgresMode") ?? "docker") as PostgresMode,
@@ -176,9 +187,10 @@ export function loadDeploymentConfig(): DeploymentConfig {
     postgresPassword: configuredSecret("postgresPassword"),
     postgresDb: get("postgresDb"),
     neonHost: get("neonHost"),
+    neonDsn: configuredSecret("neonDsn"),
     neonApiToken: configuredSecret("neonApiToken"),
-    neonProjectId: get("neonProjectId"),
-    neonBranchId: get("neonBranchId"),
+    neonOrgId: get("neonOrgId"),
+    neonRegionId: get("neonRegionId"),
     neonPort: get("neonPort") ? Number(get("neonPort")) : undefined,
     neonUser: get("neonUser"),
     neonPassword: configuredSecret("neonPassword"),

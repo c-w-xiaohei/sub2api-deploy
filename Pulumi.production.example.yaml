@@ -1,4 +1,5 @@
 config:
+  sub2api-vps-deploy:resourceNamespace: sub2api
   sub2api-vps-deploy:domain: sub2api.example.com
   sub2api-vps-deploy:originIp: 203.0.113.10
   sub2api-vps-deploy:postgresMode: docker
@@ -11,6 +12,15 @@ config:
   sub2api-vps-deploy:appProbePath: /api/ready
   sub2api-vps-deploy:neonResourceMode: existing
   sub2api-vps-deploy:upstashResourceMode: existing
-  # Use `pulumi config set --secret` for every value below.
+  # Managed Neon creates a Project, Branch, Role, Database, and Endpoint.
+  # It uses resourceNamespace for names and defaults neonRegionId to
+  # aws-us-east-1. Set neonResourceMode to create and provide neonApiToken.
+  # neonOrgId and neonRegionId are optional managed-resource overrides.
+  # Managed Upstash derives upstashDatabaseName from resourceNamespace and
+  # defaults upstashRegion to us-east-1. Set upstashResourceMode to create and
+  # provide upstashApiKey plus upstashEmail.
+  # For an existing external PostgreSQL service, set neonResourceMode to
+  # existing and use `pulumi config set --secret neonDsn 'postgresql://...'`.
+  # All passwords, tokens, and API keys use `pulumi config set --secret`:
   # cloudflareApiToken, postgresPassword, redisPassword, adminPassword,
-  # jwtSecret, totpEncryptionKey, neonApiToken, upstashApiKey
+  # jwtSecret, totpEncryptionKey, neonDsn, neonApiToken, upstashApiKey
