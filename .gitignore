@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.pulumi/
+.env
+.env.*
+!.env.example
+Pulumi.*.yaml
+!Pulumi.production.example.yaml
+runtime/runtime.env
+runtime/*.tmp
+runtime/deploy-state.json
+runtime/bootstrap.marker
+runtime/acme.json
+traefik/generated.yml
+*.log
+tmp/

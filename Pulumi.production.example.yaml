@@ -1,0 +1,16 @@
+config:
+  sub2api-vps-deploy:domain: sub2api.example.com
+  sub2api-vps-deploy:originIp: 203.0.113.10
+  sub2api-vps-deploy:postgresMode: docker
+  sub2api-vps-deploy:redisMode: docker
+  sub2api-vps-deploy:sub2apiImage: weishaw/sub2api@sha256:REPLACE_WITH_IMMUTABLE_DIGEST
+  sub2api-vps-deploy:traefikImage: traefik:v3.3.3
+  sub2api-vps-deploy:cloudflareZoneId: replace-with-zone-id
+  sub2api-vps-deploy:acmeEmail: ops@example.com
+  sub2api-vps-deploy:adminEmail: admin@example.com
+  sub2api-vps-deploy:appProbePath: /api/ready
+  sub2api-vps-deploy:neonResourceMode: existing
+  sub2api-vps-deploy:upstashResourceMode: existing
+  # Use `pulumi config set --secret` for every value below.
+  # cloudflareApiToken, postgresPassword, redisPassword, adminPassword,
+  # jwtSecret, totpEncryptionKey, neonApiToken, upstashApiKey

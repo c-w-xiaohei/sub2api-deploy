@@ -1,0 +1,83 @@
+services:
+  sub2api:
+    profiles: [base-disabled]
+    container_name: !reset null
+    ports: !reset []
+    depends_on: !reset []
+    environment:
+      AUTO_SETUP: ${AUTO_SETUP:-false}
+      DATABASE_HOST: ${DATABASE_HOST:?DATABASE_HOST is required}
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      DATABASE_DBNAME: ${DATABASE_DBNAME:?DATABASE_DBNAME is required}
+      DATABASE_SSLMODE: ${DATABASE_SSLMODE:-disable}
+      REDIS_HOST: ${REDIS_HOST:?REDIS_HOST is required}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_USERNAME: ${REDIS_USERNAME:-}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_ENABLE_TLS: ${REDIS_ENABLE_TLS:-false}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@sub2api.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:-}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      SLOT_DATA_DIR: ${SLOT_DATA_DIR:-blue}
+    networks:
+      - sub2api-network
+
+  sub2api-blue:
+    profiles: !reset [app]
+    extends:
+      service: sub2api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    image: ${SUB2API_IMAGE:?SUB2API_IMAGE is required}
+    container_name: !reset null
+    volumes: !override
+      - ../runtime/data/blue:/app/data
+    environment:
+      SLOT: blue
+
+  sub2api-green:
+    profiles: !reset [app]
+    extends:
+      service: sub2api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    image: ${SUB2API_IMAGE:?SUB2API_IMAGE is required}
+    container_name: !reset null
+    volumes: !override
+      - ../runtime/data/green:/app/data
+    environment:
+      SLOT: green
+
+  postgres:
+    profiles: [postgres]
+    container_name: !reset null
+
+  redis:
+    profiles: [redis]
+    container_name: !reset null

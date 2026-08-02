@@ -1,0 +1,27 @@
+{
+  "name": "sub2api-vps-deploy",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "pulumi:preview": "pulumi preview"
+  },
+  "dependencies": {
+    "@pulumi/cloudflare": "^6.5.0",
+    "@pulumi/command": "^1.0.1",
+    "@pulumi/pulumi": "^3.150.0",
+    "@upstash/pulumi": "^0.5.0",
+    "js-yaml": "^4.1.0",
+    "pulumi-neon": "^0.1.8"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,14 @@
+http:
+  routers:
+    sub2api:
+      rule: "Host(`${DOMAIN}`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      service: sub2api-active
+  services:
+    sub2api-active:
+      loadBalancer:
+        servers:
+          - url: "http://sub2api-${SLOT}:8080"

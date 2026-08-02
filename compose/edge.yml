@@ -1,0 +1,20 @@
+services:
+  traefik:
+    image: ${TRAEFIK_IMAGE:?TRAEFIK_IMAGE is required}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+    command:
+      - --configFile=/etc/traefik/traefik.yml
+    environment:
+      CF_DNS_API_TOKEN: ${CLOUDFLARE_DNS_API_TOKEN:?CLOUDFLARE_DNS_API_TOKEN is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+    volumes:
+      - ../traefik/generated.yml:/etc/traefik/traefik.yml:ro
+      - ../runtime/dynamic:/etc/traefik/dynamic:ro
+      - ../runtime/acme.json:/etc/traefik/acme.json
+    networks:
+      - sub2api-network

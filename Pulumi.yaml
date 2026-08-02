@@ -1,0 +1,3 @@
+name: sub2api-vps-deploy
+runtime: nodejs
+description: Direct Pulumi deployment of Sub2API onto the local VPS.
