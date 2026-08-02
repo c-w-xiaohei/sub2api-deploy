@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -52,6 +52,20 @@ describe("Pulumi release Go compatibility shim", () => {
         Dir: join(root, "scripts", "pulumi-plugins", "neon"),
       }),
     ]));
+  });
+
+  it("keeps the Neon plugin metadata aligned with its provider release", () => {
+    const metadata = JSON.parse(readFileSync(
+      join(root, "scripts", "pulumi-plugins", "neon", "pulumi-plugin.json"),
+      "utf8",
+    )) as { name: string; version: string; server: string };
+
+    expect(metadata).toEqual({
+      resource: true,
+      name: "neon",
+      version: "0.0.1-alpha.1",
+      server: "https://github.com/kislerdm/pulumi-neon/releases/download/v${VERSION}",
+    });
   });
 
   it("delegates to a Pulumi CLI outside the bundle", () => {

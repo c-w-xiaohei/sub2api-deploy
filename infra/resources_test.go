@@ -15,7 +15,7 @@ type graphMocks struct {
 func (m *graphMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
 	m.resources = append(m.resources, args)
 	state := args.Inputs.Copy()
-	if args.TypeToken == "neon:resource:Project" {
+	if args.TypeToken == "neon:provider:Project" {
 		state["connection_uri"] = resource.NewStringProperty("postgresql://user:pass@ep.generated.neon.tech/db?sslmode=require")
 	}
 	if args.TypeToken == "upstash:index/redisDatabase:RedisDatabase" {
@@ -168,7 +168,7 @@ func TestManagedProviderResourcesPreserveLogicalNamesAndTokens(t *testing.T) {
 	for _, args := range mocks.resources {
 		byName[args.Name] = args
 	}
-	if byName["tenant-a-neon-project"].TypeToken != "neon:resource:Project" {
+	if byName["tenant-a-neon-project"].TypeToken != "neon:provider:Project" {
 		t.Fatalf("Neon token = %q", byName["tenant-a-neon-project"].TypeToken)
 	}
 	if byName["neon"].RegisterRPC.GetVersion() != "0.0.1-alpha.1" || byName["tenant-a-neon-project"].RegisterRPC.GetVersion() != "0.0.1-alpha.1" {
@@ -188,7 +188,7 @@ func TestManagedProviderResourcesPreserveLogicalNamesAndTokens(t *testing.T) {
 	}
 	neonResourceCount := 0
 	for _, args := range mocks.resources {
-		if args.TypeToken == "neon:resource:Project" {
+		if args.TypeToken == "neon:provider:Project" {
 			neonResourceCount++
 		}
 	}
