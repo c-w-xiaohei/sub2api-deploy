@@ -19,7 +19,7 @@ func legacyCode2Aliases(layout SiteLayout, oldName string) []pulumi.Alias {
 }
 
 func newSiteCommand(ctx *pulumi.Context, layout SiteLayout, name, oldName, script string, environment pulumi.StringMap, triggers []string, parent pulumi.Resource, dependencies ...pulumi.Resource) (*local.Command, error) {
-	opts := []pulumi.ResourceOption{pulumi.Parent(parent), pulumi.Aliases(legacyCode2Aliases(layout, oldName)...), pulumi.Version("1.2.1"), pulumi.DependsOn(dependencies), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"})}
+	opts := []pulumi.ResourceOption{pulumi.Parent(parent), pulumi.Aliases(legacyCode2Aliases(layout, oldName)), pulumi.Version("1.2.1"), pulumi.DependsOn(dependencies), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"})}
 	return local.NewCommand(ctx, name, &local.CommandArgs{Create: pulumi.String(script), Update: pulumi.String(script), Environment: environment, Logging: local.LoggingNone, Triggers: stringArray(triggers)}, opts...)
 }
 
