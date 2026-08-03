@@ -218,13 +218,14 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 	if !resourceNamespacePattern.MatchString(resourcePrefix) {
 		return SiteSpec{}, fmt.Errorf("%s must contain only lowercase letters, numbers, and hyphens and be 1-32 characters", name("resourcePrefix"))
 	}
+	drainSeconds := defaultInt(site.DrainSeconds, 10)
 
 	return SiteSpec{
 		Domain:         site.Domain,
 		Image:          site.Image,
 		AdminEmail:     site.AdminEmail,
 		AppProbePath:   site.AppProbePath,
-		DrainSeconds:   defaultInt(site.DrainSeconds, 10),
+		DrainSeconds:   &drainSeconds,
 		ResourcePrefix: resourcePrefix,
 		Database: DatabaseSpec{
 			Mode:         databaseMode,

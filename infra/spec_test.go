@@ -113,8 +113,9 @@ func drainSecondsPointer(value int) *int { return &value }
 
 func TestValidateHostSpecPreservesExplicitZeroDrainSeconds(t *testing.T) {
 	spec := validHostSpec()
-	zero := 0
-	spec.Sites["code3"].DrainSeconds = drainSecondsPointer(zero)
+	code3 := spec.Sites["code3"]
+	code3.DrainSeconds = drainSecondsPointer(0)
+	spec.Sites["code3"] = code3
 	resolved, _, err := ValidateHostSpec(spec)
 	if err != nil {
 		t.Fatalf("ValidateHostSpec() error = %v", err)
@@ -133,7 +134,9 @@ func TestValidateHostSpecRejections(t *testing.T) {
 		{
 			name: "duplicate domain",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code3"].Domain = spec.Sites["code2"].Domain
+				code3 := spec.Sites["code3"]
+				code3.Domain = spec.Sites["code2"].Domain
+				spec.Sites["code3"] = code3
 			},
 			message: "must not share domain",
 		},
@@ -150,49 +153,63 @@ func TestValidateHostSpecRejections(t *testing.T) {
 		{
 			name: "invalid probe health",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code2"].AppProbePath = "/health"
+				code2 := spec.Sites["code2"]
+				code2.AppProbePath = "/health"
+				spec.Sites["code2"] = code2
 			},
 			message: "appProbePath must not be /health",
 		},
 		{
 			name: "invalid probe relative",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code2"].AppProbePath = "api/ready"
+				code2 := spec.Sites["code2"]
+				code2.AppProbePath = "api/ready"
+				spec.Sites["code2"] = code2
 			},
 			message: "appProbePath must be an absolute path",
 		},
 		{
 			name: "invalid image",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code2"].Image = "weishaw/sub2api:latest"
+				code2 := spec.Sites["code2"]
+				code2.Image = "weishaw/sub2api:latest"
+				spec.Sites["code2"] = code2
 			},
 			message: "image must contain an immutable @sha256 digest",
 		},
 		{
 			name: "invalid database mode",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code2"].Database.Mode = "mysql"
+				code2 := spec.Sites["code2"]
+				code2.Database.Mode = "mysql"
+				spec.Sites["code2"] = code2
 			},
 			message: "database.mode must be docker or neon",
 		},
 		{
 			name: "invalid redis mode",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code2"].Redis.Mode = "valkey"
+				code2 := spec.Sites["code2"]
+				code2.Redis.Mode = "valkey"
+				spec.Sites["code2"] = code2
 			},
 			message: "redis.mode must be docker or upstash",
 		},
 		{
 			name: "invalid resource mode",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code2"].Database.ResourceMode = "destroy"
+				code2 := spec.Sites["code2"]
+				code2.Database.ResourceMode = "destroy"
+				spec.Sites["code2"] = code2
 			},
 			message: "database.resourceMode must be existing or create",
 		},
 		{
 			name: "duplicate resource prefix",
 			mutate: func(spec *HostSpec) {
-				spec.Sites["code3"].ResourcePrefix = "contextid-us"
+				code3 := spec.Sites["code3"]
+				code3.ResourcePrefix = "contextid-us"
+				spec.Sites["code3"] = code3
 			},
 			message: "must not share resourcePrefix",
 		},
@@ -227,21 +244,27 @@ func TestValidateHostSpecRejections(t *testing.T) {
 		{
 			name: "missing selected-mode database apiToken",
 			mutate: func(spec *HostSpec) {
-				spec.SiteSecrets["code2"].Database.APIToken = ""
+				secrets := spec.SiteSecrets["code2"]
+				secrets.Database.APIToken = ""
+				spec.SiteSecrets["code2"] = secrets
 			},
 			message: "sites.code2.database.apiToken is required",
 		},
 		{
 			name: "missing selected-mode redis apiKey",
 			mutate: func(spec *HostSpec) {
-				spec.SiteSecrets["code2"].Redis.APIKey = ""
+				secrets := spec.SiteSecrets["code2"]
+				secrets.Redis.APIKey = ""
+				spec.SiteSecrets["code2"] = secrets
 			},
 			message: "sites.code2.redis.apiKey is required",
 		},
 		{
 			name: "missing admin password",
 			mutate: func(spec *HostSpec) {
-				spec.SiteSecrets["code2"].AdminPassword = ""
+				secrets := spec.SiteSecrets["code2"]
+				secrets.AdminPassword = ""
+				spec.SiteSecrets["code2"] = secrets
 			},
 			message: "sites.code2.adminPassword is required",
 		},
