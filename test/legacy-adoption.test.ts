@@ -80,7 +80,7 @@ if [[ "$#" -eq 7 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/write
   exit 0
 fi
 if [[ "$#" -eq 5 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/render-runtime-env.ts && "$4" == write ]]; then
-  path="$5"; edge_root="$(dirname "$path")"; payload="$(</dev/stdin)"
+  path="$5"; edge_root="$(dirname "$path")"; payload="$(/bin/cat)"
   expected="{\"TRAEFIK_IMAGE\":\"$TRAEFIK_IMAGE\",\"CLOUDFLARE_DNS_API_TOKEN\":\"$CLOUDFLARE_API_TOKEN\",\"ACME_EMAIL\":\"$ACME_EMAIL\",\"EDGE_RUNTIME_ROOT\":\"$edge_root\"}"
   [[ "$payload" == "$expected" ]] || exit 99
   mkdir -p "$edge_root"; printf 'TRAEFIK_IMAGE="test"\\n' > "$path"; chmod 600 "$path"; fail edge-env; exit 0

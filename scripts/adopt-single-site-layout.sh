@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 umask 077
 
 usage() { printf 'usage: %s --environment ENVIRONMENT --site code2 [--host-state PATH] [--prepare-preview|--apply|--rollback|--retire-journal]\n' "$0" >&2; exit 2; }
@@ -56,7 +56,7 @@ restore() {
   [[ "${j[edge_env_intent]}" == true && -f "$edge_env" ]] && rm -f "$edge_env"; [[ "${j[edge_static_intent]}" == true && -f "$edge_static" ]] && rm -f "$edge_static"; [[ "${j[edge_singbox_intent]}" == true && -f "$edge_singbox" ]] && rm -f "$edge_singbox"; [[ "${j[acme_intent]}" == true && "${j[acme_destination_preexisting]}" == false && -f "$edge_acme" ]] && rm -f "$edge_acme"; [[ "${j[edge_dynamic_dir_created]}" == true ]] && rmdir "$edge_root/dynamic" 2>/dev/null || true
   if [[ "${j[edge_container]}" != uncreated ]] && exists_container "${j[edge_container]}"; then docker rm "${j[edge_container]}"; fi
   if [[ "${j[network_intent]}" == true ]] && exists_network; then [[ "$(network_labels)" == sub2api-edge ]] || { printf 'Edge network ownership changed\n' >&2; exit 1; }; docker network rm sub2api-edge; fi
-  [[ -e "$host_state" ]] && rm -f "$host_state"
+  rm -f "$host_state"
 }
 stage_edge() {
   if [[ ! -d "$edge_root/dynamic" ]]; then set_journal edge_dynamic_dir_created true; mkdir -p "$edge_root/dynamic"; fi
