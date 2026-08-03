@@ -38,24 +38,24 @@ func postgresRuntimePassword(spec SiteSpec, secrets SiteSecrets, databasePasswor
 	return databasePassword
 }
 
-func DeploySite(ctx *pulumi.Context, siteID string, spec SiteSpec, secrets SiteSecrets, layout SiteLayout, edge *Edge, previousBarrier pulumi.Resource, checksum string) (*Site, error) {
+func DeploySite(ctx *pulumi.Context, siteID string, spec SiteSpec, secrets SiteSecrets, layout SiteLayout, edge *Edge, preflight, previousBarrier pulumi.Resource, checksum, configuredSiteIDs string) (*Site, error) {
 	site := &Site{}
 	if err := ctx.RegisterComponentResource("sub2api:host:Site", "site-"+siteID, site); err != nil { return nil, err }
-	dns, err := createSiteDNSRecord(ctx, site, edge.Provider, siteID, spec, edge.Spec)
+	dns, err := createSiteDNSRecord(ctx, site, preflight, edge.Provider, siteID, spec, edge.Spec)
 	if err != nil { return nil, err }
-	database, err := siteDatabaseInputs(ctx, site, siteID, spec, secrets); if err != nil { return nil, err }
-	redis, err := siteRedisInputs(ctx, site, siteID, spec, secrets); if err != nil { return nil, err }
+	database, err := siteDatabaseInputs(ctx, site, preflight, siteID, spec, secrets); if err != nil { return nil, err }
+	redis, err := siteRedisInputs(ctx, site, preflight, siteID, spec, secrets); if err != nil { return nil, err }
 	runtime := buildSiteRuntimePayload(siteID, spec, layout, database, redis, secrets)
 	reconcileTriggers := BuildSiteReconcileTriggers(SiteTriggerInput{SiteID: siteID, Domain: spec.Domain, RuntimeRoot: layout.RuntimeRoot, ComposeProject: layout.ComposeProject, RoutePath: layout.RoutePath, SiteChecksum: checksum})
-	dependencies := []pulumi.Resource{dns, edge.Reconcile}
+	dependencies := []pulumi.Resource{dns, edge.Reconcile, preflight}
 	if previousBarrier != nil { dependencies = append(dependencies, previousBarrier) }
-	environment := siteEnvironment(siteID, spec, layout, runtime)
+	environment := siteEnvironment(siteID, spec, layout, runtime, configuredSiteIDs, edge.Spec.OriginIP)
 	reconcile, err := newCommand(ctx, "site-"+siteID+"-reconcile", "bash scripts/reconcile-site.sh", environment, reconcileTriggers, site, dependencies...); if err != nil { return nil, err }
-	readiness, err := newCommand(ctx, "site-"+siteID+"-strict-public-readiness", `bash scripts/probe-origin.sh "$DOMAIN" "$APP_PROBE_PATH"`, environment, reconcileTriggers, site, reconcile); if err != nil { return nil, err }
-	releaseEnvironment := siteEnvironment(siteID, spec, layout, runtime)
+	releaseEnvironment := siteEnvironment(siteID, spec, layout, runtime, configuredSiteIDs, edge.Spec.OriginIP)
 	releaseEnvironment["SUB2API_IMAGE"] = pulumi.String(spec.Image)
-	release, err := newCommand(ctx, "site-"+siteID+"-release", "bash scripts/application-release.sh", releaseEnvironment, BuildSiteReleaseTriggers(siteID, spec.Image), site, readiness); if err != nil { return nil, err }
-	rollback, err := newCommand(ctx, "site-"+siteID+"-rollback-preparation", "bash -c 'exit 0'", environment, reconcileTriggers, site, release); if err != nil { return nil, err }
+	release, err := newCommand(ctx, "site-"+siteID+"-release", "bash scripts/application-release.sh", releaseEnvironment, BuildSiteReleaseTriggers(siteID, spec.Image), site, reconcile, preflight); if err != nil { return nil, err }
+	readiness, err := newCommand(ctx, "site-"+siteID+"-strict-public-readiness", `bash scripts/probe-origin.sh "$DOMAIN" "$APP_PROBE_PATH"`, environment, reconcileTriggers, site, release, preflight); if err != nil { return nil, err }
+	rollback, err := newCommand(ctx, "site-"+siteID+"-rollback-preparation", "bash -c 'exit 0'", environment, reconcileTriggers, site, readiness, preflight); if err != nil { return nil, err }
 	site.FinalBarrier = rollback
 	status := pulumi.Map{"domain": pulumi.String(spec.Domain), "dnsRecordId": dns.ID(), "readinessId": readiness.ID(), "deploymentId": release.ID()}
 	site.Status = status.ToMapOutput()

@@ -12,7 +12,12 @@ func newCommand(ctx *pulumi.Context, name, script string, environment pulumi.Str
 	return local.NewCommand(ctx, name, &local.CommandArgs{Create: pulumi.String(script), Update: pulumi.String(script), Environment: environment, Logging: local.LoggingNone, Triggers: stringArray(triggers)}, opts...)
 }
 
-func siteEnvironment(siteID string, spec SiteSpec, layout SiteLayout, runtime pulumi.StringInput) pulumi.StringMap {
+func newHostCommand(ctx *pulumi.Context, name, script string, environment pulumi.StringMap, triggers []string, dependencies ...pulumi.Resource) (*local.Command, error) {
+	opts := []pulumi.ResourceOption{pulumi.Version("1.2.1"), pulumi.DependsOn(dependencies), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"})}
+	return local.NewCommand(ctx, name, &local.CommandArgs{Create: pulumi.String(script), Update: pulumi.String(script), Environment: environment, Logging: local.LoggingNone, Triggers: stringArray(triggers)}, opts...)
+}
+
+func siteEnvironment(siteID string, spec SiteSpec, layout SiteLayout, runtime pulumi.StringInput, configuredSiteIDs, originIP string) pulumi.StringMap {
 	return pulumi.StringMap{
 		"SITE_ID": pulumi.String(siteID), "SITE_RUNTIME_ROOT": pulumi.String(layout.RuntimeRoot),
 		"COMPOSE_PROJECT_NAME": pulumi.String(layout.ComposeProject), "SITE_ROUTE_PATH": pulumi.String(layout.RoutePath),
@@ -21,9 +26,10 @@ func siteEnvironment(siteID string, spec SiteSpec, layout SiteLayout, runtime pu
 		"GREEN_DATA_PATH": pulumi.String(layout.GreenDataPath), "BLUE_EDGE_ALIAS": pulumi.String(layout.BlueAlias),
 		"GREEN_EDGE_ALIAS": pulumi.String(layout.GreenAlias), "ACTIVE_EDGE_ALIAS": pulumi.String(layout.BlueAlias),
 		"EDGE_NETWORK_NAME": pulumi.String(EdgeNetworkName), "DOMAIN": pulumi.String(spec.Domain),
-		"APP_PROBE_PATH": pulumi.String(spec.AppProbePath), "DRAIN_SECONDS": pulumi.String(formatInt(*spec.DrainSeconds)),
+		"APP_PROBE_PATH": pulumi.String(spec.AppProbePath), "DRAIN_SECONDS": pulumi.String(formatInt(*spec.DrainSeconds)), "ORIGIN_IP": pulumi.String(originIP),
 		"ADMIN_EMAIL": pulumi.String(spec.AdminEmail), "POSTGRES_MODE": pulumi.String(spec.Database.Mode),
 		"REDIS_MODE": pulumi.String(spec.Redis.Mode), "RUNTIME_JSON": runtime,
+		"CONFIGURED_SITE_IDS": pulumi.String(configuredSiteIDs), "HOST_STATE_PATH": pulumi.String("runtime/host-state.json"),
 	}
 }
 

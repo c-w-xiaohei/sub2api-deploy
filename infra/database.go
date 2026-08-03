@@ -38,12 +38,12 @@ func BuildDSNDatabaseConnection(dsn pulumi.StringInput) DatabaseConnectionInputs
 	return DatabaseConnectionInputs{Host: stringField(func(value DatabaseConnection) string { return value.Host }), Port: intField(func(value DatabaseConnection) int { return value.Port }), User: stringField(func(value DatabaseConnection) string { return value.User }), Password: pulumi.ToSecret(stringField(func(value DatabaseConnection) string { return value.Password })).(pulumi.StringOutput), DBName: stringField(func(value DatabaseConnection) string { return value.DBName }), SSLMode: "require"}
 }
 
-func siteDatabaseInputs(ctx *pulumi.Context, site pulumi.Resource, siteID string, spec SiteSpec, secrets SiteSecrets) (DatabaseConnectionInputs, error) {
+func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, siteID string, spec SiteSpec, secrets SiteSecrets) (DatabaseConnectionInputs, error) {
 	if spec.Database.Mode == "docker" { return DatabaseConnectionInputs{Host: pulumi.String("postgres"), Port: pulumi.Int(5432), User: pulumi.String("sub2api"), Password: pulumi.ToSecret(pulumi.String(secrets.Database.Password)).(pulumi.StringOutput), DBName: pulumi.String("sub2api"), SSLMode: "disable"}, nil }
 	if spec.Database.ResourceMode == "create" {
-		provider, err := neon.NewProvider(ctx, "site-"+siteID+"-neon", &neon.ProviderArgs{Api_key: pulumi.ToSecret(pulumi.String(secrets.Database.APIToken)).(pulumi.StringOutput)}, pulumi.Parent(site), pulumi.Version("0.0.1-alpha.1")); if err != nil { return DatabaseConnectionInputs{}, err }
+		provider, err := neon.NewProvider(ctx, "site-"+siteID+"-neon", &neon.ProviderArgs{Api_key: pulumi.ToSecret(pulumi.String(secrets.Database.APIToken)).(pulumi.StringOutput)}, pulumi.Parent(site), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Version("0.0.1-alpha.1")); if err != nil { return DatabaseConnectionInputs{}, err }
 		// Retirement must explicitly unprotect this persistent project first.
-		project, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtr(ManagedNeonProjectName(spec.ResourcePrefix))}, pulumi.Parent(site), pulumi.Provider(provider), pulumi.Version("0.0.1-alpha.1"), pulumi.Protect(true), pulumi.RetainOnDelete(true)); if err != nil { return DatabaseConnectionInputs{}, err }
+		project, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtr(ManagedNeonProjectName(spec.ResourcePrefix))}, pulumi.Parent(site), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Version("0.0.1-alpha.1"), pulumi.Protect(true), pulumi.RetainOnDelete(true)); if err != nil { return DatabaseConnectionInputs{}, err }
 		return BuildDSNDatabaseConnection(pulumi.ToSecret(project.Connection_uri).(pulumi.StringOutput)), nil
 	}
 	return BuildDSNDatabaseConnection(pulumi.ToSecret(pulumi.String(secrets.Database.DSN)).(pulumi.StringOutput)), nil

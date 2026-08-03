@@ -47,6 +47,13 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 	if countResources(mocks.resources, "pulumi:providers:cloudflare") != 1 || countResources(mocks.resources, "cloudflare:index/zoneSetting:ZoneSetting") != 1 {
 		t.Fatalf("shared Cloudflare resources = provider %d, ssl %d", countResources(mocks.resources, "pulumi:providers:cloudflare"), countResources(mocks.resources, "cloudflare:index/zoneSetting:ZoneSetting"))
 	}
+	preflight := requireResource(t, resources, "host-preflight")
+	if preflight.RegisterRPC == nil || !strings.Contains(preflight.RegisterRPC.GetParent(), "pulumi:pulumi:Stack") { t.Fatalf("host preflight must be Stack-owned: %+v", preflight.RegisterRPC) }
+	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon", "site-code2-neon-project", "site-code2-upstash", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon", "site-code3-neon-project", "site-code3-upstash", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
+		assertDependsOn(t, requireResource(t, resources, name), preflight.Name, "must not run before host preflight")
+	}
+	finalize := requireResource(t, resources, "host-finalize-state")
+	if finalize.RegisterRPC == nil || !strings.Contains(finalize.RegisterRPC.GetParent(), "pulumi:pulumi:Stack") { t.Fatalf("host finalization must be Stack-owned: %+v", finalize.RegisterRPC) }
 
 	for _, siteID := range []string{"code2", "code3"} {
 		site := requireResource(t, resources, "site-"+siteID)
@@ -102,16 +109,19 @@ func TestCode2ImageChangeOnlyChangesCode2Release(t *testing.T) {
 	before, _ := deployTwoSiteHost(t, "weishaw/sub2api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	after, _ := deployTwoSiteHost(t, "weishaw/sub2api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	beforeResources, afterResources := resourcesByName(before.resources), resourcesByName(after.resources)
-	for _, name := range []string{"edge-reconcile", "site-code3-reconcile", "site-code3-strict-public-readiness", "site-code3-release", "site-code3-rollback-preparation"} {
-		if !reflect.DeepEqual(commandTriggers(beforeResources[name]), commandTriggers(afterResources[name])) {
-			t.Fatalf("%s triggers changed after a code2 image update", name)
+	for name, beforeCommand := range beforeResources {
+		if name == "site-code2-release" || name == "host-preflight" { continue }
+		afterCommand, ok := afterResources[name]
+		if !ok { t.Fatalf("%s disappeared after a code2 image update", name) }
+		if beforeCommand.TypeToken == "command:local:Command" && !reflect.DeepEqual(beforeCommand.Inputs, afterCommand.Inputs) {
+			t.Fatalf("%s inputs changed after a code2 image update", name)
 		}
 	}
-	if reflect.DeepEqual(commandTriggers(beforeResources["site-code2-release"]), commandTriggers(afterResources["site-code2-release"])) {
+	if reflect.DeepEqual(beforeResources["site-code2-release"].Inputs, afterResources["site-code2-release"].Inputs) {
 		t.Fatal("code2 release triggers did not change with code2 image")
 	}
-	for _, name := range []string{"site-code2-reconcile", "site-code2-strict-public-readiness", "site-code2-rollback-preparation"} {
-		if !reflect.DeepEqual(beforeResources[name].Inputs, afterResources[name].Inputs) { t.Fatalf("%s inputs changed after code2 image update", name) }
+	if reflect.DeepEqual(beforeResources["host-preflight"].Inputs, afterResources["host-preflight"].Inputs) {
+		t.Fatal("host preflight did not change with code2 image")
 	}
 }
 
@@ -121,7 +131,7 @@ func TestHostGraphExportsPublicSiteStatusOnly(t *testing.T) {
 	mocks := &graphMocks{}
 	var exported map[string]interface{}
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		exports, err := deployHostGraph(ctx, spec, layouts, secretHostSpec(spec), "edge-v1", "site-v1")
+		exports, err := deployHostGraph(ctx, spec, layouts, secretHostSpec(spec), "edge-v1", "site-v1", "host-v1")
 		if err != nil { return err }
 		exports.Sites.ApplyT(func(value map[string]interface{}) map[string]interface{} { exported = value; return value })
 		return nil
@@ -150,7 +160,7 @@ func TestExistingUpstashEndpointIsInOnlyItsSiteRuntime(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	mocks := &graphMocks{}
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1")
+		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "host-v1")
 		return err
 	}, pulumi.WithMocks("sub2api-vps-deploy", "test", mocks))
 	if err != nil { t.Fatal(err) }
@@ -170,7 +180,7 @@ func TestDockerPostgresRuntimeIncludesLocalServiceInputs(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	mocks := &graphMocks{}
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1")
+		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "host-v1")
 		return err
 	}, pulumi.WithMocks("sub2api-vps-deploy", "test", mocks))
 	if err != nil { t.Fatal(err) }
@@ -194,7 +204,7 @@ func deployTwoSiteHost(t *testing.T, code2Image string) (*graphMocks, HostGraphE
 	var exports HostGraphExports
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
 		var err error
-		exports, err = deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1")
+		exports, err = deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "host-v1")
 		return err
 	}, pulumi.WithMocks("sub2api-vps-deploy", "test", mocks))
 	if err != nil { t.Fatalf("host graph failed: %v", err) }
@@ -207,12 +217,13 @@ func assertSiteCommands(t *testing.T, resources map[string]pulumi.MockResourceAr
 		command := requireResource(t, resources, "site-"+siteID+"-"+suffix)
 		if command.TypeToken != "command:local:Command" { t.Fatalf("%s type = %q", command.Name, command.TypeToken) }
 		environment := command.Inputs["environment"].ObjectValue()
-		for _, key := range []string{"SITE_ID", "SITE_RUNTIME_ROOT", "COMPOSE_PROJECT_NAME", "SITE_ROUTE_PATH", "SITE_RUNTIME_ENV_PATH", "SITE_DEPLOY_STATE_PATH", "SITE_BOOTSTRAP_MARKER_PATH", "BLUE_DATA_PATH", "GREEN_DATA_PATH", "BLUE_EDGE_ALIAS", "GREEN_EDGE_ALIAS", "ACTIVE_EDGE_ALIAS", "EDGE_NETWORK_NAME", "DOMAIN", "APP_PROBE_PATH", "DRAIN_SECONDS", "RUNTIME_JSON"} {
+		for _, key := range []string{"SITE_ID", "SITE_RUNTIME_ROOT", "COMPOSE_PROJECT_NAME", "SITE_ROUTE_PATH", "SITE_RUNTIME_ENV_PATH", "SITE_DEPLOY_STATE_PATH", "SITE_BOOTSTRAP_MARKER_PATH", "BLUE_DATA_PATH", "GREEN_DATA_PATH", "BLUE_EDGE_ALIAS", "GREEN_EDGE_ALIAS", "ACTIVE_EDGE_ALIAS", "EDGE_NETWORK_NAME", "DOMAIN", "ORIGIN_IP", "APP_PROBE_PATH", "DRAIN_SECONDS", "RUNTIME_JSON"} {
 			if _, ok := environment[resource.PropertyKey(key)]; !ok { t.Fatalf("%s missing %s", command.Name, key) }
 		}
 		if suffix == "release" { if _, ok := environment["SUB2API_IMAGE"]; !ok { t.Fatalf("%s missing SUB2API_IMAGE", command.Name) } } else if _, ok := environment["SUB2API_IMAGE"]; ok { t.Fatalf("%s unexpectedly owns SUB2API_IMAGE", command.Name) }
 		if command.Inputs["logging"].StringValue() != "none" || !environment["RUNTIME_JSON"].IsSecret() { t.Fatalf("%s command secrecy/logging = %v", command.Name, command.Inputs) }
 		if suffix == "rollback-preparation" && strings.Contains(command.Inputs["create"].StringValue(), "rollback-slot.sh") { t.Fatalf("%s invokes deferred rollback orchestration", command.Name) }
+		if suffix == "rollback-preparation" { assertDependsOn(t, command, "site-"+siteID+"-strict-public-readiness", "must wait for public readiness") }
 		if previousSiteID != "" && suffix == "reconcile" {
 			previous := requireResource(t, resources, "site-"+previousSiteID+"-rollback-preparation")
 			if len(command.RegisterRPC.GetDependencies()) == 0 || !strings.Contains(strings.Join(command.RegisterRPC.GetDependencies(), " "), previous.Name) {
@@ -243,6 +254,7 @@ func resourcesByName(items []pulumi.MockResourceArgs) map[string]pulumi.MockReso
 func requireResource(t *testing.T, resources map[string]pulumi.MockResourceArgs, name string) pulumi.MockResourceArgs { t.Helper(); item, ok := resources[name]; if !ok { t.Fatalf("missing resource %q", name) }; return item }
 func countResources(items []pulumi.MockResourceArgs, token string) int { count := 0; for _, item := range items { if item.TypeToken == token { count++ } }; return count }
 func assertParent(t *testing.T, item pulumi.MockResourceArgs, want, message string) { t.Helper(); if item.RegisterRPC == nil || item.RegisterRPC.GetParent() != want { t.Fatalf("%s parent = %q, want %q: %s", item.Name, item.RegisterRPC.GetParent(), want, message) } }
+func assertDependsOn(t *testing.T, item pulumi.MockResourceArgs, name, message string) { t.Helper(); if item.RegisterRPC == nil || !strings.Contains(strings.Join(item.RegisterRPC.GetDependencies(), " "), name) { t.Fatalf("%s dependencies = %v: %s", item.Name, item.RegisterRPC.GetDependencies(), message) } }
 func siteChildren(items []pulumi.MockResourceArgs, siteID string) []pulumi.MockResourceArgs { result := []pulumi.MockResourceArgs{}; for _, item := range items { if item.TypeToken != siteComponentToken && strings.HasPrefix(item.Name, "site-"+siteID+"-") { result = append(result, item) } }; return result }
 func commandTriggers(item pulumi.MockResourceArgs) []resource.PropertyValue { return item.Inputs["triggers"].ArrayValue() }
 

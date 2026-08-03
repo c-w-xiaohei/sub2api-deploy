@@ -15,17 +15,17 @@ type Edge struct {
 	Spec      EdgeSpec
 }
 
-func DeployEdge(ctx *pulumi.Context, spec EdgeSpec, apiToken pulumi.StringInput, checksum string) (*Edge, error) {
+func DeployEdge(ctx *pulumi.Context, spec EdgeSpec, apiToken pulumi.StringInput, checksum string, preflight pulumi.Resource) (*Edge, error) {
 	edge := &Edge{}
 	if err := ctx.RegisterComponentResource("sub2api:host:Edge", "edge", edge); err != nil { return nil, err }
-	provider, err := createCloudflareProvider(ctx, edge, apiToken); if err != nil { return nil, err }
-	ssl, err := createStrictSSLSetting(ctx, edge, provider, spec.CloudflareZoneID); if err != nil { return nil, err }
+	provider, err := createCloudflareProvider(ctx, edge, preflight, apiToken); if err != nil { return nil, err }
+	ssl, err := createStrictSSLSetting(ctx, edge, preflight, provider, spec.CloudflareZoneID); if err != nil { return nil, err }
 	singBox, err := json.Marshal(spec.SingBox); if err != nil { return nil, err }
 	reconcile, err := newCommand(ctx, "edge-reconcile", "bash scripts/reconcile-edge.sh", pulumi.StringMap{
 		"EDGE_RUNTIME_ROOT": pulumi.String(EdgeRuntimeRoot), "EDGE_NETWORK_NAME": pulumi.String(EdgeNetworkName),
 		"TRAEFIK_IMAGE": pulumi.String(spec.TraefikImage), "ACME_EMAIL": pulumi.String(spec.ACMEEmail),
 		"SING_BOX_CONFIG": pulumi.String(string(singBox)), "CLOUDFLARE_API_TOKEN": apiToken,
-	}, BuildEdgeTriggers(EdgeTriggerInput{TraefikImage: spec.TraefikImage, ACMEEmail: spec.ACMEEmail, SingBoxConfig: string(singBox), EdgeChecksum: checksum}), edge, ssl)
+	}, BuildEdgeTriggers(EdgeTriggerInput{TraefikImage: spec.TraefikImage, ACMEEmail: spec.ACMEEmail, SingBoxConfig: string(singBox), EdgeChecksum: checksum}), edge, ssl, preflight)
 	if err != nil { return nil, err }
 	edge.Provider, edge.Reconcile, edge.Spec = provider, reconcile, spec
 	ctx.RegisterResourceOutputs(edge, pulumi.Map{})

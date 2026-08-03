@@ -11,7 +11,7 @@ if [[ ! "$SITE_ID" =~ ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ ]]; then
   return 1 2>/dev/null || exit 1
 fi
 
-EDGE_NETWORK_NAME=sub2api-edge
+: "${EDGE_NETWORK_NAME:?EDGE_NETWORK_NAME is required}"
 SITE_RUNTIME_ROOT="$(realpath -m "$SITE_RUNTIME_ROOT")"
 export SITE_RUNTIME_ROOT
 
@@ -43,13 +43,22 @@ esac
 
 site_stop_service() {
   local service="$1"
-  "${SITE_COMPOSE[@]}" stop --timeout 30 "$service" >/dev/null 2>&1 || true
-  local container
-  for container in $("${SITE_COMPOSE[@]}" ps -q "$service" 2>/dev/null); do
+  "${SITE_COMPOSE[@]}" stop --timeout 30 "$service" >/dev/null
+  local containers container running
+  if ! containers="$("${SITE_COMPOSE[@]}" ps -q "$service")"; then
+    return 1
+  fi
+  for container in $containers; do
     for _ in 1 2 3 4 5 6; do
-      [[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != "true" ]] && break
+      if ! running="$(docker inspect -f '{{.State.Running}}' "$container")"; then
+        return 1
+      fi
+      [[ "$running" != "true" ]] && break
       sleep 1
     done
-    [[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != "true" ]] || return 1
+    if ! running="$(docker inspect -f '{{.State.Running}}' "$container")"; then
+      return 1
+    fi
+    [[ "$running" != "true" ]] || return 1
   done
 }

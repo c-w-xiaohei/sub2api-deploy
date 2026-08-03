@@ -133,23 +133,21 @@ describe("compose deployment contract", () => {
   });
 
   it("keeps upstream auto setup enabled after installation", () => {
-    const deploy = readPath("../scripts/deploy-compose.sh");
-    const reconcile = readPath("../scripts/infra-reconcile.sh");
+    const bootstrap = readPath("../scripts/bootstrap-site.sh");
 
-    expect(deploy).not.toContain("AUTO_SETUP:-false");
-    expect(reconcile).not.toContain("AUTO_SETUP=false");
-    expect(reconcile).toContain("AUTO_SETUP=true");
+    expect(bootstrap).toContain("AUTO_SETUP=true");
+    expect(bootstrap).not.toContain("restart");
   });
 
   it("allows first-boot migration to finish before health wait expires", () => {
     const site = read("site.yml");
     const upstream = read("upstream.yml");
-    const deploy = readPath("../scripts/deploy-compose.sh");
+    const bootstrap = readPath("../scripts/bootstrap-site.sh");
 
     expect(site.match(/start_period: 180s/g)).toHaveLength(2);
     expect(upstream).toContain("start_period: 180s");
-    expect(deploy).not.toContain("--wait-timeout 120");
-    expect(deploy).toContain("--wait-timeout 300");
+    expect(bootstrap).not.toContain("--wait-timeout 120");
+    expect(bootstrap).toContain("--wait-timeout 300");
   });
 
   it("coexists sing-box passthrough with independently rendered code2/code3 route templates", () => {
