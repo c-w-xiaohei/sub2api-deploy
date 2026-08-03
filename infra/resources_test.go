@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
@@ -16,11 +17,13 @@ const (
 	siteComponentToken = "sub2api:host:Site"
 )
 
-type graphMocks struct{ resources []pulumi.MockResourceArgs }
+type graphMocks struct { mu sync.Mutex; resources []pulumi.MockResourceArgs }
 type legacyFixtureResource struct { URN string `json:"urn"`; Type string `json:"type"`; Name string `json:"name"`; Parent string `json:"parent"`; Provider string `json:"provider"`; ID string `json:"id"`; Protect bool `json:"protect"`; RetainOnDelete bool `json:"retainOnDelete"`; Inputs map[string]interface{} `json:"inputs"` }
 
 func (m *graphMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	m.mu.Lock()
 	m.resources = append(m.resources, args)
+	m.mu.Unlock()
 	state := args.Inputs.Copy()
 	switch args.TypeToken {
 	case "neon:provider:Project":
