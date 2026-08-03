@@ -51,6 +51,15 @@ describe("compose deployment contract", () => {
     expect(rendered).toContain('address: "host.docker.internal:8443"');
   });
 
+  it("keeps upstream auto setup enabled after installation", () => {
+    const deploy = readPath("../scripts/deploy-compose.sh");
+    const reconcile = readPath("../scripts/infra-reconcile.sh");
+
+    expect(deploy).not.toContain("AUTO_SETUP:-false");
+    expect(reconcile).not.toContain("AUTO_SETUP=false");
+    expect(reconcile).toContain("AUTO_SETUP=true");
+  });
+
   it("allows first-boot migration to finish before health wait expires", () => {
     const override = read("override.yml");
     const upstream = read("upstream.yml");
@@ -62,7 +71,6 @@ describe("compose deployment contract", () => {
     expect(deploy).toContain("--wait-timeout 300");
   });
 
-  });
 
   it("renders both slots with the upstream health and hardening contract", () => {
     const envPath = join(mkdtempSync(join(tmpdir(), "sub2api-compose-")), ".env");

@@ -82,13 +82,6 @@ fi
 "${COMPOSE[@]}" up -d --wait --wait-timeout 300 --force-recreate traefik
 "${COMPOSE[@]}" up -d --wait --wait-timeout 300 "$slot_service"
 
-if [[ "${AUTO_SETUP:-false}" == "true" ]]; then
-  printf '%s' "$RUNTIME_JSON" | npx --no-install tsx scripts/render-runtime-env.ts --auto-setup=false \
-    --slot="$requested_slot" --slot-data-dir="$requested_data_dir" > "$tmp_env"
-  chmod 600 "$tmp_env"
-  mv -f "$tmp_env" runtime/runtime.env
-  "${COMPOSE[@]}" up -d --wait --wait-timeout 300 --force-recreate "$slot_service"
-fi
 if [[ ! -f runtime/deploy-state.json ]]; then
   bash scripts/probe-origin-strict.sh "$DOMAIN" "$ORIGIN_IP" "/health"
 fi

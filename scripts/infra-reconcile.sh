@@ -9,7 +9,7 @@ if [[ -f "$state_file" ]]; then
   had_state=true
   npx --no-install tsx scripts/deployment-mode.ts check "$state_file" "${POSTGRES_MODE:?POSTGRES_MODE is required}" "${REDIS_MODE:?REDIS_MODE is required}"
   active_slot="$(node -e 'const s=require("./runtime/deploy-state.json"); process.stdout.write(s.activeSlot)')"
-  export SLOT="$active_slot" SLOT_DATA_DIR="$active_slot" AUTO_SETUP=false
+  export SLOT="$active_slot" SLOT_DATA_DIR="$active_slot" AUTO_SETUP=true
   export SUB2API_IMAGE="$(node -e 'const s=require("./runtime/deploy-state.json"); process.stdout.write(s.activeImage)')"
 else
   export SLOT=blue SLOT_DATA_DIR=blue AUTO_SETUP=true
