@@ -39,6 +39,11 @@ func TestHostDesiredStateDigestTracksOrdinarySideEffectsOnly(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	base, err := hostDesiredStateDigest(host, layouts)
 	if err != nil { t.Fatal(err) }
+	secretChanged := HostSpec{Edge: host.Edge, Sites: host.Sites, EdgeSecrets: host.EdgeSecrets, SiteSecrets: host.SiteSecrets}
+	secretChanged.EdgeSecrets.CloudflareAPIToken = "different-secret"
+	secretDigest, err := hostDesiredStateDigest(secretChanged, layouts)
+	if err != nil { t.Fatal(err) }
+	if base != secretDigest { t.Fatal("host desired-state digest includes secrets") }
 	imageChanged := host
 	code2 := imageChanged.Sites["code2"]
 	code2.Image = "weishaw/sub2api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -58,11 +63,6 @@ func TestHostDesiredStateDigestTracksOrdinarySideEffectsOnly(t *testing.T) {
 	siteDigest, err := hostDesiredStateDigest(siteChanged, layouts)
 	if err != nil { t.Fatal(err) }
 	if base == siteDigest { t.Fatal("host desired-state digest ignores Site data config") }
-	secretChanged := host
-	secretChanged.EdgeSecrets.CloudflareAPIToken = "different-secret"
-	secretDigest, err := hostDesiredStateDigest(secretChanged, layouts)
-	if err != nil { t.Fatal(err) }
-	if base != secretDigest { t.Fatal("host desired-state digest includes secrets") }
 }
 
 func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {

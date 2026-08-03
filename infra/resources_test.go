@@ -49,7 +49,7 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 	}
 	preflight := requireResource(t, resources, "host-preflight")
 	if preflight.RegisterRPC == nil || !strings.Contains(preflight.RegisterRPC.GetParent(), "pulumi:pulumi:Stack") { t.Fatalf("host preflight must be Stack-owned: %+v", preflight.RegisterRPC) }
-	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon", "site-code2-neon-project", "site-code2-upstash", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon", "site-code3-neon-project", "site-code3-upstash", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
+	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
 		assertDependsOn(t, requireResource(t, resources, name), preflight.Name, "must not run before host preflight")
 	}
 	finalize := requireResource(t, resources, "host-finalize-state")
@@ -74,6 +74,11 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 			t.Fatalf("%s DNS = %+v", siteID, dns)
 		}
 		assertParent(t, dns, parent, "DNS must be Site-parented")
+		for _, provider := range []string{"neon", "upstash"} {
+			item := requireSiteProvider(t, mocks.resources, siteID, provider)
+			assertParent(t, item, parent, "selected provider must be Site-parented")
+			assertDependsOn(t, item, preflight.Name, "selected provider must not run before host preflight")
+		}
 	}
 	if countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord") != 2 {
 		t.Fatalf("DNS record count = %d, want 2", countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord"))
@@ -92,7 +97,7 @@ func TestHostGraphManagedDataIsProtectedAndSiteOwned(t *testing.T) {
 		siteOwnedChildren := siteChildren(mocks.resources, siteID)
 		if len(siteOwnedChildren) == 0 { t.Fatalf("%s has no Site-owned children", siteID) }
 		parent := siteOwnedChildren[0].RegisterRPC.GetParent()
-		for _, suffix := range []string{"neon", "neon-project", "upstash", "upstash-redis"} {
+		for _, suffix := range []string{"neon-project", "upstash-redis"} {
 			item := requireResource(t, resources, "site-"+siteID+"-"+suffix)
 			assertParent(t, item, parent, "managed provider/data resource must be Site-parented")
 		}
@@ -252,6 +257,7 @@ func assertPublicSiteExports(t *testing.T, exports HostGraphExports) {
 
 func resourcesByName(items []pulumi.MockResourceArgs) map[string]pulumi.MockResourceArgs { result := map[string]pulumi.MockResourceArgs{}; for _, item := range items { result[item.Name] = item }; return result }
 func requireResource(t *testing.T, resources map[string]pulumi.MockResourceArgs, name string) pulumi.MockResourceArgs { t.Helper(); item, ok := resources[name]; if !ok { t.Fatalf("missing resource %q", name) }; return item }
+func requireSiteProvider(t *testing.T, items []pulumi.MockResourceArgs, siteID, provider string) pulumi.MockResourceArgs { t.Helper(); prefix := "site-" + siteID + "-"; for _, item := range items { if strings.HasPrefix(item.Name, prefix) && strings.Contains(item.TypeToken, "providers:"+provider) { return item } }; t.Fatalf("missing Site-qualified %s provider for %s", provider, siteID); return pulumi.MockResourceArgs{} }
 func countResources(items []pulumi.MockResourceArgs, token string) int { count := 0; for _, item := range items { if item.TypeToken == token { count++ } }; return count }
 func assertParent(t *testing.T, item pulumi.MockResourceArgs, want, message string) { t.Helper(); if item.RegisterRPC == nil || item.RegisterRPC.GetParent() != want { t.Fatalf("%s parent = %q, want %q: %s", item.Name, item.RegisterRPC.GetParent(), want, message) } }
 func assertDependsOn(t *testing.T, item pulumi.MockResourceArgs, name, message string) { t.Helper(); if item.RegisterRPC == nil || !strings.Contains(strings.Join(item.RegisterRPC.GetDependencies(), " "), name) { t.Fatalf("%s dependencies = %v: %s", item.Name, item.RegisterRPC.GetDependencies(), message) } }
