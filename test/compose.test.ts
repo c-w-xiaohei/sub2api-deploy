@@ -72,8 +72,8 @@ describe("compose deployment contract", () => {
     expect(site).toContain("SLOT_DATA_DIR:");
     expect(site).toContain("BLUE_EDGE_ALIAS");
     expect(site).toContain("GREEN_EDGE_ALIAS");
-    expect(site).toContain("${SITE_RUNTIME_ROOT}/data/blue");
-    expect(site).toContain("${SITE_RUNTIME_ROOT}/data/green");
+    expect(site).toContain("${SITE_RUNTIME_ROOT:?SITE_RUNTIME_ROOT is required}/data/blue");
+    expect(site).toContain("${SITE_RUNTIME_ROOT:?SITE_RUNTIME_ROOT is required}/data/green");
   });
 
   it("renders Edge with only Traefik, public ports, and its named network", () => {
