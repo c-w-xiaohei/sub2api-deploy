@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,61 +18,62 @@ type HostSpec struct {
 }
 
 type EdgeSpec struct {
-	OriginIP         string
-	CloudflareZoneID string
-	ACMEEmail        string
-	TraefikImage     string
-	SingBox          SingBoxSpec
+	OriginIP         string      `json:"originIp"`
+	CloudflareZoneID string      `json:"cloudflareZoneId"`
+	ACMEEmail        string      `json:"acmeEmail"`
+	TraefikImage     string      `json:"traefikImage"`
+	SingBox          SingBoxSpec `json:"singBox"`
 }
 
 type SingBoxSpec struct {
-	ServerName string
-	Target     string
+	ServerName string `json:"serverName"`
+	Target     string `json:"target"`
 }
 
 type SiteSpec struct {
-	Domain         string
-	Image          string
-	AdminEmail     string
-	AppProbePath   string
-	DrainSeconds   *int
-	ResourcePrefix string
-	Database       DatabaseSpec
-	Redis          RedisSpec
+	Domain         string       `json:"domain"`
+	Image          string       `json:"image"`
+	AdminEmail     string       `json:"adminEmail"`
+	AppProbePath   string       `json:"appProbePath"`
+	DrainSeconds   *int         `json:"drainSeconds"`
+	ResourcePrefix string       `json:"resourcePrefix"`
+	Database       DatabaseSpec `json:"database"`
+	Redis          RedisSpec    `json:"redis"`
 }
 
 type DatabaseSpec struct {
-	Mode         string
-	ResourceMode string
+	Mode         string `json:"mode"`
+	ResourceMode string `json:"resourceMode"`
 }
 
 type RedisSpec struct {
-	Mode         string
-	ResourceMode string
-	Region       string
+	Mode         string `json:"mode"`
+	ResourceMode string `json:"resourceMode"`
+	Endpoint     string `json:"endpoint"`
+	Region       string `json:"region"`
 }
 
 type EdgeSecrets struct {
-	CloudflareAPIToken string
+	CloudflareAPIToken string `json:"cloudflareApiToken"`
 }
 
 type SiteSecrets struct {
-	AdminPassword     string
-	JWTSecret         string
-	TOTPEncryptionKey string
-	Database          DatabaseSecrets
-	Redis             RedisSecrets
+	AdminPassword     string          `json:"adminPassword"`
+	JWTSecret         string          `json:"jwtSecret"`
+	TOTPEncryptionKey string          `json:"totpEncryptionKey"`
+	Database          DatabaseSecrets `json:"database"`
+	Redis             RedisSecrets    `json:"redis"`
 }
 
 type DatabaseSecrets struct {
-	APIToken string
-	DSN      string
-	Password string
+	APIToken string `json:"apiToken"`
+	DSN      string `json:"dsn"`
+	Password string `json:"password"`
 }
 
 type RedisSecrets struct {
-	APIKey   string
-	Password string
+	APIKey   string `json:"apiKey"`
+	Password string `json:"password"`
 }
 
 func validateSingBoxTarget(target string) error {
@@ -187,8 +189,8 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 			return SiteSpec{}, err
 		}
 	}
-	if !strings.Contains(site.Image, "@sha256:") {
-		return SiteSpec{}, fmt.Errorf("%s must contain an immutable @sha256 digest", name("image"))
+	if !immutableImagePattern.MatchString(site.Image) {
+		return SiteSpec{}, fmt.Errorf("%s must contain an immutable @sha256 digest with 64 lowercase hexadecimal characters", name("image"))
 	}
 	if !strings.HasPrefix(site.AppProbePath, "/") {
 		return SiteSpec{}, fmt.Errorf("%s must be an absolute path", name("appProbePath"))
@@ -213,6 +215,11 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 	if err != nil {
 		return SiteSpec{}, err
 	}
+	if redisMode == "upstash" && redisResourceMode == "existing" {
+		if _, err := normalizeUpstashEndpoint(site.Redis.Endpoint); err != nil {
+			return SiteSpec{}, fmt.Errorf("%s: %w", name("redis.endpoint"), err)
+		}
+	}
 
 	resourcePrefix := defaultString(site.ResourcePrefix, siteID)
 	if !resourceNamespacePattern.MatchString(resourcePrefix) {
@@ -234,6 +241,7 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 		Redis: RedisSpec{
 			Mode:         redisMode,
 			ResourceMode: redisResourceMode,
+			Endpoint:     strings.TrimSpace(site.Redis.Endpoint),
 			Region:       defaultString(site.Redis.Region, "us-east-1"),
 		},
 	}, nil
@@ -263,8 +271,11 @@ func validateSiteSecrets(siteID string, site SiteSpec, secrets SiteSecrets) erro
 			return err
 		}
 	case site.Database.Mode == "neon":
-		if secrets.Database.DSN == "" && secrets.Database.Password == "" {
-			return fmt.Errorf("%s requires database.dsn or database.password", name("database"))
+		if _, err := required(secrets.Database.DSN, name("database.dsn")); err != nil {
+			return err
+		}
+		if _, err := ParsePostgresDSN(secrets.Database.DSN); err != nil {
+			return fmt.Errorf("%s is invalid: %w", name("database.dsn"), err)
 		}
 	}
 	switch {
@@ -282,4 +293,19 @@ func validateSiteSecrets(siteID string, site SiteSpec, secrets SiteSecrets) erro
 		}
 	}
 	return nil
+}
+
+var immutableImagePattern = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+
+// normalizeUpstashEndpoint accepts only the hostname endpoint returned by
+// Upstash. Ports, schemes, and paths are not configuration inputs here.
+func normalizeUpstashEndpoint(endpoint string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", fmt.Errorf("is required")
+	}
+	if strings.ContainsAny(endpoint, ":/\t\n ") {
+		return "", fmt.Errorf("must be a hostname without scheme, port, or path")
+	}
+	return endpoint, nil
 }

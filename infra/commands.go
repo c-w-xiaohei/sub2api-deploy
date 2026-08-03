@@ -7,75 +7,30 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-func CreateInfraReconcileCommand(ctx *pulumi.Context, config DeploymentConfig, runtimePayload pulumi.StringInput, composeChecksum string, domain pulumi.Resource) (*local.Command, error) {
-	triggers := BuildInfraTriggers(InfraTriggerInput{
-		ResourceNamespace: config.ResourceNamespace,
-		Domain:            config.Domain,
-		OriginIP:          config.OriginIP,
-		PostgresMode:      config.PostgresMode,
-		RedisMode:         config.RedisMode,
-		TraefikImage:      config.TraefikImage,
-		ACMEEmail:         config.ACMEEmail,
-		AppProbePath:      config.AppProbePath,
-		DrainSeconds:      config.DrainSeconds,
-		ComposeChecksum:   composeChecksum,
-		ResourceModes:     BuildResourceModes(config),
-	})
-	return local.NewCommand(ctx, "infra-reconcile", &local.CommandArgs{
-		Create: pulumi.String("bash scripts/infra-reconcile.sh"),
-		Update: pulumi.String("bash scripts/infra-reconcile.sh"),
-		Environment: pulumi.StringMap{
-			"RUNTIME_JSON":   runtimePayload,
-			"SUB2API_IMAGE":  pulumi.String(config.Sub2APIImage),
-			"POSTGRES_MODE":  pulumi.String(config.PostgresMode),
-			"REDIS_MODE":     pulumi.String(config.RedisMode),
-			"DOMAIN":         pulumi.String(config.Domain),
-			"APP_PROBE_PATH": pulumi.String(config.AppProbePath),
-			"ORIGIN_IP":      pulumi.String(config.OriginIP),
-			"ACME_EMAIL":     pulumi.String(config.ACMEEmail),
-			"DRAIN_SECONDS":  pulumi.String(formatInt(config.DrainSeconds)),
-			"TRAEFIK_IMAGE":  pulumi.String(config.TraefikImage),
-		},
-		Logging:  local.LoggingNone,
-		Triggers: stringArray(triggers),
-	}, pulumi.Version("1.2.1"), pulumi.DependsOn([]pulumi.Resource{domain}), pulumi.IgnoreChanges([]string{"environment.SUB2API_IMAGE"}), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"}))
+func newCommand(ctx *pulumi.Context, name, script string, environment pulumi.StringMap, triggers []string, parent pulumi.Resource, dependencies ...pulumi.Resource) (*local.Command, error) {
+	opts := []pulumi.ResourceOption{pulumi.Parent(parent), pulumi.Version("1.2.1"), pulumi.DependsOn(dependencies), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"})}
+	return local.NewCommand(ctx, name, &local.CommandArgs{Create: pulumi.String(script), Update: pulumi.String(script), Environment: environment, Logging: local.LoggingNone, Triggers: stringArray(triggers)}, opts...)
 }
 
-func CreateStrictReadinessCommand(ctx *pulumi.Context, config DeploymentConfig, triggers []string, strictSSL pulumi.Resource) (*local.Command, error) {
-	return local.NewCommand(ctx, "post-strict-public-readiness", &local.CommandArgs{
-		Create: pulumi.String(`bash scripts/probe-origin.sh "$DOMAIN" "/health"`),
-		Update: pulumi.String(`bash scripts/probe-origin.sh "$DOMAIN" "/health"`),
-		Environment: pulumi.StringMap{
-			"DOMAIN": pulumi.String(config.Domain),
-		},
-		Logging:  local.LoggingNone,
-		Triggers: stringArray(triggers),
-	}, pulumi.Version("1.2.1"), pulumi.DependsOn([]pulumi.Resource{strictSSL}), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"}))
-}
-
-func CreateApplicationReleaseCommand(ctx *pulumi.Context, config DeploymentConfig, strictReadiness, infraReconcile pulumi.Resource) (*local.Command, error) {
-	return local.NewCommand(ctx, "application-release", &local.CommandArgs{
-		Create: pulumi.String("bash scripts/application-release.sh"),
-		Update: pulumi.String("bash scripts/application-release.sh"),
-		Environment: pulumi.StringMap{
-			"SUB2API_IMAGE": pulumi.String(config.Sub2APIImage),
-		},
-		Logging:  local.LoggingNone,
-		Triggers: stringArray(BuildReleaseTriggers(config.Sub2APIImage)),
-	}, pulumi.Version("1.2.1"), pulumi.DependsOn([]pulumi.Resource{infraReconcile, strictReadiness}), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"}))
+func siteEnvironment(siteID string, spec SiteSpec, layout SiteLayout, runtime pulumi.StringInput) pulumi.StringMap {
+	return pulumi.StringMap{
+		"SITE_ID": pulumi.String(siteID), "SITE_RUNTIME_ROOT": pulumi.String(layout.RuntimeRoot),
+		"COMPOSE_PROJECT_NAME": pulumi.String(layout.ComposeProject), "SITE_ROUTE_PATH": pulumi.String(layout.RoutePath),
+		"SITE_RUNTIME_ENV_PATH": pulumi.String(layout.RuntimeEnvPath), "SITE_DEPLOY_STATE_PATH": pulumi.String(layout.DeployStatePath),
+		"SITE_BOOTSTRAP_MARKER_PATH": pulumi.String(layout.BootstrapMarkerPath), "BLUE_DATA_PATH": pulumi.String(layout.BlueDataPath),
+		"GREEN_DATA_PATH": pulumi.String(layout.GreenDataPath), "BLUE_EDGE_ALIAS": pulumi.String(layout.BlueAlias),
+		"GREEN_EDGE_ALIAS": pulumi.String(layout.GreenAlias), "ACTIVE_EDGE_ALIAS": pulumi.String(layout.BlueAlias),
+		"EDGE_NETWORK_NAME": pulumi.String(EdgeNetworkName), "DOMAIN": pulumi.String(spec.Domain),
+		"APP_PROBE_PATH": pulumi.String(spec.AppProbePath), "DRAIN_SECONDS": pulumi.String(formatInt(*spec.DrainSeconds)),
+		"ADMIN_EMAIL": pulumi.String(spec.AdminEmail), "POSTGRES_MODE": pulumi.String(spec.Database.Mode),
+		"REDIS_MODE": pulumi.String(spec.Redis.Mode), "RUNTIME_JSON": runtime,
+	}
 }
 
 func stringArray(values []string) pulumi.Array {
 	result := make(pulumi.Array, 0, len(values))
-	for _, value := range values {
-		result = append(result, pulumi.String(value))
-	}
+	for _, value := range values { result = append(result, pulumi.String(value)) }
 	return result
 }
 
-func formatInt(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	return strconv.Itoa(value)
-}
+func formatInt(value int) string { return strconv.Itoa(value) }
