@@ -127,7 +127,7 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 		"site-code2-release": "application-release",
 	} { assertNoParentAlias(t, requireResource(t, resources, name), oldName) }
 	for _, name := range []string{"site-code3-origin", "site-code3-neon", "site-code3-neon-project", "site-code3-upstash", "site-code3-upstash-redis", "site-code3-reconcile", "site-code3-release"} {
-		if len(requireResource(t, resources, name).RegisterRPC.GetAliases()) != 0 { t.Fatalf("%s unexpectedly has legacy aliases", name) }
+		if hasNoParentLegacyAlias(requireResource(t, resources, name), "") { t.Fatalf("%s unexpectedly has legacy aliases", name) }
 	}
 	for _, name := range []string{"site-code2-neon-project", "site-code2-upstash"} {
 		if len(requireResource(t, resources, name).RegisterRPC.GetIgnoreChanges()) != 1 { t.Fatalf("%s must preserve its legacy-only optional provider input", name) }
@@ -136,8 +136,8 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 
 func TestCleanCode2DoesNotReceiveLegacyAliases(t *testing.T) {
 	mocks, _ := deployTwoSiteHost(t, "weishaw/sub2api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "site-code2-origin", "site-code2-neon", "site-code2-neon-project", "site-code2-upstash", "site-code2-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness"} {
-		if len(requireResource(t, resourcesByName(mocks.resources), name).RegisterRPC.GetAliases()) != 0 { t.Fatalf("clean %s unexpectedly has legacy aliases", name) }
+	for name, oldName := range map[string]string{"cloudflare":"cloudflare", "cloudflare-full-strict":"cloudflare-full-strict", "site-code2-origin":"sub2api-origin", "site-code2-neon":"neon", "site-code2-neon-project":"contextid-us-neon-project", "site-code2-upstash":"upstash", "site-code2-upstash-redis":"contextid-us-upstash-redis", "site-code2-reconcile":"infra-reconcile", "site-code2-release":"application-release", "site-code2-strict-public-readiness":"post-strict-public-readiness"} {
+		if hasNoParentLegacyAlias(requireResource(t, resourcesByName(mocks.resources), name), oldName) { t.Fatalf("clean %s unexpectedly has legacy alias %q", name, oldName) }
 	}
 }
 
@@ -335,7 +335,8 @@ func requireSiteProvider(t *testing.T, items []pulumi.MockResourceArgs, siteID, 
 func countResources(items []pulumi.MockResourceArgs, token string) int { count := 0; for _, item := range items { if item.TypeToken == token { count++ } }; return count }
 func assertParent(t *testing.T, item pulumi.MockResourceArgs, want, message string) { t.Helper(); if item.RegisterRPC == nil || item.RegisterRPC.GetParent() != want { t.Fatalf("%s parent = %q, want %q: %s", item.Name, item.RegisterRPC.GetParent(), want, message) } }
 func assertDependsOn(t *testing.T, item pulumi.MockResourceArgs, name, message string) { t.Helper(); if item.RegisterRPC == nil || !strings.Contains(strings.Join(item.RegisterRPC.GetDependencies(), " "), name) { t.Fatalf("%s dependencies = %v: %s", item.Name, item.RegisterRPC.GetDependencies(), message) } }
-func assertNoParentAlias(t *testing.T, item pulumi.MockResourceArgs, oldName string) { t.Helper(); if item.RegisterRPC == nil || len(item.RegisterRPC.GetAliases()) != 1 { t.Fatalf("%s aliases = %+v", item.Name, item.RegisterRPC.GetAliases()) }; alias := item.RegisterRPC.GetAliases()[0].GetSpec(); if alias == nil || alias.GetName() != oldName || !alias.GetNoParent() { t.Fatalf("%s alias = %+v, want old no-parent name %q", item.Name, item.RegisterRPC.GetAliases(), oldName) } }
+func hasNoParentLegacyAlias(item pulumi.MockResourceArgs, oldName string) bool { if item.RegisterRPC == nil { return false }; for _, alias := range item.RegisterRPC.GetAliases() { spec := alias.GetSpec(); if spec != nil && spec.GetNoParent() && (oldName == "" || spec.GetName() == oldName) { return true } }; return false }
+func assertNoParentAlias(t *testing.T, item pulumi.MockResourceArgs, oldName string) { t.Helper(); if !hasNoParentLegacyAlias(item, oldName) { t.Fatalf("%s aliases = %+v, want old no-parent name %q", item.Name, item.RegisterRPC.GetAliases(), oldName) } }
 func siteChildren(items []pulumi.MockResourceArgs, siteID string) []pulumi.MockResourceArgs { result := []pulumi.MockResourceArgs{}; for _, item := range items { if item.TypeToken != siteComponentToken && strings.HasPrefix(item.Name, "site-"+siteID+"-") { result = append(result, item) } }; return result }
 func commandTriggers(item pulumi.MockResourceArgs) []resource.PropertyValue { return item.Inputs["triggers"].ArrayValue() }
 
