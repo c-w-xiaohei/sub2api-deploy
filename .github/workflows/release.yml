@@ -32,20 +32,8 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Verify Go program
-        run: |
-          go test -count=1 ./...
-          go vet ./...
-          go build -o /tmp/sub2api-pulumi-go ./infra
-          go mod verify
-
-      - name: Verify runtime helpers
-        run: |
-          npm ci
-          npm test
-          npm run build
-          bash -n scripts/*.sh
-          bash scripts/validate-compose.sh
+      - name: Verify repository
+        run: bash scripts/verify-release.sh
 
   build:
     name: Build ${{ matrix.arch }} release
