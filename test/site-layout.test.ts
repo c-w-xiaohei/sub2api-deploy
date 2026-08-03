@@ -113,7 +113,6 @@ describe("Site runtime layout", () => {
         COMPOSE_PROJECT_NAME: "sub2api-code2",
         SITE_ROUTE_PATH: join(hostRoot, "edge", "dynamic", "site-code2.yml"),
         EDGE_NETWORK_NAME: "sub2api-edge",
-        EDGE_NETWORK_NAME: "sub2api-edge",
       },
     })).toThrow(/SITE_ID must match/);
 
@@ -133,6 +132,7 @@ describe("Site runtime layout", () => {
         SITE_RUNTIME_ROOT: code2Root,
         COMPOSE_PROJECT_NAME: "sub2api-code2",
         SITE_ROUTE_PATH: join(hostRoot, "edge", "dynamic", "site-code2.yml"),
+        EDGE_NETWORK_NAME: "sub2api-edge",
       },
     });
     expect(readFileSync(dockerLog, "utf8")).toContain("compose --project-name sub2api-code2");
