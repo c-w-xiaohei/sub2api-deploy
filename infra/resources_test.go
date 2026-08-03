@@ -53,7 +53,9 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 		if site.TypeToken != siteComponentToken {
 			t.Fatalf("%s type = %q, want %q", siteID, site.TypeToken, siteComponentToken)
 		}
-		assertParent(t, site, "", "site component must be host-owned")
+		if site.RegisterRPC == nil || !strings.Contains(site.RegisterRPC.GetParent(), "pulumi:pulumi:Stack") {
+			t.Fatalf("%s parent = %q, want Stack-owned Site component", siteID, site.RegisterRPC.GetParent())
+		}
 		children := siteChildren(mocks.resources, siteID)
 		if len(children) == 0 { t.Fatalf("%s has no Site-owned children", siteID) }
 		parent := children[0].RegisterRPC.GetParent()
