@@ -60,7 +60,7 @@ exit 97
   writeFileSync(join(bin, "npx"), `#!/bin/bash
 set -euo pipefail
 printf 'NPX %s\\n' "$*" >> "$FAKE_LOG"
-fail() { [[ "\${FAIL_AFTER:-}" == "$1" ]] && exit 91; }
+fail() { [[ "\${FAIL_AFTER:-}" != "$1" ]] || exit 91; }
 if [[ "$*" == *write-host-state.ts* ]]; then
   path="\${@: -3:1}"; handover="\${@: -1}"; [[ -f "$JOURNAL" ]] || { printf 'missing-journal-before-host-state\\n' >> "$FAKE_LOG"; exit 92; }
   complete=false; [[ "$handover" == complete ]] && complete=true
@@ -82,40 +82,77 @@ exit 98
   writeFileSync(join(bin, "docker"), `#!/bin/bash
 set -euo pipefail
 state="$FAKE_STATE"; log() { printf 'DOCKER %s\\n' "$*" >> "$FAKE_LOG"; }; exists() { [[ -f "$state/$1" ]]; }
-args="$*"; log "$args"
-[[ "$args" != *' compose down'* && "$args" != *' compose '*sub2api' '* ]] || { printf 'forbidden-compose\\n' >> "$FAKE_LOG"; exit 96; }
+log "$@"
 if [[ "$1" == ps ]]; then
-  if [[ "$args" == *'com.docker.compose.project=sub2api'* && "$args" == *'com.docker.compose.service=traefik'* ]]; then printf aaaaaaaaaaaa; fi
-  if [[ "$args" == *'com.docker.compose.project=sub2api'* && "$args" == *'com.docker.compose.service=sub2api-blue'* ]]; then printf bbbbbbbbbbbb; fi
-  if [[ "$args" == *'com.docker.compose.project=sub2api-edge'* && "$args" == *'com.docker.compose.service=traefik'* ]] && exists edge; then printf cccccccccccc; fi
+  if [[ "$#" -eq 8 && "$2" == -q && "$3" == --filter && "$4" == label=com.docker.compose.project=sub2api && "$5" == --filter && "$7" == --filter && "$8" == status=running ]]; then
+    [[ "$6" == label=com.docker.compose.service=traefik ]] && printf 'aaaaaaaaaaaa\\n'
+    [[ "$6" == label=com.docker.compose.service=sub2api-blue ]] && printf 'bbbbbbbbbbbb\\n'
+  elif [[ "$#" -eq 6 && "$2" == -aq && "$3" == --filter && "$4" == label=com.docker.compose.project=sub2api-edge && "$5" == --filter && "$6" == label=com.docker.compose.service=traefik ]]; then
+    exists edge && printf 'cccccccccccc\\n'
+  fi
   exit 0
 fi
 if [[ "$1" == inspect ]]; then
-  format=""; [[ "$2" == -f ]] && format="$3" && shift 2; id="$2"
-  case "$id" in aaaaaaaaaaaa) labels="\${LEGACY_TRAEFIK_LABELS:-sub2api/traefik}";; bbbbbbbbbbbb) labels="\${LEGACY_APP_LABELS:-sub2api/sub2api-blue}";; cccccccccccc) exists edge || exit 1; labels="\${EDGE_LABELS:-sub2api-edge/traefik}";; sub2api-edge) exists network || exit 1; labels="\${NETWORK_LABELS:-sub2api-edge}";; *) exit 1;; esac
-  [[ -z "$format" ]] && exit 0
-  [[ "$format" == *'.State.Running'* ]] && { [[ "$id" == aaaaaaaaaaaa && -f "$state/legacy-stopped" ]] && printf false || printf true; exit 0; }
-   [[ "$id" == bbbbbbbbbbbb && "$format" == *NetworkSettings.Networks* ]] && { exists attached && printf network-id; exit 0; }
-   [[ "$id" == sub2api-edge && "$format" == *range* ]] && { exists attached && printf bbbbbbbbbbbb; exit 0; }
-  printf '%s' "$labels"; exit 0
-fi
-if [[ "$1" == network ]]; then
-  case "$2" in inspect) exists network || exit 1; [[ "$*" == *range* ]] && { exists attached && printf bbbbbbbbbbbb; } || printf '%s' "\${NETWORK_LABELS:-sub2api-edge}";;
-  connect) exists network || { printf 'connection-before-network\\n' >> "$FAKE_LOG"; exit 95; }; touch "$state/attached"; [[ "\${FAIL_AFTER:-}" == attachment ]] && exit 91;;
-  disconnect) rm -f "$state/attached";; rm) exists attached && exit 93; rm -f "$state/network";; esac; exit 0
-fi
-if [[ "$1" == compose ]]; then
-  [[ "$args" == *'--project-name sub2api-edge'* && "$args" == *"--env-file $EDGE_ENV"* && "$args" == *'-f compose/edge.yml '* ]] || exit 94
-  [[ -f "$EDGE_ENV" ]] || exit 94
-  if [[ "$args" == *' create traefik' ]]; then touch "$state/network"; [[ "\${FAIL_AFTER:-}" == network ]] && exit 91; touch "$state/edge"; [[ "\${FAIL_AFTER:-}" == container ]] && exit 91; exit 0; fi
-  [[ "$args" == *' start traefik' ]] && exists edge && exit 0
+  if [[ "$#" -eq 2 ]]; then
+    [[ "$2" == aaaaaaaaaaaa || "$2" == bbbbbbbbbbbb ]] && exit 0
+    [[ "$2" == cccccccccccc ]] && exists edge && exit 0
+    exit 1
+  fi
+  [[ "$#" -eq 4 && "$2" == -f ]] || exit 94
+  format="$3"; id="$4"
+  if [[ "$format" == '{{index .Config.Labels "com.docker.compose.project"}}/{{index .Config.Labels "com.docker.compose.service"}}' ]]; then
+    case "$id" in
+      aaaaaaaaaaaa) printf '%s' "\${LEGACY_TRAEFIK_LABELS:-sub2api/traefik}" ;;
+      bbbbbbbbbbbb) printf '%s' "\${LEGACY_APP_LABELS:-sub2api/sub2api-blue}" ;;
+      cccccccccccc) exists edge || exit 1; printf '%s' "\${EDGE_LABELS:-sub2api-edge/traefik}" ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+  fi
+  if [[ "$format" == '{{.State.Running}}' ]]; then
+    case "$id" in
+      aaaaaaaaaaaa) exists legacy-stopped && printf false || printf true ;;
+      bbbbbbbbbbbb) printf true ;;
+      cccccccccccc) exists edge || exit 1; exists edge-stopped && printf false || printf true ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+  fi
+  if [[ "$format" == '{{with index .NetworkSettings.Networks "sub2api-edge"}}{{.NetworkID}}{{end}}' && "$id" == bbbbbbbbbbbb ]]; then
+    exists attached && printf network-id
+    exit 0
+  fi
   exit 94
 fi
-case "$1" in stop) [[ "$2" == aaaaaaaaaaaa ]] && touch "$state/legacy-stopped" || rm -f "$state/edge";; start) rm -f "$state/legacy-stopped";; rm) rm -f "$state/edge";; esac
+if [[ "$1" == network ]]; then
+  if [[ "$#" -eq 3 && "$2" == inspect && "$3" == sub2api-edge ]]; then exists network; exit; fi
+  if [[ "$#" -eq 5 && "$2" == inspect && "$3" == -f && "$5" == sub2api-edge && "$4" == '{{index .Labels "com.docker.compose.project"}}' ]]; then exists network || exit 1; printf '%s' "\${NETWORK_LABELS:-sub2api-edge}"; exit 0; fi
+  if [[ "$#" -eq 6 && "$2" == connect && "$3" == --alias && "$4" == sub2api-blue && "$5" == sub2api-edge && "$6" == bbbbbbbbbbbb ]]; then
+    exists network || { printf 'connection-before-network\\n' >> "$FAKE_LOG"; exit 95; }
+    [[ "\${FAIL_AFTER:-}" == attachment ]] && exit 91
+    touch "$state/attached"; exit 0
+  fi
+  if [[ "$#" -eq 4 && "$2" == disconnect && "$3" == sub2api-edge && "$4" == bbbbbbbbbbbb ]]; then exists attached || exit 1; rm -f "$state/attached"; exit 0; fi
+  if [[ "$#" -eq 3 && "$2" == rm && "$3" == sub2api-edge ]]; then exists network || exit 1; exists attached && exit 93; rm -f "$state/network"; exit 0; fi
+  exit 94
+fi
+if [[ "$1" == compose ]]; then
+  [[ "$#" -eq 9 && "$2" == --project-name && "$3" == sub2api-edge && "$4" == --env-file && "$5" == "$EDGE_ENV" && "$6" == -f && "$7" == compose/edge.yml && "$9" == traefik ]] || exit 94
+  [[ -f "$EDGE_ENV" ]] || exit 94
+  if [[ "$8" == create ]]; then touch "$state/network"; [[ "\${FAIL_AFTER:-}" == network ]] && exit 91; touch "$state/edge" "$state/edge-stopped"; [[ "\${FAIL_AFTER:-}" == container ]] && exit 91; exit 0; fi
+  if [[ "$8" == start ]]; then exists edge || exit 1; rm -f "$state/edge-stopped"; exit 0; fi
+  exit 94
+fi
+if [[ "$#" -eq 2 && "$1" == stop && "$2" == aaaaaaaaaaaa ]]; then touch "$state/legacy-stopped"; exit 0; fi
+if [[ "$#" -eq 2 && "$1" == stop && "$2" == cccccccccccc ]]; then exists edge || exit 1; touch "$state/edge-stopped"; exit 0; fi
+if [[ "$#" -eq 2 && "$1" == start && "$2" == aaaaaaaaaaaa ]]; then rm -f "$state/legacy-stopped"; exit 0; fi
+if [[ "$#" -eq 2 && "$1" == rm && "$2" == cccccccccccc ]]; then exists edge || exit 1; rm -f "$state/edge" "$state/edge-stopped"; exit 0; fi
+exit 94
 `);
   writeFileSync(join(bin, "cp"), `#!/bin/bash
 /bin/cp "$@"
 [[ "\${@: -1}" == */edge/acme.json && "\${FAIL_AFTER:-}" == acme ]] && exit 91
+exit 0
 `);
   writeFileSync(join(bin, "bash"), `#!/bin/bash
 if [[ "$1" == scripts/probe-origin-strict.sh || "$1" == scripts/probe-origin.sh ]]; then
@@ -154,7 +191,7 @@ describe("legacy single-site adoption", () => {
     expect(readFileSync(join(f.runtime, "data", "must-not-move"), "utf8")).toBe("legacy data\n");
     expect(f.log()).toMatch(/HOST_STATE journal-before-mutation[\s\S]*network connect --alias sub2api-blue sub2api-edge bbbbbbbbbbbb[\s\S]*PROBE scripts\/probe-origin-strict.sh[\s\S]*PROBE scripts\/probe-origin.sh[\s\S]*SINGBOX true/);
     expect(f.log()).toMatch(/compose --project-name sub2api-edge --env-file .*runtime\/edge\/edge.env -f compose\/edge.yml create traefik/);
-    expect(f.log()).not.toMatch(/compose down|volume|redis|sql|forbidden-compose|connection-before-network/);
+    expect(f.log()).not.toMatch(/compose down|volume|redis|sql|connection-before-network/);
   });
 
   it("rolls back a failed health handover, restoring legacy Traefik and retaining its pending journal", () => {
@@ -184,7 +221,17 @@ describe("legacy single-site adoption", () => {
   it("accepts only recoverable journal and host-state pairs", () => {
     const accepted: Array<[string, "pending" | "complete" | undefined]> = [["prepared", undefined], ["prepared", "pending"], ["pending", "pending"], ["completing", "pending"], ["completing", "complete"], ["complete", "complete"]];
     for (const [state, handover] of accepted) {
-      const f = fixture(); journal(f.root, state); if (handover) hostState(f.state, handover); expect(() => f.run("--rollback")).not.toThrow();
+      const f = fixture();
+      const hasEdge = state === "completing" || state === "complete";
+      journal(f.root, state, hasEdge ? { route_write_intent: "true", network_intent: "true", network_created: "true", edge_container: "cccccccccccc", edge_container_intent: "true", edge_dynamic_dir_created: "true", edge_env_intent: "true", edge_env_created: "true", edge_static_intent: "true", edge_static_created: "true", edge_singbox_intent: "true", edge_singbox_created: "true", acme_intent: "true", acme_created: "true", attachment_intent: "true", attachment_created: "true" } : {});
+      if (hasEdge) {
+        const edge = join(f.runtime, "edge");
+        mkdirSync(join(edge, "dynamic"), { recursive: true });
+        for (const file of ["edge.env", "traefik.yml", "acme.json", join("dynamic", "00-sing-box.yml"), join("dynamic", "site-code2.yml")]) writeFileSync(join(edge, file), "");
+        for (const artifact of ["network", "edge", "attached"]) writeFileSync(join(f.root, "fake-state", artifact), "");
+      }
+      if (handover) hostState(f.state, handover);
+      expect(() => f.run("--rollback")).not.toThrow();
     }
     const rejected: Array<[string, "pending" | "complete" | undefined, string[]?]> = [["pending", undefined], ["complete", "pending"], ["prepared", "complete"], ["complete", "complete", ["code2", "code3"]]];
     for (const [state, handover, sites] of rejected) {
