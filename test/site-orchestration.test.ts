@@ -104,7 +104,7 @@ function createShellFixture(existing = true): { root: string; log: string; envir
   };
 }
 
-function run(root: string, environment: NodeJS.ProcessEnv, script: string, args: string[] = []) {
+function run(root: string, environment: NodeJS.ProcessEnv, script: string, args: readonly string[] = []) {
   return spawnSync("bash", [script, ...args], { cwd: root, env: environment, encoding: "utf8" });
 }
 
