@@ -77,6 +77,7 @@ describe("Site runtime layout", () => {
         SITE_RUNTIME_ROOT: relative(process.cwd(), root),
         COMPOSE_PROJECT_NAME: `sub2api-${siteId}`,
         SITE_ROUTE_PATH: join(hostRoot, "edge", "dynamic", `site-${siteId}.yml`),
+        EDGE_NETWORK_NAME: "sub2api-edge",
       },
     }).trim().split("\n");
 
@@ -111,6 +112,8 @@ describe("Site runtime layout", () => {
         SITE_RUNTIME_ROOT: code2Root,
         COMPOSE_PROJECT_NAME: "sub2api-code2",
         SITE_ROUTE_PATH: join(hostRoot, "edge", "dynamic", "site-code2.yml"),
+        EDGE_NETWORK_NAME: "sub2api-edge",
+        EDGE_NETWORK_NAME: "sub2api-edge",
       },
     })).toThrow(/SITE_ID must match/);
 
@@ -139,7 +142,7 @@ describe("Site runtime layout", () => {
   it("keeps Site and Edge Compose helper contracts separate", () => {
     const siteHelper = readFileSync(new URL("../scripts/site-compose-common.sh", import.meta.url), "utf8");
     const edgeHelper = readFileSync(new URL("../scripts/edge-compose-common.sh", import.meta.url), "utf8");
-    expect(siteHelper).toContain('EDGE_NETWORK_NAME=sub2api-edge');
+    expect(siteHelper).toContain(': "${EDGE_NETWORK_NAME:?EDGE_NETWORK_NAME is required}"');
     expect(siteHelper).toContain(': "${SITE_RUNTIME_ROOT:?SITE_RUNTIME_ROOT is required}"');
     expect(siteHelper).toContain(': "${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}"');
     expect(siteHelper).toContain(': "${SITE_ROUTE_PATH:?SITE_ROUTE_PATH is required}"');
