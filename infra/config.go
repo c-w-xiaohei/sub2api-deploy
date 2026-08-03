@@ -42,6 +42,13 @@ func required(value, name string) (string, error) {
 	return value, nil
 }
 
+func resourceMode(value, name string) (string, error) {
+	if value != "existing" && value != "create" {
+		return "", fmt.Errorf("%s must be existing or create", name)
+	}
+	return value, nil
+}
+
 func defaultString(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
