@@ -126,9 +126,10 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 		"site-code2-reconcile": "infra-reconcile", "site-code2-strict-public-readiness": "post-strict-public-readiness",
 		"site-code2-release": "application-release",
 	} { assertNoParentAlias(t, requireResource(t, resources, name), oldName) }
-	for _, name := range []string{"site-code3-origin", "site-code3-neon", "site-code3-neon-project", "site-code3-upstash", "site-code3-upstash-redis", "site-code3-reconcile", "site-code3-release"} {
+	for _, name := range []string{"site-code3-origin", "site-code3-neon", "site-code3-neon-project", "site-code3-upstash-redis", "site-code3-reconcile", "site-code3-release"} {
 		if hasNoParentLegacyAlias(requireResource(t, resources, name), "") { t.Fatalf("%s unexpectedly has legacy aliases", name) }
 	}
+	if hasNoParentLegacyAlias(requireSiteProvider(t, mocks.resources, "code3", "upstash"), "") { t.Fatal("code3 Upstash provider unexpectedly has a legacy alias") }
 	for _, name := range []string{"site-code2-neon-project", "site-code2-upstash"} {
 		if len(requireResource(t, resources, name).RegisterRPC.GetIgnoreChanges()) != 1 { t.Fatalf("%s must preserve its legacy-only optional provider input", name) }
 	}
