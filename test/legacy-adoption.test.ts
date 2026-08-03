@@ -46,14 +46,24 @@ function fixture(): { root: string; runtime: string; state: string; env: NodeJS.
   writeFileSync(join(runtime, "data", "must-not-move"), "legacy data\n");
 
   writeFileSync(join(bin, "node"), `#!/bin/bash
-if [[ "$1" == -e ]]; then
-  if [[ "$2" == *activeSlot* ]]; then printf blue; exit 0; fi
-  if [[ "$2" == *handoverComplete* ]]; then
-    path="$3"; want="$4"; [[ -f "$path" ]] || exit 1
-    state="$(<"$path")"; [[ "$state" == *'"sites":["code2"]'* && "$state" == *'"runtimeRoot":"runtime"'* && "$state" == *'"composeProject":"sub2api"'* && "$state" == *'"routeLayout":"flat"'* ]] || exit 1
-    [[ "$want" == either || ( "$want" == complete && "$state" == *'"handoverComplete":true'* ) || ( "$want" != complete && "$state" == *'"handoverComplete":false'* ) ]] || exit 1
-    exit 0
-  fi
+set -euo pipefail
+slot_code='const x=require(process.argv[1]); if(!["blue","green"].includes(x.activeSlot)) process.exit(1); process.stdout.write(x.activeSlot)'
+mapping_code='const x=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const want=process.argv[2]; const ok=x.version===1&&x.sites?.length===1&&x.sites[0]==="code2"&&x.legacyCode2?.runtimeRoot==="runtime"&&x.legacyCode2?.composeProject==="sub2api"&&x.legacyCode2?.routeLayout==="flat"&&(want==="either"||x.legacyCode2?.handoverComplete===(want==="complete")); process.exit(ok?0:1)'
+payload_code='process.stdout.write(JSON.stringify({TRAEFIK_IMAGE:process.env.TRAEFIK_IMAGE,CLOUDFLARE_DNS_API_TOKEN:process.env.CLOUDFLARE_API_TOKEN,ACME_EMAIL:process.env.ACME_EMAIL,EDGE_RUNTIME_ROOT:process.env.EDGE_RUNTIME_ROOT}))'
+if [[ "$#" -eq 3 && "$1" == -e && "$2" == "$slot_code" ]]; then
+  [[ -f "$3" && "$(<"$3")" == *'"activeSlot":"blue"'* ]] || exit 1
+  printf blue; exit 0
+fi
+if [[ "$#" -eq 4 && "$1" == -e && "$2" == "$mapping_code" ]]; then
+  path="$3"; want="$4"; [[ -f "$path" && "$want" =~ ^(pending|complete|either)$ ]] || exit 1
+  mapping="$(<"$path")"; [[ "$mapping" == *'"version":1'* && "$mapping" == *'"sites":["code2"]'* && "$mapping" == *'"runtimeRoot":"runtime"'* && "$mapping" == *'"composeProject":"sub2api"'* && "$mapping" == *'"routeLayout":"flat"'* ]] || exit 1
+  [[ "$want" == either || ( "$want" == complete && "$mapping" == *'"handoverComplete":true'* ) || ( "$want" == pending && "$mapping" == *'"handoverComplete":false'* ) ]] || exit 1
+  exit 0
+fi
+if [[ "$#" -eq 2 && "$1" == -e && "$2" == "$payload_code" ]]; then
+  for value in "$TRAEFIK_IMAGE" "$CLOUDFLARE_API_TOKEN" "$ACME_EMAIL" "$EDGE_RUNTIME_ROOT"; do [[ "$value" =~ ^[A-Za-z0-9_./:@-]+$ ]] || exit 97; done
+  printf '{"TRAEFIK_IMAGE":"%s","CLOUDFLARE_DNS_API_TOKEN":"%s","ACME_EMAIL":"%s","EDGE_RUNTIME_ROOT":"%s"}' "$TRAEFIK_IMAGE" "$CLOUDFLARE_API_TOKEN" "$ACME_EMAIL" "$EDGE_RUNTIME_ROOT"
+  exit 0
 fi
 exit 97
 `);
@@ -61,21 +71,26 @@ exit 97
 set -euo pipefail
 printf 'NPX %s\\n' "$*" >> "$FAKE_LOG"
 fail() { [[ "\${FAIL_AFTER:-}" != "$1" ]] || exit 91; }
-if [[ "$*" == *write-host-state.ts* ]]; then
-  path="\${@: -3:1}"; handover="\${@: -1}"; [[ -f "$JOURNAL" ]] || { printf 'missing-journal-before-host-state\\n' >> "$FAKE_LOG"; exit 92; }
+if [[ "$#" -eq 7 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/write-host-state.ts && "$4" == write-legacy && "$6" == code2 && "$7" =~ ^(pending|complete)$ ]]; then
+  path="$5"; handover="$7"
   complete=false; [[ "$handover" == complete ]] && complete=true
   printf '{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":%s}}\\n' "$complete" > "$path"
-  chmod 600 "$path"; printf 'HOST_STATE journal-before-mutation\\n' >> "$FAKE_LOG"; exit 0
+  chmod 600 "$path"
+  if [[ -f "$JOURNAL" ]]; then printf 'HOST_STATE journal-before-mutation\\n' >> "$FAKE_LOG"; else printf 'HOST_STATE preview-without-journal\\n' >> "$FAKE_LOG"; fi
+  exit 0
 fi
-if [[ "$*" == *render-runtime-env.ts* ]]; then
-  path="\${@: -1}"; mkdir -p "$(dirname "$path")"; printf 'TRAEFIK_IMAGE="test"\\n' > "$path"; chmod 600 "$path"; fail edge-env; exit 0
+if [[ "$#" -eq 5 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/render-runtime-env.ts && "$4" == write ]]; then
+  path="$5"; edge_root="$(dirname "$path")"; payload="$(</dev/stdin)"
+  expected="{\"TRAEFIK_IMAGE\":\"$TRAEFIK_IMAGE\",\"CLOUDFLARE_DNS_API_TOKEN\":\"$CLOUDFLARE_API_TOKEN\",\"ACME_EMAIL\":\"$ACME_EMAIL\",\"EDGE_RUNTIME_ROOT\":\"$edge_root\"}"
+  [[ "$payload" == "$expected" ]] || exit 99
+  mkdir -p "$edge_root"; printf 'TRAEFIK_IMAGE="test"\\n' > "$path"; chmod 600 "$path"; fail edge-env; exit 0
 fi
-if [[ "$*" == *render-edge-config.ts* ]]; then
-  root="\${@: -6:1}"; mkdir -p "$root/dynamic"; printf 'static\\n' > "$root/traefik.yml"; chmod 600 "$root/traefik.yml"; fail edge-static
+if [[ "$#" -eq 10 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/render-edge-config.ts && "$4" == write && "$6" == traefik/traefik.yml && "$7" == traefik/dynamic/sing-box.yml && "$8" == "$ACME_EMAIL" && "$9" == "$SING_BOX_SERVER_NAME" && "\${10}" == "$SING_BOX_TARGET" ]]; then
+  root="$5"; mkdir -p "$root/dynamic"; printf 'static\\n' > "$root/traefik.yml"; chmod 600 "$root/traefik.yml"; fail edge-static
   printf 'singbox\\n' > "$root/dynamic/00-sing-box.yml"; chmod 600 "$root/dynamic/00-sing-box.yml"; fail edge-singbox; exit 0
 fi
-if [[ "$*" == *render-site-route.ts* ]]; then
-  route="\${@: -5:1}"; mkdir -p "$(dirname "$route")"; printf 'route\\n' > "$route"; chmod 600 "$route"; exit 0
+if [[ "$#" -eq 10 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/render-site-route.ts && "$4" == write && "$5" == traefik/dynamic/site.yml && "$7" == code2 && "$8" == "$DOMAIN" && "$9" == blue && "\${10}" == sub2api-blue ]]; then
+  route="$6"; mkdir -p "$(dirname "$route")"; printf 'route\\n' > "$route"; chmod 600 "$route"; exit 0
 fi
 exit 98
 `);
@@ -151,6 +166,10 @@ exit 94
 `);
   writeFileSync(join(bin, "cp"), `#!/bin/bash
 /bin/cp "$@"
+exit 0
+`);
+  writeFileSync(join(bin, "chmod"), `#!/bin/bash
+/bin/chmod "$@"
 [[ "\${@: -1}" == */edge/acme.json && "\${FAIL_AFTER:-}" == acme ]] && exit 91
 exit 0
 `);
@@ -161,10 +180,28 @@ fi
 if [[ "$1" == -c ]]; then printf 'SINGBOX %s\\n' "$2" >> "$FAKE_LOG"; fi
 exec /bin/bash "$@"
 `);
-  for (const executable of ["node", "npx", "docker", "bash", "cp"]) chmodSync(join(bin, executable), 0o755);
+  for (const executable of ["node", "npx", "docker", "bash", "cp", "chmod"]) chmodSync(join(bin, executable), 0o755);
   const state = join(runtime, "host-state.json");
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_STATE: fakeState, FAKE_LOG: join(root, "fake.log"), JOURNAL: join(runtime, "adopt-single-site-layout.journal"), EDGE_ENV: join(runtime, "edge", "edge.env"), TRAEFIK_IMAGE: "traefik:test", CLOUDFLARE_API_TOKEN: "token", ACME_EMAIL: "ops@example.test", SING_BOX_SERVER_NAME: "www.cloudflare.com", SING_BOX_TARGET: "host.docker.internal:8443", DOMAIN: "code2.example.test", ORIGIN_IP: "203.0.113.10", APP_PROBE_PATH: "/api/ready", SING_BOX_VERIFY_COMMAND: "true" };
   return { root, runtime, state, env, run: (mode?: string) => execFileSync("/bin/bash", [script, "--environment", "test", "--site", "code2", "--host-state", state, ...(mode ? [mode] : [])], { cwd: process.cwd(), env, stdio: "pipe" }), log: () => existsSync(env.FAKE_LOG!) ? readFileSync(env.FAKE_LOG!, "utf8") : "" };
+}
+
+function validRecoveryState(f: Fixture, state: string, handover?: "pending" | "complete"): void {
+  const edge = join(f.runtime, "edge");
+  const dynamic = join(edge, "dynamic");
+  mkdirSync(dynamic, { recursive: true });
+  writeFileSync(join(dynamic, "site-code2.yml"), "adopted route\n");
+  writeFileSync(join(dynamic, "site-code2.yml.before-adoption"), "legacy route\n");
+  for (const file of ["edge.env", "traefik.yml", "acme.json", join("dynamic", "00-sing-box.yml")]) writeFileSync(join(edge, file), "owned\n");
+  journal(f.root, state, {
+    route_preexisting: "true", route_backup_intent: "true", route_backup_created: "true", route_write_intent: "true",
+    network_intent: "true", network_created: "true", attachment_intent: "true", attachment_created: "true",
+    edge_container: "cccccccccccc", edge_container_intent: "true", edge_env_intent: "true", edge_env_created: "true",
+    edge_static_intent: "true", edge_static_created: "true", edge_singbox_intent: "true", edge_singbox_created: "true",
+    acme_intent: "true", acme_created: "true",
+  });
+  for (const artifact of ["network", "edge", "edge-stopped", "attached"]) writeFileSync(join(f.root, "fake-state", artifact), "");
+  if (handover) hostState(f.state, handover);
 }
 
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -194,7 +231,7 @@ describe("legacy single-site adoption", () => {
     expect(f.log()).not.toMatch(/compose down|volume|redis|sql|connection-before-network/);
   });
 
-  it("rolls back a failed health handover, restoring legacy Traefik and retaining its pending journal", () => {
+  it("rolls back a failed health handover, removing the pending mapping and retaining its journal", () => {
     const f = fixture();
     f.env.FAIL_AFTER = "health";
     expect(() => f.run("--apply")).toThrow();
@@ -222,15 +259,7 @@ describe("legacy single-site adoption", () => {
     const accepted: Array<[string, "pending" | "complete" | undefined]> = [["prepared", undefined], ["prepared", "pending"], ["pending", "pending"], ["completing", "pending"], ["completing", "complete"], ["complete", "complete"]];
     for (const [state, handover] of accepted) {
       const f = fixture();
-      const hasEdge = state === "completing" || state === "complete";
-      journal(f.root, state, hasEdge ? { route_write_intent: "true", network_intent: "true", network_created: "true", edge_container: "cccccccccccc", edge_container_intent: "true", edge_dynamic_dir_created: "true", edge_env_intent: "true", edge_env_created: "true", edge_static_intent: "true", edge_static_created: "true", edge_singbox_intent: "true", edge_singbox_created: "true", acme_intent: "true", acme_created: "true", attachment_intent: "true", attachment_created: "true" } : {});
-      if (hasEdge) {
-        const edge = join(f.runtime, "edge");
-        mkdirSync(join(edge, "dynamic"), { recursive: true });
-        for (const file of ["edge.env", "traefik.yml", "acme.json", join("dynamic", "00-sing-box.yml"), join("dynamic", "site-code2.yml")]) writeFileSync(join(edge, file), "");
-        for (const artifact of ["network", "edge", "attached"]) writeFileSync(join(f.root, "fake-state", artifact), "");
-      }
-      if (handover) hostState(f.state, handover);
+      validRecoveryState(f, state, handover);
       expect(() => f.run("--rollback")).not.toThrow();
     }
     const rejected: Array<[string, "pending" | "complete" | undefined, string[]?]> = [["pending", undefined], ["complete", "pending"], ["prepared", "complete"], ["complete", "complete", ["code2", "code3"]]];
@@ -245,6 +274,7 @@ describe("legacy single-site adoption", () => {
       f.env.FAIL_AFTER = point;
       expect(() => f.run("--apply")).toThrow();
       expect(existsSync(f.state)).toBe(false);
+      expect(readFileSync(join(f.runtime, "adopt-single-site-layout.journal"), "utf8")).toContain("state=pending");
       expect(existsSync(join(f.root, "fake-state", "network"))).toBe(false);
       expect(existsSync(join(f.root, "fake-state", "edge"))).toBe(false);
       expect(existsSync(join(f.root, "fake-state", "attached"))).toBe(false);
@@ -262,6 +292,8 @@ describe("legacy single-site adoption", () => {
     f.env.FAIL_AFTER = "attachment";
     expect(() => f.run("--apply")).toThrow();
     expect(f.log()).toMatch(/network connect --alias sub2api-blue sub2api-edge bbbbbbbbbbbb/);
+    expect(existsSync(f.state)).toBe(false);
+    expect(readFileSync(join(f.runtime, "adopt-single-site-layout.journal"), "utf8")).toContain("state=pending");
     expect(existsSync(join(f.root, "fake-state", "attached"))).toBe(false);
     expect(existsSync(join(f.root, "fake-state", "network"))).toBe(false);
     f.env.FAIL_AFTER = "";
