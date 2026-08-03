@@ -51,6 +51,19 @@ describe("compose deployment contract", () => {
     expect(rendered).toContain('address: "host.docker.internal:8443"');
   });
 
+  it("allows first-boot migration to finish before health wait expires", () => {
+    const override = read("override.yml");
+    const upstream = read("upstream.yml");
+    const deploy = readPath("../scripts/deploy-compose.sh");
+
+    expect(override.match(/start_period: 180s/g)).toHaveLength(2);
+    expect(upstream).toContain("start_period: 180s");
+    expect(deploy).not.toContain("--wait-timeout 120");
+    expect(deploy).toContain("--wait-timeout 300");
+  });
+
+  });
+
   it("renders both slots with the upstream health and hardening contract", () => {
     const envPath = join(mkdtempSync(join(tmpdir(), "sub2api-compose-")), ".env");
     writeFileSync(envPath, [
