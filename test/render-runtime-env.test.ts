@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { renderDotenv } from "../scripts/render-runtime-env.js";
+import { renderDotenv, writeRuntimeEnvAtomically } from "../scripts/render-runtime-env.js";
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("renderDotenv", () => {
   it("serializes dotenv values and does not log secret values", () => {
@@ -18,11 +21,35 @@ describe("renderDotenv", () => {
   });
 
   it("allows infra reconciliation to preserve the active slot data directory", () => {
-    const output = execFileSync("npx", ["--no-install", "tsx", "scripts/render-runtime-env.ts", "--slot=green", "--slot-data-dir=green"], {
+    const path = join(mkdtempSync(join(tmpdir(), "sub2api-runtime-env-")), "runtime.env");
+    const output = execFileSync("npx", ["--no-install", "tsx", "scripts/render-runtime-env.ts", "write", path, "--slot=green", "--slot-data-dir=green"], {
       input: JSON.stringify({ SLOT: "blue", SLOT_DATA_DIR: "blue" }),
       encoding: "utf8",
     });
-    expect(output).toContain('SLOT="green"');
-    expect(output).toContain('SLOT_DATA_DIR="green"');
+    expect(output).toBe("");
+    expect(readFileSync(path, "utf8")).toContain('SLOT="green"');
+    expect(readFileSync(path, "utf8")).toContain('SLOT_DATA_DIR="green"');
+  });
+
+  it("requires an explicit destination instead of writing runtime values to stdout", () => {
+    expect(() => execFileSync("npx", ["--no-install", "tsx", "scripts/render-runtime-env.ts", "--slot=green"], {
+      input: JSON.stringify({ JWT_SECRET: "secret" }),
+      encoding: "utf8",
+      stdio: "pipe",
+    })).toThrow(/usage/);
+  });
+
+  it("writes isolated Site runtime env files and reads only the requested path", () => {
+    const hostRoot = mkdtempSync(join(tmpdir(), "sub2api-runtime-"));
+    const code2Path = join(hostRoot, "sites", "code2", "runtime.env");
+    const code3Path = join(hostRoot, "sites", "code3", "runtime.env");
+    writeRuntimeEnvAtomically(code2Path, { JWT_SECRET: "code2-secret", POSTGRES_MODE: "docker" });
+    writeRuntimeEnvAtomically(code3Path, { JWT_SECRET: "code3-secret", POSTGRES_MODE: "neon" });
+
+    expect(execFileSync("node", ["scripts/read-runtime-env.cjs", code2Path, "JWT_SECRET"], { encoding: "utf8" })).toBe("code2-secret");
+    expect(execFileSync("node", ["scripts/read-runtime-env.cjs", code3Path, "JWT_SECRET"], { encoding: "utf8" })).toBe("code3-secret");
+    expect(() => execFileSync("node", ["scripts/read-runtime-env.cjs", code2Path, "BAD-KEY"], { encoding: "utf8" })).toThrow();
+    expect(readFileSync(code2Path, "utf8")).not.toContain("code3-secret");
+    expect(statSync(code2Path).mode & 0o777).toBe(0o600);
   });
 });

@@ -10,6 +10,7 @@ cat > "$edge_env" <<EOF
 TRAEFIK_IMAGE=traefik:v3.3.3
 CLOUDFLARE_DNS_API_TOKEN=not-used-in-verification
 ACME_EMAIL=ops@example.com
+EDGE_RUNTIME_ROOT=${ROOT_DIR}/runtime/edge
 EOF
 docker compose --project-name sub2api-edge --env-file "$edge_env" -f compose/edge.yml config >/dev/null
 rm -f "$edge_env"

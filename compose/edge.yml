@@ -1,6 +1,6 @@
 # Edge Compose project (sub2api-edge): the shared Traefik edge only.
 # Publishes host ports 80/443, creates the named `sub2api-edge` network, and
-# mounts only edge runtime files under runtime/edge. Site application slots
+# mounts only edge runtime files under EDGE_RUNTIME_ROOT. Site application slots
 # and data services belong to compose/site.yml, never here.
 services:
   traefik:
@@ -19,9 +19,9 @@ services:
       CF_DNS_API_TOKEN: ${CLOUDFLARE_DNS_API_TOKEN:?CLOUDFLARE_DNS_API_TOKEN is required}
       ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
     volumes:
-      - ../runtime/edge/traefik.yml:/etc/traefik/traefik.yml:ro
-      - ../runtime/edge/dynamic:/etc/traefik/dynamic:ro
-      - ../runtime/edge/acme.json:/etc/traefik/acme.json
+      - ${EDGE_RUNTIME_ROOT:?EDGE_RUNTIME_ROOT is required}/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ${EDGE_RUNTIME_ROOT:?EDGE_RUNTIME_ROOT is required}/dynamic:/etc/traefik/dynamic:ro
+      - ${EDGE_RUNTIME_ROOT:?EDGE_RUNTIME_ROOT is required}/acme.json:/etc/traefik/acme.json
     networks:
       - sub2api-edge
 

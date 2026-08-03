@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { DeployState } from "../scripts/slot-state.js";
 import { assertDeploymentModes } from "../scripts/deployment-mode.js";
 
@@ -14,28 +13,30 @@ export function validateDeploymentPreflight(
   input: DeploymentPreflightInput,
   postgresMode: string,
   redisMode: string,
+  statePath: string,
 ): DeploymentPreflightResult {
-  if (!input.state && !input.markerExists) return "first-setup";
-  if (input.markerExists && !input.state) {
+  const { markerExists, state } = input;
+  if (!state) {
+    if (!markerExists) return "first-setup";
     throw new Error("bootstrap marker exists but deploy-state is missing; restore/adopt state before running pulumi up");
   }
-  assertDeploymentModes(input.state!, postgresMode, redisMode);
+  assertDeploymentModes(state, postgresMode, redisMode, statePath);
   return "existing";
 }
 
 export function readDeploymentPreflight(
-  rootDirectory: string,
+  statePath: string,
+  markerPath: string,
   postgresMode: string,
   redisMode: string,
 ): DeploymentPreflightResult {
-  const statePath = join(rootDirectory, "runtime", "deploy-state.json");
-  const markerPath = join(rootDirectory, "runtime", "bootstrap.marker");
   const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as DeployState : undefined;
-  return validateDeploymentPreflight({ state, markerExists: existsSync(markerPath) }, postgresMode, redisMode);
+  const markerExists = existsSync(markerPath);
+  return validateDeploymentPreflight({ state, markerExists }, postgresMode, redisMode, statePath);
 }
 
 if (process.argv[2] === "check") {
-  const [, , , rootDirectory, postgresMode, redisMode] = process.argv;
-  if (!rootDirectory || !postgresMode || !redisMode) throw new Error("usage: deployment-preflight.ts check ROOT POSTGRES_MODE REDIS_MODE");
-  readDeploymentPreflight(rootDirectory, postgresMode, redisMode);
+  const [, , , statePath, markerPath, postgresMode, redisMode] = process.argv;
+  if (!statePath || !markerPath || !postgresMode || !redisMode) throw new Error("usage: deployment-preflight.ts check DEPLOY_STATE_PATH BOOTSTRAP_MARKER_PATH POSTGRES_MODE REDIS_MODE");
+  readDeploymentPreflight(statePath, markerPath, postgresMode, redisMode);
 }

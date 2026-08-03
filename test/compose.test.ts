@@ -62,7 +62,7 @@ describe("compose deployment contract", () => {
     expect(edge).toContain("443:443");
     expect(edge).toContain("host.docker.internal:host-gateway");
     expect(edge).toContain("sub2api-edge");
-    expect(edge).toContain("runtime/edge");
+    expect(edge).toContain("${EDGE_RUNTIME_ROOT:?EDGE_RUNTIME_ROOT is required}/traefik.yml");
     expect(edge).not.toMatch(/sub2api-(blue|green)/);
     expect(edge).not.toContain("postgres");
     expect(edge).not.toContain("redis");
@@ -80,7 +80,7 @@ describe("compose deployment contract", () => {
     const config = renderCompose(
       "sub2api-edge",
       ["compose/edge.yml"],
-      ["TRAEFIK_IMAGE=traefik:v3.3.3", "CLOUDFLARE_DNS_API_TOKEN=placeholder", "ACME_EMAIL=ops@example.com"],
+      ["TRAEFIK_IMAGE=traefik:v3.3.3", "CLOUDFLARE_DNS_API_TOKEN=placeholder", "ACME_EMAIL=ops@example.com", `EDGE_RUNTIME_ROOT=${process.cwd()}/runtime/edge`],
       [],
     );
     expect(Object.keys(config.services)).toEqual(["traefik"]);
