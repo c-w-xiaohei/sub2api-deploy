@@ -60,22 +60,22 @@ exit 97
   writeFileSync(join(bin, "npx"), `#!/bin/bash
 set -euo pipefail
 printf 'NPX %s\\n' "$*" >> "$FAKE_LOG"
-fail() { [[ "${FAIL_AFTER:-}" == "$1" ]] && exit 91; }
+fail() { [[ "\${FAIL_AFTER:-}" == "$1" ]] && exit 91; }
 if [[ "$*" == *write-host-state.ts* ]]; then
-  path="${@: -3:1}"; handover="${@: -1}"; [[ -f "$JOURNAL" ]] || { printf 'missing-journal-before-host-state\\n' >> "$FAKE_LOG"; exit 92; }
+  path="\${@: -3:1}"; handover="\${@: -1}"; [[ -f "$JOURNAL" ]] || { printf 'missing-journal-before-host-state\\n' >> "$FAKE_LOG"; exit 92; }
   complete=false; [[ "$handover" == complete ]] && complete=true
   printf '{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":%s}}\\n' "$complete" > "$path"
   chmod 600 "$path"; printf 'HOST_STATE journal-before-mutation\\n' >> "$FAKE_LOG"; exit 0
 fi
 if [[ "$*" == *render-runtime-env.ts* ]]; then
-  path="${@: -1}"; mkdir -p "$(dirname "$path")"; printf 'TRAEFIK_IMAGE="test"\\n' > "$path"; chmod 600 "$path"; fail edge-env; exit 0
+  path="\${@: -1}"; mkdir -p "$(dirname "$path")"; printf 'TRAEFIK_IMAGE="test"\\n' > "$path"; chmod 600 "$path"; fail edge-env; exit 0
 fi
 if [[ "$*" == *render-edge-config.ts* ]]; then
-  root="${@: -6:1}"; mkdir -p "$root/dynamic"; printf 'static\\n' > "$root/traefik.yml"; chmod 600 "$root/traefik.yml"; fail edge-static
+  root="\${@: -6:1}"; mkdir -p "$root/dynamic"; printf 'static\\n' > "$root/traefik.yml"; chmod 600 "$root/traefik.yml"; fail edge-static
   printf 'singbox\\n' > "$root/dynamic/00-sing-box.yml"; chmod 600 "$root/dynamic/00-sing-box.yml"; fail edge-singbox; exit 0
 fi
 if [[ "$*" == *render-site-route.ts* ]]; then
-  route="${@: -5:1}"; mkdir -p "$(dirname "$route")"; printf 'route\\n' > "$route"; chmod 600 "$route"; exit 0
+  route="\${@: -5:1}"; mkdir -p "$(dirname "$route")"; printf 'route\\n' > "$route"; chmod 600 "$route"; exit 0
 fi
 exit 98
 `);
@@ -92,7 +92,7 @@ if [[ "$1" == ps ]]; then
 fi
 if [[ "$1" == inspect ]]; then
   format=""; [[ "$2" == -f ]] && format="$3" && shift 2; id="$2"
-  case "$id" in aaaaaaaaaaaa) labels="${LEGACY_TRAEFIK_LABELS:-sub2api/traefik}";; bbbbbbbbbbbb) labels="${LEGACY_APP_LABELS:-sub2api/sub2api-blue}";; cccccccccccc) exists edge || exit 1; labels="${EDGE_LABELS:-sub2api-edge/traefik}";; sub2api-edge) exists network || exit 1; labels="${NETWORK_LABELS:-sub2api-edge}";; *) exit 1;; esac
+  case "$id" in aaaaaaaaaaaa) labels="\${LEGACY_TRAEFIK_LABELS:-sub2api/traefik}";; bbbbbbbbbbbb) labels="\${LEGACY_APP_LABELS:-sub2api/sub2api-blue}";; cccccccccccc) exists edge || exit 1; labels="\${EDGE_LABELS:-sub2api-edge/traefik}";; sub2api-edge) exists network || exit 1; labels="\${NETWORK_LABELS:-sub2api-edge}";; *) exit 1;; esac
   [[ -z "$format" ]] && exit 0
   [[ "$format" == *'.State.Running'* ]] && { [[ "$id" == aaaaaaaaaaaa && -f "$state/legacy-stopped" ]] && printf false || printf true; exit 0; }
    [[ "$id" == bbbbbbbbbbbb && "$format" == *NetworkSettings.Networks* ]] && { exists attached && printf network-id; exit 0; }
@@ -100,14 +100,14 @@ if [[ "$1" == inspect ]]; then
   printf '%s' "$labels"; exit 0
 fi
 if [[ "$1" == network ]]; then
-  case "$2" in inspect) exists network || exit 1; [[ "$*" == *range* ]] && { exists attached && printf bbbbbbbbbbbb; } || printf '%s' "${NETWORK_LABELS:-sub2api-edge}";;
-  connect) exists network || { printf 'connection-before-network\\n' >> "$FAKE_LOG"; exit 95; }; touch "$state/attached"; [[ "${FAIL_AFTER:-}" == attachment ]] && exit 91;;
+  case "$2" in inspect) exists network || exit 1; [[ "$*" == *range* ]] && { exists attached && printf bbbbbbbbbbbb; } || printf '%s' "\${NETWORK_LABELS:-sub2api-edge}";;
+  connect) exists network || { printf 'connection-before-network\\n' >> "$FAKE_LOG"; exit 95; }; touch "$state/attached"; [[ "\${FAIL_AFTER:-}" == attachment ]] && exit 91;;
   disconnect) rm -f "$state/attached";; rm) exists attached && exit 93; rm -f "$state/network";; esac; exit 0
 fi
 if [[ "$1" == compose ]]; then
   [[ "$args" == *'--project-name sub2api-edge'* && "$args" == *"--env-file $EDGE_ENV"* && "$args" == *'-f compose/edge.yml '* ]] || exit 94
   [[ -f "$EDGE_ENV" ]] || exit 94
-  if [[ "$args" == *' create traefik' ]]; then touch "$state/network"; [[ "${FAIL_AFTER:-}" == network ]] && exit 91; touch "$state/edge"; [[ "${FAIL_AFTER:-}" == container ]] && exit 91; exit 0; fi
+  if [[ "$args" == *' create traefik' ]]; then touch "$state/network"; [[ "\${FAIL_AFTER:-}" == network ]] && exit 91; touch "$state/edge"; [[ "\${FAIL_AFTER:-}" == container ]] && exit 91; exit 0; fi
   [[ "$args" == *' start traefik' ]] && exists edge && exit 0
   exit 94
 fi
@@ -115,11 +115,11 @@ case "$1" in stop) [[ "$2" == aaaaaaaaaaaa ]] && touch "$state/legacy-stopped" |
 `);
   writeFileSync(join(bin, "cp"), `#!/bin/bash
 /bin/cp "$@"
-[[ "${@: -1}" == */edge/acme.json && "${FAIL_AFTER:-}" == acme ]] && exit 91
+[[ "\${@: -1}" == */edge/acme.json && "\${FAIL_AFTER:-}" == acme ]] && exit 91
 `);
   writeFileSync(join(bin, "bash"), `#!/bin/bash
 if [[ "$1" == scripts/probe-origin-strict.sh || "$1" == scripts/probe-origin.sh ]]; then
-  printf 'PROBE %s\\n' "$1" >> "$FAKE_LOG"; [[ "${FAIL_AFTER:-}" == health ]] && exit 91; exit 0
+  printf 'PROBE %s\\n' "$1" >> "$FAKE_LOG"; [[ "\${FAIL_AFTER:-}" == health ]] && exit 91; exit 0
 fi
 if [[ "$1" == -c ]]; then printf 'SINGBOX %s\\n' "$2" >> "$FAKE_LOG"; fi
 exec /bin/bash "$@"
