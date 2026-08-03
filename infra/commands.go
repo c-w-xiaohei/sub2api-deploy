@@ -12,6 +12,17 @@ func newCommand(ctx *pulumi.Context, name, script string, environment pulumi.Str
 	return local.NewCommand(ctx, name, &local.CommandArgs{Create: pulumi.String(script), Update: pulumi.String(script), Environment: environment, Logging: local.LoggingNone, Triggers: stringArray(triggers)}, opts...)
 }
 
+// Existing code2 resources were Stack-owned. New Sites must not acquire aliases.
+func legacyCode2Aliases(layout SiteLayout, oldName string) []pulumi.Alias {
+	if layout.SiteID != "code2" || layout.ComposeProject != "sub2api" || layout.RuntimeRoot != "runtime" { return nil }
+	return []pulumi.Alias{{Name: pulumi.String(oldName), NoParent: pulumi.Bool(true)}}
+}
+
+func newSiteCommand(ctx *pulumi.Context, layout SiteLayout, name, oldName, script string, environment pulumi.StringMap, triggers []string, parent pulumi.Resource, dependencies ...pulumi.Resource) (*local.Command, error) {
+	opts := []pulumi.ResourceOption{pulumi.Parent(parent), pulumi.Aliases(legacyCode2Aliases(layout, oldName)...), pulumi.Version("1.2.1"), pulumi.DependsOn(dependencies), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"})}
+	return local.NewCommand(ctx, name, &local.CommandArgs{Create: pulumi.String(script), Update: pulumi.String(script), Environment: environment, Logging: local.LoggingNone, Triggers: stringArray(triggers)}, opts...)
+}
+
 func newHostCommand(ctx *pulumi.Context, name, script string, environment pulumi.StringMap, triggers []string, dependencies ...pulumi.Resource) (*local.Command, error) {
 	opts := []pulumi.ResourceOption{pulumi.Version("1.2.1"), pulumi.DependsOn(dependencies), pulumi.AdditionalSecretOutputs([]string{"stdout", "stderr"})}
 	return local.NewCommand(ctx, name, &local.CommandArgs{Create: pulumi.String(script), Update: pulumi.String(script), Environment: environment, Logging: local.LoggingNone, Triggers: stringArray(triggers)}, opts...)

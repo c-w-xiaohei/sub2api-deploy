@@ -15,11 +15,11 @@ type Edge struct {
 	Spec      EdgeSpec
 }
 
-func DeployEdge(ctx *pulumi.Context, spec EdgeSpec, apiToken pulumi.StringInput, checksum string, preflight pulumi.Resource) (*Edge, error) {
+func DeployEdge(ctx *pulumi.Context, spec EdgeSpec, apiToken pulumi.StringInput, checksum string, preflight pulumi.Resource, legacyCode2 bool) (*Edge, error) {
 	edge := &Edge{}
 	if err := ctx.RegisterComponentResource("sub2api:host:Edge", "edge", edge); err != nil { return nil, err }
-	provider, err := createCloudflareProvider(ctx, edge, preflight, apiToken); if err != nil { return nil, err }
-	ssl, err := createStrictSSLSetting(ctx, edge, preflight, provider, spec.CloudflareZoneID); if err != nil { return nil, err }
+	provider, err := createCloudflareProvider(ctx, edge, preflight, apiToken, legacyCode2); if err != nil { return nil, err }
+	ssl, err := createStrictSSLSetting(ctx, edge, preflight, provider, spec.CloudflareZoneID, legacyCode2); if err != nil { return nil, err }
 	singBox, err := json.Marshal(spec.SingBox); if err != nil { return nil, err }
 	reconcile, err := newCommand(ctx, "edge-reconcile", "bash scripts/reconcile-edge.sh", pulumi.StringMap{
 		"EDGE_RUNTIME_ROOT": pulumi.String(EdgeRuntimeRoot), "EDGE_NETWORK_NAME": pulumi.String(EdgeNetworkName),

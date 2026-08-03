@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -59,6 +59,42 @@ describe("host preflight", () => {
   it("rejects host state carrying credentials or unsupported fields", () => {
     expect(() => parseHostState('{"version":1,"sites":["code2"],"databaseDsn":"postgres://secret"}'))
       .toThrow(/credential or unsupported field/);
+  });
+
+  it("strictly parses only the internal non-secret legacy code2 mapping", () => {
+    expect(parseHostState('{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":false}}'))
+      .toMatchObject({ legacyCode2: { runtimeRoot: "runtime", composeProject: "sub2api" } });
+    expect(() => parseHostState('{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","token":"secret"}}')).toThrow(/credential or unsupported/);
+    expect(() => parseHostState('{"version":1,"sites":["code3"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":false}}')).toThrow(/code2/);
+  });
+
+  it("fails closed when a recorded normal Site has no deploy state", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path)).toThrow(/deploy state is missing/);
+  });
+
+  it("requires exact-one code2 when detecting an unadopted legacy runtime", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(join(dirname(path), "deploy-state.json"), "{}");
+    expect(() => checkHostPreflight([], undefined, path)).toThrow(/at least one/);
+    expect(() => checkHostPreflight(["code2", "code3"], undefined, path)).toThrow(/exactly one configured Site ID: code2/);
+    expect(() => checkHostPreflight(["code3"], undefined, path)).toThrow(/code2/);
+    expect(() => checkHostPreflight(["code2"], undefined, path)).toThrow(/explicitly approved/);
+  });
+
+  it("does not mistake normal code2/code3 deploy state for a flat legacy layout", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(join(root, "runtime", "sites", "code2"), { recursive: true });
+    mkdirSync(join(root, "runtime", "sites", "code3"), { recursive: true });
+    writeFileSync(join(root, "runtime", "sites", "code2", "deploy-state.json"), "{}");
+    writeFileSync(join(root, "runtime", "sites", "code3", "deploy-state.json"), "{}");
+    expect(checkHostPreflight(["code2", "code3"], undefined, path)).toEqual(["code2", "code3"]);
   });
 
   it("treats a missing host state file as empty and a corrupt file as malformed", () => {

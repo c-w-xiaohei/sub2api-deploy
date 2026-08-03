@@ -20,26 +20,30 @@ type hostDesiredState struct { Edge EdgeSpec; Sites []hostDesiredSite }
 
 func deploymentProgram(ctx *pulumi.Context) error {
 	programConfig, err := loadProgramConfig(ctx); if err != nil { return err }
+	allowPendingPreview := ctx.DryRun() && os.Getenv("ALLOW_PENDING_LEGACY_PREVIEW") == "1"
+	layouts, adoptedCode2, err := ResolveHostLayouts("runtime/host-state.json", programConfig.Layouts, allowPendingPreview); if err != nil { return err }
 	edgeChecksum, err := edgeChecksum(); if err != nil { return err }
 	siteChecksum, err := siteChecksum(); if err != nil { return err }
 	hostChecksum, err := hostChecksum(); if err != nil { return err }
-	exports, err := deployHostGraph(ctx, programConfig.Host, programConfig.Layouts, programConfig.Secrets, edgeChecksum, siteChecksum, hostChecksum); if err != nil { return err }
+	exports, err := deployHostGraph(ctx, programConfig.Host, layouts, programConfig.Secrets, edgeChecksum, siteChecksum, hostChecksum, adoptedCode2); if err != nil { return err }
 	ctx.Export("sites", exports.Sites)
 	ctx.Export("hostStateId", exports.HostStateID)
 	return nil
 }
 
-func deployHostGraph(ctx *pulumi.Context, host HostSpec, layouts []SiteLayout, secrets SecretHostSpec, edgeChecksum, siteChecksum, hostChecksum string) (HostGraphExports, error) {
+func deployHostGraph(ctx *pulumi.Context, host HostSpec, layouts []SiteLayout, secrets SecretHostSpec, edgeChecksum, siteChecksum, hostChecksum string, adoptedCode2 ...bool) (HostGraphExports, error) {
 	configuredSiteIDs := ""
 	for index, layout := range layouts { if index > 0 { configuredSiteIDs += "," }; configuredSiteIDs += layout.SiteID }
 	hostStatePath := "runtime/host-state.json"
 	desiredState, err := hostDesiredStateDigest(host, layouts)
 	if err != nil { return HostGraphExports{}, err }
-	preflight, err := newHostCommand(ctx, "host-preflight", "npx --no-install tsx scripts/host-preflight.ts check \"$CONFIGURED_SITE_IDS\" \"$HOST_STATE_PATH\"", pulumi.StringMap{
+	preflight, err := newHostCommand(ctx, "host-preflight", "npx --no-install tsx scripts/host-preflight.ts check \"$CONFIGURED_SITE_IDS\" \"$HOST_STATE_PATH\" \"$ALLOW_PENDING_LEGACY_PREVIEW\"", pulumi.StringMap{
 		"CONFIGURED_SITE_IDS": pulumi.String(configuredSiteIDs), "HOST_STATE_PATH": pulumi.String(hostStatePath),
+		"ALLOW_PENDING_LEGACY_PREVIEW": pulumi.String(fmt.Sprintf("%t", ctx.DryRun() && os.Getenv("ALLOW_PENDING_LEGACY_PREVIEW") == "1")),
 	}, []string{"host-preflight-v1", configuredSiteIDs, hostStatePath, desiredState, edgeChecksum, siteChecksum, hostChecksum})
 	if err != nil { return HostGraphExports{}, err }
-	edge, err := DeployEdge(ctx, host.Edge, secrets.Edge, edgeChecksum, preflight); if err != nil { return HostGraphExports{}, err }
+	legacyCode2 := len(adoptedCode2) == 1 && adoptedCode2[0]
+	edge, err := DeployEdge(ctx, host.Edge, secrets.Edge, edgeChecksum, preflight, legacyCode2); if err != nil { return HostGraphExports{}, err }
 	// Register Site modules in sorted layout order; each final command gates the next Site.
 	var barrier pulumi.Resource
 	outputs := pulumi.Map{}

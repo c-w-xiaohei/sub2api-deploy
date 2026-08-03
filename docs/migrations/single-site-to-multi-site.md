@@ -1,0 +1,54 @@
+# Single-Site Code2 Adoption
+
+This procedure is for a separately approved production maintenance window. It is not run by Pulumi and it does not migrate Cloudflare, Neon, Upstash, PostgreSQL, Redis, volumes, or `runtime/data`.
+
+Before the window, take encrypted backups and a sanitized Pulumi stack export. Remove credentials, DSNs, tokens, and IDs that are not needed to inspect URN shape. Review `pulumi preview` manually: the existing code2 Cloudflare, Neon, and Upstash resources must be updates/adoptions, never replacements or deletes. Do not unprotect managed Neon or Upstash resources as part of adoption.
+
+Run host preflight first with only `code2` configured. It must identify `runtime/deploy-state.json` and no normalized host state. Confirm the legacy containers by immutable Compose labels (`com.docker.compose.project=sub2api` plus the expected service label), direct-origin health, public application health, and sing-box reachability before starting.
+
+The command is dry-run by default. It writes no state and performs no Docker action:
+
+```bash
+TRAEFIK_IMAGE=... CLOUDFLARE_API_TOKEN=... ACME_EMAIL=... \
+SING_BOX_SERVER_NAME=... SING_BOX_TARGET=... DOMAIN=... ORIGIN_IP=... APP_PROBE_PATH=... \
+SING_BOX_VERIFY_COMMAND='approved-sing-box-verification-command' \
+bash scripts/adopt-single-site-layout.sh --environment production --site code2
+```
+
+During the approved window, run the same command with `--apply`:
+
+```bash
+TRAEFIK_IMAGE=... CLOUDFLARE_API_TOKEN=... ACME_EMAIL=... \
+SING_BOX_SERVER_NAME=... SING_BOX_TARGET=... DOMAIN=... ORIGIN_IP=... APP_PROBE_PATH=... \
+SING_BOX_VERIFY_COMMAND='approved-sing-box-verification-command' \
+bash scripts/adopt-single-site-layout.sh --environment production --site code2 --apply
+```
+
+Before the window, prepare the non-mutating preview marker. This records only the strictly validated non-secret legacy mapping and does not touch Docker, routes, edge files, ACME, or runtime data:
+
+```bash
+bash scripts/adopt-single-site-layout.sh --environment production --site code2 --prepare-preview
+ALLOW_PENDING_LEGACY_PREVIEW=1 ./bin/pulumi preview
+```
+
+The environment gate is for this reviewed preview command only. It is not supplied to lifecycle commands; an ordinary update remains blocked while the marker is pending. Production preview review remains mandatory and must show no cloud/data replacement.
+
+After validating all labels, inputs, absent generated Edge files, absent Edge network/container, and the active legacy slot, apply atomically writes `runtime/adopt-single-site-layout.journal` at mode `0600` before any persistent or Docker mutation. Before each writer or Docker action it records a durable intent, then records observed completion after it succeeds. It stages only `runtime/edge/edge.env`, static/sing-box files, and `runtime/edge/acme.json`; those generated files are removed on rollback only when absent before adoption. Legacy ACME is copied only to an absent destination and never modified. The journal state progresses `prepared`, `pending`, `completing`, then `complete`, recording IDs, route backup, network/container ownership intent, attachment, and ACME ownership. It contains no secret. It connects only the active code2 application container, writes only `site-code2.yml`, and never copies or mutates `runtime/data`, volumes, or data services.
+
+Keep the journal while verifying the new Edge, the code2 route, direct-origin health, public health, and sing-box passthrough. If any check fails, use the exact rollback path:
+
+```bash
+bash scripts/adopt-single-site-layout.sh --environment production --site code2 --rollback
+```
+
+Rollback needs no credentials or sing-box command. It accepts only a validated `prepared`, `pending`, `completing`, or `complete` journal with its exact recoverable host-state pair. It validates IDs and Docker labels before mutation, stops/removes only journal-owned Edge resources, restores the prior route/network/ACME destination where applicable, starts and verifies the journaled legacy Traefik container, and only then removes the code2-only host-state mapping. If restoration fails, the journal and registry remain for investigation. A completed journal can be rolled back only while the host registry is exactly code2; before adding code3, archive evidence and retire the completed journal through the explicit safe journal-retirement workflow. Do not add code3 until journal retirement, completed adoption, preview review with no destructive cloud/data replacement, and all checks pass.
+
+After archiving direct-origin, public-route, and approved sing-box evidence, retire the completed journal before adding any Site:
+
+```bash
+bash scripts/adopt-single-site-layout.sh --environment production --site code2 --retire-journal
+```
+
+Retirement accepts only a completed journal and a completed host mapping whose Site registry is exactly `code2`; it refuses pending, inconsistent, or multi-Site state and is never run by Pulumi.
+
+The repository contains a sanitized exported-stack-shape fixture and offline mock-graph assertions for alias and input-shape regression evidence. They are not a Pulumi preview or production adoption evidence. The completed mapping is consumed internally only for code2: its application project and data/deploy-state paths remain `sub2api` and `runtime`, while later Sites retain normalized `runtime/sites/<id>` layouts. The mapping is not public configuration. Future site retirement requires explicit provider unprotect and a dedicated retirement workflow; never use adoption as a substitute for data retirement.
