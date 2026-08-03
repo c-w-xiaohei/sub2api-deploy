@@ -1,0 +1,106 @@
+# Site Compose project: one Site's application slots and optional local data
+# services, layered on compose/upstream.yml as:
+#   docker compose -f compose/upstream.yml -f compose/site.yml
+# It publishes no host ports and contains no reverse proxy; the slots join the
+# private project network and the shared external `sub2api-edge` network owned
+# by the edge Compose project. SITE_RUNTIME_ROOT must be absolute or
+# project-directory relative; BLUE_EDGE_ALIAS and GREEN_EDGE_ALIAS must be the
+# unique per-Site aliases on `sub2api-edge`.
+services:
+  sub2api:
+    profiles: [base-disabled]
+    container_name: !reset null
+    ports: !reset []
+    depends_on: !reset []
+    environment:
+      AUTO_SETUP: ${AUTO_SETUP:-false}
+      DATABASE_HOST: ${DATABASE_HOST:?DATABASE_HOST is required}
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      DATABASE_DBNAME: ${DATABASE_DBNAME:?DATABASE_DBNAME is required}
+      DATABASE_SSLMODE: ${DATABASE_SSLMODE:-disable}
+      REDIS_HOST: ${REDIS_HOST:?REDIS_HOST is required}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_USERNAME: ${REDIS_USERNAME:-}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_ENABLE_TLS: ${REDIS_ENABLE_TLS:-false}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@sub2api.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:-}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      SLOT_DATA_DIR: ${SLOT_DATA_DIR:-blue}
+    networks:
+      sub2api-network: {}
+
+  sub2api-blue:
+    profiles: !reset [app]
+    extends:
+      service: sub2api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    image: ${SUB2API_IMAGE:?SUB2API_IMAGE is required}
+    container_name: !reset null
+    volumes: !override
+      - ${SITE_RUNTIME_ROOT:?SITE_RUNTIME_ROOT is required}/data/blue:/app/data
+    environment:
+      SLOT: blue
+    networks:
+      sub2api-network: {}
+      sub2api-edge:
+        aliases:
+          - ${BLUE_EDGE_ALIAS:?BLUE_EDGE_ALIAS is required}
+
+  sub2api-green:
+    profiles: !reset [app]
+    extends:
+      service: sub2api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    image: ${SUB2API_IMAGE:?SUB2API_IMAGE is required}
+    container_name: !reset null
+    volumes: !override
+      - ${SITE_RUNTIME_ROOT:?SITE_RUNTIME_ROOT is required}/data/green:/app/data
+    environment:
+      SLOT: green
+    networks:
+      sub2api-network: {}
+      sub2api-edge:
+        aliases:
+          - ${GREEN_EDGE_ALIAS:?GREEN_EDGE_ALIAS is required}
+
+  postgres:
+    profiles: [postgres]
+    container_name: !reset null
+
+  redis:
+    profiles: [redis]
+    container_name: !reset null
+
+networks:
+  sub2api-edge:
+    external: true
+    name: sub2api-edge

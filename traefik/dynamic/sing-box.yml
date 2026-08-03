@@ -1,0 +1,17 @@
+# Edge-owned TCP passthrough template. The edge reconcile renders this into
+# runtime/edge/dynamic/00-sing-box.yml. Sites never write or rewrite this
+# file; it coexists with one site-<id>.yml fragment per Site.
+tcp:
+  routers:
+    sing-box-reality:
+      rule: "HostSNI(`${SING_BOX_SERVER_NAME}`)"
+      entryPoints:
+        - websecure
+      service: sing-box-reality
+      tls:
+        passthrough: true
+  services:
+    sing-box-reality:
+      loadBalancer:
+        servers:
+          - address: "${SING_BOX_TARGET}"

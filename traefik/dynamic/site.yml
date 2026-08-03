@@ -1,0 +1,18 @@
+# Site-owned HTTP route template. Each Site reconcile renders this into
+# runtime/edge/dynamic/site-<id>.yml with SITE_ID, DOMAIN, SLOT, and
+# ACTIVE_EDGE_ALIAS. Router and service names derive from SITE_ID; the backend
+# targets the active slot's unique alias on the shared sub2api-edge network.
+http:
+  routers:
+    site-${SITE_ID}-${SLOT}:
+      rule: "Host(`${DOMAIN}`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: cloudflare
+      service: site-${SITE_ID}-${SLOT}
+  services:
+    site-${SITE_ID}-${SLOT}:
+      loadBalancer:
+        servers:
+          - url: "http://${ACTIVE_EDGE_ALIAS}:8080"
