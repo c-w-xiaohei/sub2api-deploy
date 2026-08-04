@@ -25,13 +25,13 @@ func ManagedNeonProjectName(namespace string) string { return namespace + "-post
 
 func legacyNeonProvider(ctx *pulumi.Context, siteID string) (*neon.Provider, error) {
 	var provider neon.Provider
-	urn := legacyNeonProviderURN(ctx.Stack(), ctx.Project(), siteID)
+	urn := legacyNeonProviderURN(ctx.Stack(), ctx.Project())
 	if err := ctx.RegisterResource("pulumi:providers:neon", "site-"+siteID+"-neon", nil, &provider, pulumi.URN_(urn)); err != nil { return nil, err }
 	return &provider, nil
 }
 
-func legacyNeonProviderURN(stack, project, siteID string) string {
-	return "urn:pulumi:" + stack + "::" + project + "::sub2api:host:Site$pulumi:providers:neon::site-" + siteID + "-neon"
+func legacyNeonProviderURN(stack, project string) string {
+	return "urn:pulumi:" + stack + "::" + project + "::pulumi:providers:neon::neon"
 }
 
 func ParsePostgresDSN(dsn string) (DatabaseConnection, error) {

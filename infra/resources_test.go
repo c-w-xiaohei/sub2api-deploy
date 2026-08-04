@@ -198,7 +198,7 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 	legacy := legacyCode2Layout(DeriveSiteLayout("code2", "contextid-us"))
 	if len(legacyCode2Aliases(legacy, "neon")) != 1 { t.Fatal("legacy code2 must retain its root-level provider alias") }
 	if len(legacyCode2Aliases(DeriveSiteLayout("code3", "code3"), "neon")) != 0 { t.Fatal("new Sites must not receive legacy provider aliases") }
-	if got := legacyNeonProviderURN("production", "sub2api-vps-deploy", "code2"); got != "urn:pulumi:production::sub2api-vps-deploy::sub2api:host:Site$pulumi:providers:neon::site-code2-neon" { t.Fatalf("legacy Neon provider URN = %q", got) }
+	if got := legacyNeonProviderURN("production", "sub2api-vps-deploy"); got != "urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:neon::neon" { t.Fatalf("legacy Neon provider URN = %q", got) }
 }
 
 func TestCleanCode2DoesNotReceiveLegacyAliases(t *testing.T) {
