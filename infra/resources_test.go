@@ -235,6 +235,12 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 			t.Fatalf("%s must preserve its legacy-only optional provider input", name)
 		}
 	}
+	if !strings.Contains(strings.Join(requireSiteProvider(t, mocks.resources, "code2", "neon").RegisterRPC.GetIgnoreChanges(), ","), "version") {
+		t.Fatal("legacy code2 Neon provider must preserve its versionless state")
+	}
+	if strings.Contains(strings.Join(requireSiteProvider(t, mocks.resources, "code3", "neon").RegisterRPC.GetIgnoreChanges(), ","), "version") {
+		t.Fatal("new Site Neon provider must remain version-pinned")
+	}
 }
 
 func TestCleanCode2DoesNotReceiveLegacyAliases(t *testing.T) {
