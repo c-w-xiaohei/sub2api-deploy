@@ -24,7 +24,7 @@ func registerNeonProject(ctx *pulumi.Context, name string, args *neonProjectArgs
 func ManagedNeonProjectName(namespace string) string { return namespace + "-postgres" }
 
 func legacyNeonProviderIgnoreChanges(layout SiteLayout) []string {
-	if len(legacyCode2Aliases(layout, "legacy")) != 0 { return []string{"version"} }
+	if len(legacyCode2Aliases(layout, "legacy")) != 0 { return []string{"api_key", "version"} }
 	return nil
 }
 

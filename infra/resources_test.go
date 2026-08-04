@@ -202,7 +202,7 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 	legacy := legacyCode2Layout(DeriveSiteLayout("code2", "contextid-us"))
 	if len(legacyCode2Aliases(legacy, "neon")) != 1 { t.Fatal("legacy code2 must retain its root-level provider alias") }
 	if len(legacyCode2Aliases(DeriveSiteLayout("code3", "code3"), "neon")) != 0 { t.Fatal("new Sites must not receive legacy provider aliases") }
-	if got := legacyNeonProviderIgnoreChanges(legacy); !reflect.DeepEqual(got, []string{"version"}) { t.Fatalf("legacy Neon ignored fields = %#v", got) }
+	if got := legacyNeonProviderIgnoreChanges(legacy); !reflect.DeepEqual(got, []string{"api_key", "version"}) { t.Fatalf("legacy Neon ignored fields = %#v", got) }
 	if got := legacyNeonProviderIgnoreChanges(DeriveSiteLayout("code3", "code3")); got != nil { t.Fatalf("new Site Neon ignored fields = %#v", got) }
 }
 
