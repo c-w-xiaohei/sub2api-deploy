@@ -15,7 +15,7 @@ the matching Linux `pulumi-program` binary, the bundled Pulumi runtime helpers,
 and the complete Edge/Site/host lifecycle files:
 
 ```bash
-VERSION=v0.1.7
+VERSION=v0.2.0
 ARCH=amd64 # use arm64 for an ARM VPS
 gh release download "$VERSION" \
   --pattern "sub2api-vps-deploy-${VERSION}-linux-${ARCH}.tar.gz" \
