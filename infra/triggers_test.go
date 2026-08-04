@@ -135,7 +135,7 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 			t.Fatalf("host checksum path %q overlaps Edge or Site", path)
 		}
 	}
-	for _, required := range []string{"scripts/host-preflight.ts", "scripts/finalize-host-state.sh", "scripts/write-host-state.ts"} {
+	for _, required := range []string{"scripts/host-preflight.ts", "scripts/finalize-host-state.sh", "scripts/write-host-state.cjs"} {
 		if !hostPaths[required] {
 			t.Fatalf("host checksum omits %q", required)
 		}

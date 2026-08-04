@@ -16,4 +16,4 @@ for index in "${!site_ids[@]}"; do
   [[ -n "$state_path" ]] || { printf 'Site %s has no explicit deploy state path\n' "$site_id" >&2; exit 1; }
   [[ -f "$state_path" ]] || { printf 'Site %s has no deploy state at %s; host state is not finalized\n' "$site_id" "$state_path" >&2; exit 1; }
 done
-npx --no-install tsx scripts/write-host-state.ts write "$HOST_STATE_PATH" "$CONFIGURED_SITE_IDS"
+node scripts/write-host-state.cjs write "$HOST_STATE_PATH" "$CONFIGURED_SITE_IDS"

@@ -51,7 +51,7 @@ scripts/switch-slot.sh
 scripts/validate-compose.sh
 scripts/write-bootstrap-marker.ts
 scripts/write-deploy-state.ts
-scripts/write-host-state.ts
+scripts/write-host-state.cjs
 
 # Provider metadata consumed by the bundled Go shim and Pulumi runtime.
 scripts/pulumi-plugins/cloudflare/pulumi-plugin.json

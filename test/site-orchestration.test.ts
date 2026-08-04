@@ -30,7 +30,6 @@ function createShellFixture(existing = true): { root: string; log: string; envir
     '  scripts/render-site-route.ts:write) mkdir -p "$(dirname "$6")"; printf "route\\n" > "$6" ;;',
     '  scripts/write-deploy-state.ts:write) mkdir -p "$(dirname "$5")"; printf "%s\\n" "$6" > "$5" ;;',
     '  scripts/write-bootstrap-marker.ts:write) mkdir -p "$(dirname "$5")"; printf "marker\\n" > "$5" ;;',
-    '  scripts/write-host-state.ts:write) mkdir -p "$(dirname "$5")"; printf "{\\\"sites\\\":[\\\"code2\\\",\\\"code3\\\"]}\\n" > "$5" ;;',
     'esac',
   ].join("\n"));
   fake("sleep", '{ printf "sleep"; printf " %s" "$@"; printf "\\n"; } >> "$COMMAND_LOG"');
@@ -42,6 +41,7 @@ function createShellFixture(existing = true): { root: string; log: string; envir
     '  case "$3" in POSTGRES_MODE) printf "neon" ;; REDIS_MODE) printf "upstash" ;; APP_PROBE_PATH) printf "/health" ;; DRAIN_SECONDS) printf "10" ;; esac',
     '  exit 0',
     'fi',
+    'if [[ "$1" == "scripts/write-host-state.cjs" && "$2" == "write" ]]; then mkdir -p "$(dirname "$3")"; printf "{\\\"sites\\\":[\\\"code2\\\",\\\"code3\\\"]}\\n" > "$3"; exit 0; fi',
     'if [[ "$1" == "-e" ]]; then',
     '  code="$2"; state="${3:-}"; content=""; [[ -n "$state" && -f "$state" ]] && content="$(<"$state")"',
     '  if [[ "$code" == *value.serverName* ]]; then printf "www.cloudflare.com"; exit 0; fi',
@@ -151,7 +151,7 @@ describe("independent Site lifecycle", () => {
     expect(captured).not.toContain("00-sing-box");
     expect(captured).not.toContain("sub2api-code3");
     expect(captured).not.toContain("site-code3");
-    expect(captured).not.toContain("write-host-state.ts write");
+    expect(captured).not.toContain("write-host-state.cjs write");
     expect(existsSync(fixture.environment.SITE_DEPLOY_STATE_PATH!)).toBe(true);
     expect(existsSync(fixture.environment.SITE_BOOTSTRAP_MARKER_PATH!)).toBe(true);
     expect(existsSync(fixture.environment.SITE_ROUTE_PATH!)).toBe(true);
@@ -160,7 +160,7 @@ describe("independent Site lifecycle", () => {
     const finalize = run(fixture.root, fixture.environment, "scripts/finalize-host-state.sh");
     expect(finalize.status, finalize.stderr ?? "").toBe(0);
     const finalized = commands(fixture.log);
-    expect(finalized).toContain("scripts/write-host-state.ts write");
+    expect(finalized).toContain("scripts/write-host-state.cjs write");
     expect(existsSync(fixture.environment.HOST_STATE_PATH!)).toBe(true);
   });
 

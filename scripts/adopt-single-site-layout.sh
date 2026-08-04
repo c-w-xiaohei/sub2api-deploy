@@ -74,7 +74,7 @@ stage_edge() {
 }
 
 if [[ "$mode" == dry-run ]]; then require_legacy; printf 'dry-run: no files, Docker, network, or host state will be changed\n'; exit 0; fi
-if [[ "$mode" == prepare-preview ]]; then require_legacy; npx --no-install tsx scripts/write-host-state.ts write-legacy "$host_state" code2 pending; exit 0; fi
+if [[ "$mode" == prepare-preview ]]; then require_legacy; node scripts/write-host-state.cjs write-legacy "$host_state" code2 pending; exit 0; fi
 if [[ "$mode" == rollback ]]; then read_journal; rollback_pair || { printf 'journal and host state are not a recoverable pair\n' >&2; exit 1; }; restore; exit 0; fi
 if [[ "$mode" == retire-journal ]]; then
   read_journal
@@ -102,7 +102,7 @@ else
   npx --no-install tsx scripts/deployment-mode.ts adopt "$legacy_state" "$POSTGRES_MODE" "$REDIS_MODE"
   set_journal legacy_state_adopted true
 fi
-npx --no-install tsx scripts/write-host-state.ts write-legacy "$host_state" code2 pending; set_journal state pending
+node scripts/write-host-state.cjs write-legacy "$host_state" code2 pending; set_journal state pending
 stage_edge; if [[ "$route_preexisting" == true ]]; then set_journal route_backup_intent true; cp -p "$route" "$route_backup"; set_journal route_backup_created true; fi
 set_journal network_intent true; set_journal edge_container_intent true; EDGE_RUNTIME_ROOT="$edge_root" TRAEFIK_IMAGE="$TRAEFIK_IMAGE" CLOUDFLARE_DNS_API_TOKEN="$CLOUDFLARE_API_TOKEN" ACME_EMAIL="$ACME_EMAIL" docker compose --project-name sub2api-edge --env-file "$edge_env" -f compose/edge.yml create traefik
 exists_network && [[ "$(network_labels)" == sub2api-edge ]] || exit 1; set_journal network_created true
@@ -114,4 +114,4 @@ if ! bash scripts/probe-origin-strict.sh "$DOMAIN" "$ORIGIN_IP" "$APP_PROBE_PATH
   docker logs "$edge_container" 2>&1 || true
   false
 fi
-set_journal state completing; npx --no-install tsx scripts/write-host-state.ts write-legacy "$host_state" code2 complete; set_journal state complete; trap - ERR
+set_journal state completing; node scripts/write-host-state.cjs write-legacy "$host_state" code2 complete; set_journal state complete; trap - ERR

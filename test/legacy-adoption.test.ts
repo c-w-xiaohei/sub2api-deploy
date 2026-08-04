@@ -64,14 +64,6 @@ if [[ "$#" -eq 7 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/deplo
   fi
   exit 97
 fi
-if [[ "$#" -eq 7 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/write-host-state.ts && "$4" == write-legacy && "$6" == code2 && "$7" =~ ^(pending|complete)$ ]]; then
-  path="$5"; handover="$7"
-  complete=false; [[ "$handover" == complete ]] && complete=true
-  printf '{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":%s}}\\n' "$complete" > "$path"
-  chmod 600 "$path"
-  if [[ -f "$JOURNAL" ]]; then printf 'HOST_STATE journal-before-mutation\\n' >> "$FAKE_LOG"; else printf 'HOST_STATE preview-without-journal\\n' >> "$FAKE_LOG"; fi
-  exit 0
-fi
 if [[ "$#" -eq 5 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/render-runtime-env.ts && "$4" == write ]]; then
   path="$5"; edge_root="$(dirname "$path")"; payload="$(/bin/cat)"
   printf -v expected '{"TRAEFIK_IMAGE":"%s","CLOUDFLARE_DNS_API_TOKEN":"%s","ACME_EMAIL":"%s","EDGE_RUNTIME_ROOT":"%s"}' "$TRAEFIK_IMAGE" "$CLOUDFLARE_API_TOKEN" "$ACME_EMAIL" "$edge_root"
@@ -249,7 +241,7 @@ describe("legacy single-site adoption", () => {
     expect(readFileSync(join(f.runtime, "edge", "edge.env"), "utf8")).toContain('TRAEFIK_IMAGE="test"');
     expect(existsSync(join(f.runtime, "edge", "dynamic", "site-code2.yml"))).toBe(true);
     expect(readFileSync(join(f.runtime, "data", "must-not-move"), "utf8")).toBe("legacy data\n");
-    expect(f.log()).toMatch(/HOST_STATE journal-before-mutation[\s\S]*network connect --alias sub2api-blue sub2api-edge bbbbbbbbbbbb[\s\S]*PROBE scripts\/probe-origin-strict.sh[\s\S]*PROBE scripts\/probe-origin.sh[\s\S]*SINGBOX true/);
+    expect(f.log()).toMatch(/network connect --alias sub2api-blue sub2api-edge bbbbbbbbbbbb[\s\S]*PROBE scripts\/probe-origin-strict.sh[\s\S]*PROBE scripts\/probe-origin.sh[\s\S]*SINGBOX true/);
     expect(f.log()).toMatch(/compose --project-name sub2api-edge --env-file .*runtime\/edge\/edge.env -f compose\/edge.yml create traefik/);
     expect(f.log()).not.toMatch(/compose down|volume|redis|sql|connection-before-network/);
   });
