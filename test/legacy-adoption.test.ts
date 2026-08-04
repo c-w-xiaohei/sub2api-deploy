@@ -173,7 +173,8 @@ fi
 if [[ "$1" == -c ]]; then printf 'SINGBOX %s\\n' "$2" >> "$FAKE_LOG"; fi
 exec /bin/bash "$@"
 `);
-  for (const executable of ["node", "npx", "docker", "bash", "cp", "chmod"]) chmodSync(join(bin, executable), 0o755);
+  writeFileSync(join(bin, "ss"), "#!/bin/bash\nexit 0\n");
+  for (const executable of ["node", "npx", "docker", "bash", "cp", "chmod", "ss"]) chmodSync(join(bin, executable), 0o755);
   const state = join(runtime, "host-state.json");
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_STATE: fakeState, FAKE_LOG: join(root, "fake.log"), JOURNAL: join(runtime, "adopt-single-site-layout.journal"), EDGE_ENV: join(runtime, "edge", "edge.env"), TRAEFIK_IMAGE: "traefik:test", CLOUDFLARE_API_TOKEN: "token", ACME_EMAIL: "ops@example.test", SING_BOX_SERVER_NAME: "www.cloudflare.com", SING_BOX_TARGET: "host.docker.internal:8443", DOMAIN: "code2.example.test", ORIGIN_IP: "203.0.113.10", APP_PROBE_PATH: "/api/ready", POSTGRES_MODE: "neon", REDIS_MODE: "upstash", SING_BOX_VERIFY_COMMAND: "true" };
   return { root, runtime, state, env, run: (mode?: string) => execFileSync("/bin/bash", [script, "--environment", "test", "--site", "code2", "--host-state", state, ...(mode ? [mode] : [])], { cwd: process.cwd(), env, stdio: "pipe" }), log: () => existsSync(env.FAKE_LOG!) ? readFileSync(env.FAKE_LOG!, "utf8") : "" };
@@ -211,6 +212,12 @@ describe("legacy single-site adoption", () => {
     const source = readFileSync(script, "utf8");
     expect(source).toContain('require("fs").readFileSync(process.argv[1], "utf8")');
     expect(source).not.toContain('require(process.argv[1])');
+  });
+
+  it("waits for the legacy public ports to be released before starting the Edge", () => {
+    const source = readFileSync(script, "utf8");
+    expect(source).toContain("wait_for_ports_released");
+    expect(source.indexOf("wait_for_ports_released")).toBeLessThan(source.indexOf("docker compose --project-name sub2api-edge"));
   });
 
   it("dry-run leaves the legacy host and Docker untouched", () => {

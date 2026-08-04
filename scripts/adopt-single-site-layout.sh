@@ -17,6 +17,12 @@ container_labels() { docker inspect -f '{{index .Config.Labels "com.docker.compo
 network_labels() { docker network inspect -f '{{index .Labels "com.docker.compose.project"}}' sub2api-edge; }
 exists_container() { docker inspect "$1" >/dev/null 2>&1; }
 exists_network() { docker network inspect sub2api-edge >/dev/null 2>&1; }
+ports_released() { ! ss -ltnH 'sport = :80 or sport = :443' | grep -q .; }
+wait_for_ports_released() {
+  for _ in {1..30}; do ports_released && return 0; sleep 1; done
+  printf 'legacy Traefik did not release ports 80/443\n' >&2
+  return 1
+}
 
 declare -A j=()
 read_journal() {
@@ -102,6 +108,9 @@ exists_network && [[ "$(network_labels)" == sub2api-edge ]] || exit 1; set_journ
 edge_container="$(docker ps -aq --filter label=com.docker.compose.project=sub2api-edge --filter label=com.docker.compose.service=traefik)"; [[ -n "$edge_container" && "$edge_container" != *$'\n'* && "$(container_labels "$edge_container")" == sub2api-edge/traefik ]] || exit 1; set_journal edge_container "$edge_container"
 set_journal attachment_intent true; docker network connect --alias "sub2api-$active_slot" sub2api-edge "$active_app"; set_journal attachment_created true
 set_journal route_write_intent true; npx --no-install tsx scripts/render-site-route.ts write traefik/dynamic/site.yml "$route" code2 "$DOMAIN" "$active_slot" "sub2api-$active_slot"
-docker stop "$legacy_traefik"; EDGE_RUNTIME_ROOT="$edge_root" TRAEFIK_IMAGE="$TRAEFIK_IMAGE" CLOUDFLARE_DNS_API_TOKEN="$CLOUDFLARE_API_TOKEN" ACME_EMAIL="$ACME_EMAIL" docker compose --project-name sub2api-edge --env-file "$edge_env" -f compose/edge.yml start traefik
-bash scripts/probe-origin-strict.sh "$DOMAIN" "$ORIGIN_IP" "$APP_PROBE_PATH"; bash scripts/probe-origin.sh "$DOMAIN" "$APP_PROBE_PATH"; bash -c "$SING_BOX_VERIFY_COMMAND"
+docker stop "$legacy_traefik"; wait_for_ports_released; EDGE_RUNTIME_ROOT="$edge_root" TRAEFIK_IMAGE="$TRAEFIK_IMAGE" CLOUDFLARE_DNS_API_TOKEN="$CLOUDFLARE_API_TOKEN" ACME_EMAIL="$ACME_EMAIL" docker compose --project-name sub2api-edge --env-file "$edge_env" -f compose/edge.yml start traefik
+if ! bash scripts/probe-origin-strict.sh "$DOMAIN" "$ORIGIN_IP" "$APP_PROBE_PATH" || ! bash scripts/probe-origin.sh "$DOMAIN" "$APP_PROBE_PATH" || ! bash -c "$SING_BOX_VERIFY_COMMAND"; then
+  docker logs "$edge_container" 2>&1 || true
+  false
+fi
 set_journal state completing; npx --no-install tsx scripts/write-host-state.ts write-legacy "$host_state" code2 complete; set_journal state complete; trap - ERR
