@@ -2,10 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"gopkg.in/yaml.v3"
 )
 
 func TestProgramConfigModelHasNoFlatDeploymentFallback(t *testing.T) {
@@ -35,6 +40,133 @@ func TestResolveHostConfigDecodesOnlyStructuredObjects(t *testing.T) {
 	if host.EdgeSecrets.CloudflareAPIToken != "edge-token" { t.Fatalf("edge secret lost before wrapping") }
 	if got := host.SiteSecrets["code2"].AdminPassword; got != "code2-admin-password" { t.Fatalf("site secret identity lost before wrapping: %q", got) }
 	if host.EdgeSecrets.CloudflareAPIToken == host.SiteSecrets["code2"].AdminPassword { t.Fatal("edge and Site secret objects were conflated") }
+}
+
+func TestProductionExampleUsesStructuredPublicConfig(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "Pulumi.production.example.yaml"))
+	if err != nil {
+		t.Fatalf("read production example: %v", err)
+	}
+
+	var document struct {
+		Config map[string]yaml.Node `yaml:"config"`
+	}
+	if err := yaml.Unmarshal(contents, &document); err != nil {
+		t.Fatalf("decode production example YAML: %v", err)
+	}
+
+	const prefix = "sub2api-vps-deploy:"
+	expectedKeys := map[string]bool{
+		prefix + "edge":  true,
+		prefix + "sites": true,
+	}
+	if len(document.Config) != len(expectedKeys) {
+		t.Fatalf("project configuration keys = %v, want only edge and sites", configKeys(document.Config))
+	}
+	for key := range document.Config {
+		if !expectedKeys[key] {
+			t.Fatalf("unexpected project configuration key %q", key)
+		}
+	}
+
+	var edge EdgeSpec
+	decodeYAMLObject(t, document.Config[prefix+"edge"], &edge)
+	var sites map[string]SiteSpec
+	decodeYAMLObject(t, document.Config[prefix+"sites"], &sites)
+
+	siteSecrets := make(map[string]SiteSecrets, len(sites))
+	for siteID, site := range sites {
+		siteSecrets[siteID] = fakeExampleSiteSecrets(siteID, site)
+	}
+	host, layouts, err := resolveHostConfig(edge, sites, EdgeSecrets{CloudflareAPIToken: "example-cloudflare-token"}, siteSecrets)
+	if err != nil {
+		t.Fatalf("resolveHostConfig() from production example: %v", err)
+	}
+
+	if !reflect.DeepEqual(sortedSiteIDs(sites), []string{"code2", "code3"}) {
+		t.Fatalf("sites = %v, want code2 and code3", sortedSiteIDs(sites))
+	}
+	wantLayouts := []SiteLayout{
+		DeriveSiteLayout("code2", defaultString(sites["code2"].ResourcePrefix, "code2")),
+		DeriveSiteLayout("code3", defaultString(sites["code3"].ResourcePrefix, "code3")),
+	}
+	if !reflect.DeepEqual(layouts, wantLayouts) {
+		t.Fatalf("resolved layouts = %#v, want %#v", layouts, wantLayouts)
+	}
+	for siteID, site := range sites {
+		resolvedSite := host.Sites[siteID]
+		if resolvedSite.Database.Mode != defaultString(site.Database.Mode, "docker") {
+			t.Fatalf("%s database mode = %q, want %q", siteID, resolvedSite.Database.Mode, site.Database.Mode)
+		}
+		if resolvedSite.Redis.Mode != defaultString(site.Redis.Mode, "docker") {
+			t.Fatalf("%s redis mode = %q, want %q", siteID, resolvedSite.Redis.Mode, site.Redis.Mode)
+		}
+	}
+}
+
+func decodeYAMLObject(t *testing.T, node yaml.Node, target interface{}) {
+	t.Helper()
+	encoded, err := yaml.Marshal(&node)
+	if err != nil {
+		t.Fatalf("marshal YAML object: %v", err)
+	}
+	var object map[string]interface{}
+	if err := yaml.Unmarshal(encoded, &object); err != nil {
+		t.Fatalf("decode YAML object: %v", err)
+	}
+	jsonValue, err := json.Marshal(object)
+	if err != nil {
+		t.Fatalf("marshal decoded YAML object: %v", err)
+	}
+	if err := json.Unmarshal(jsonValue, target); err != nil {
+		t.Fatalf("decode object into %T: %v", target, err)
+	}
+}
+
+func configKeys(config map[string]yaml.Node) []string {
+	keys := make([]string, 0, len(config))
+	for key := range config {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func sortedSiteIDs(sites map[string]SiteSpec) []string {
+	ids := make([]string, 0, len(sites))
+	for siteID := range sites {
+		ids = append(ids, siteID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func fakeExampleSiteSecrets(siteID string, site SiteSpec) SiteSecrets {
+	secrets := SiteSecrets{
+		AdminPassword:     siteID + "-admin-password",
+		JWTSecret:         siteID + "-jwt-secret",
+		TOTPEncryptionKey: siteID + "-totp-key",
+	}
+
+	databaseMode := defaultString(site.Database.Mode, "docker")
+	databaseResourceMode := defaultString(site.Database.ResourceMode, "existing")
+	if databaseMode == "docker" {
+		secrets.Database.Password = siteID + "-database-password"
+	} else if databaseResourceMode == "create" {
+		secrets.Database.APIToken = siteID + "-neon-api-token"
+	} else {
+		secrets.Database.DSN = "postgresql://sub2api:secret@" + siteID + ".neon.tech/sub2api?sslmode=require"
+	}
+
+	redisMode := defaultString(site.Redis.Mode, "docker")
+	redisResourceMode := defaultString(site.Redis.ResourceMode, "existing")
+	if redisMode == "docker" {
+		secrets.Redis.Password = siteID + "-redis-password"
+	} else if redisResourceMode == "create" {
+		secrets.Redis.APIKey = siteID + "-upstash-api-key"
+	} else {
+		secrets.Redis.Password = siteID + "-upstash-password"
+	}
+	return secrets
 }
 
 func TestWrapHostSecretsKeepsStructuredSecretsIndependentAndTainted(t *testing.T) {

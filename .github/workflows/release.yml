@@ -67,32 +67,11 @@ jobs:
         run: |
           archive="sub2api-vps-deploy-${VERSION}-linux-${{ matrix.arch }}"
           bundle="release/${archive}"
-          mkdir -p "${bundle}/bin"
-          install -m 0755 "dist/pulumi-program-linux-${{ matrix.arch }}" "${bundle}/bin/pulumi-program"
-          install -m 0755 scripts/pulumi-go-shim.sh "${bundle}/bin/go"
-          install -m 0755 scripts/pulumi-cli-wrapper.sh "${bundle}/bin/pulumi"
-          cp Pulumi.yaml Pulumi.production.example.yaml README.md package.json package-lock.json go.mod go.sum "${bundle}/"
-          cp -R compose infra scripts src traefik "${bundle}/"
-          test -x "${bundle}/bin/go"
-          test -x "${bundle}/bin/pulumi"
-          test -x "${bundle}/bin/pulumi-program"
-          test -f "${bundle}/scripts/pulumi-plugins/neon/pulumi-plugin.json"
-          edge_config="$(<"${bundle}/compose/edge.yml")"
-          active_route="$(<"${bundle}/traefik/dynamic/active.yml")"
-          case "${edge_config}" in
-            *host.docker.internal:host-gateway*) ;;
-            *) printf 'Host gateway mapping missing from assembled bundle\n' >&2; exit 1 ;;
-          esac
-          case "${active_route}" in
-            *'HostSNI(`www.cloudflare.com`)'*host.docker.internal:8443*) ;;
-            *) printf 'sing-box TCP passthrough missing from assembled bundle\n' >&2; exit 1 ;;
-          esac
-          neon_module="$(${bundle}/bin/go list -m -json github.com/kislerdm/pulumi-sdk-neon)"
-          case "${neon_module}" in
-            *scripts/pulumi-plugins/neon*) ;;
-            *) printf 'Neon metadata was not resolved from the assembled bundle\n' >&2; exit 1 ;;
-          esac
+          mkdir -p release
+          rm -rf "${bundle}" "release/${archive}.tar.gz" "release/${archive}.tar.gz.sha256"
+          bash scripts/release-bundle.sh assemble "${bundle}" "dist/pulumi-program-linux-${{ matrix.arch }}"
           tar -C release -czf "release/${archive}.tar.gz" "${archive}"
+          bash scripts/release-bundle.sh verify "release/${archive}.tar.gz"
           (cd release && sha256sum "${archive}.tar.gz" > "${archive}.tar.gz.sha256")
 
       - name: Upload release assets
