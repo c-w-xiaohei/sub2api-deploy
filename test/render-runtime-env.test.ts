@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderDotenv, writeAppEnvAtomically, writeRuntimeEnvAtomically } from "../scripts/render-runtime-env.js";
-import * as runtimeEnv from "../scripts/render-runtime-env.js";
+import { renderAppDotenv, renderDotenv, writeAppEnvAtomically, writeRuntimeEnvAtomically } from "../scripts/render-runtime-env.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,7 +66,6 @@ describe("renderDotenv", () => {
   });
 
   it("renders app.env literals safely for Compose interpolation", () => {
-    const renderAppDotenv = (runtimeEnv as Record<string, unknown>).renderAppDotenv as (values: Record<string, string>) => string;
     expect(renderAppDotenv({ LITERAL: 'price $5 ${HOME} "quoted" \\path' })).toBe('LITERAL="price $$5 $${HOME} \\\"quoted\\\" \\\\path"\n');
   });
 });
