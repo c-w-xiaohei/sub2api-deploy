@@ -22,6 +22,7 @@ type EdgeSpec struct {
 	OriginIP         string      `json:"originIp"`
 	CloudflareZoneID string      `json:"cloudflareZoneId"`
 	ACMEEmail        string      `json:"acmeEmail"`
+	// The shared Edge Traefik image intentionally permits a stable version tag.
 	TraefikImage     string      `json:"traefikImage"`
 	SingBox          SingBoxSpec `json:"singBox"`
 }

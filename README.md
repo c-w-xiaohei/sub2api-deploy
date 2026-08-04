@@ -84,9 +84,11 @@ restart sing-box. Do not start the Edge while sing-box still owns public `443`.
 Copy `Pulumi.production.example.yaml` and edit ordinary values in its `edge`
 and `sites` objects. Every Site requires `domain`, an immutable `image` in the
 form `name@sha256:<64 lowercase hexadecimal characters>`, `adminEmail`, and an
-application `appProbePath` other than `/health`. Database and Redis modes are
-selected inside each Site. The current host remains resource-constrained even
-for two low-traffic Sites.
+application `appProbePath` other than `/health`. Site images must remain
+immutable digests. The shared Edge Traefik image is the intentional exception:
+`edge.traefikImage` may use a stable version tag such as `traefik:v3.3.3`.
+Database and Redis modes are selected inside each Site. The current host
+remains resource-constrained even for two low-traffic Sites.
 
 The `edge` object contains `originIp`, `cloudflareZoneId`, `acmeEmail`,
 `traefikImage`, and `singBox.serverName`/`target`. A Site may contain

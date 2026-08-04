@@ -7,6 +7,8 @@ config:
     originIp: 203.0.113.10
     cloudflareZoneId: replace-with-zone-id
     acmeEmail: ops@example.com
+    # Shared Edge exception: Traefik may use a stable version tag. Site images
+    # below must remain immutable name@sha256 digests.
     traefikImage: traefik:v3.3.3
     singBox:
       serverName: www.cloudflare.com
