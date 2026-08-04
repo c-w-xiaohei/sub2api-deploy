@@ -11,6 +11,7 @@ func TestDeriveSiteLayoutCode2(t *testing.T) {
 		ComposeProject:      "sub2api-code2",
 		RuntimeRoot:         "runtime/sites/code2",
 		RuntimeEnvPath:      "runtime/sites/code2/runtime.env",
+		AppEnvPath:          "runtime/sites/code2/app.env",
 		DeployStatePath:     "runtime/sites/code2/deploy-state.json",
 		BootstrapMarkerPath: "runtime/sites/code2/bootstrap.marker",
 		BlueDataPath:        "runtime/sites/code2/data/blue",
@@ -24,6 +25,26 @@ func TestDeriveSiteLayoutCode2(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DeriveSiteLayout() = %+v, want %+v", got, want)
 	}
+	appEnvPath := reflect.ValueOf(got).FieldByName("AppEnvPath")
+	if !appEnvPath.IsValid() || appEnvPath.String() != "runtime/sites/code2/app.env" {
+		t.Fatalf("app env path = %v", appEnvPath)
+	}
+}
+
+func TestLegacyCode2LayoutUsesSharedAppEnvPath(t *testing.T) {
+	layout := DeriveSiteLayout("code2", "code2")
+	layout = legacyCode2LayoutWithAppEnv(layout)
+	appEnvPath := reflect.ValueOf(layout).FieldByName("AppEnvPath")
+	if !appEnvPath.IsValid() || appEnvPath.String() != "runtime/app.env" {
+		t.Fatalf("legacy app env path = %v", appEnvPath)
+	}
+}
+
+func legacyCode2LayoutWithAppEnv(layout SiteLayout) SiteLayout {
+	layout = legacyCode2Layout(layout)
+	value := reflect.ValueOf(&layout).Elem().FieldByName("AppEnvPath")
+	value.SetString("runtime/app.env")
+	return layout
 }
 
 func TestDeriveSiteLayoutSitesAreIsolated(t *testing.T) {

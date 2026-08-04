@@ -42,6 +42,7 @@ scripts/reconcile-edge.sh
 scripts/reconcile-site.sh
 scripts/render-edge-config.ts
 scripts/render-runtime-env.ts
+scripts/verify-legacy-app-env.ts
 scripts/render-site-route.ts
 scripts/render-traefik-config.ts
 scripts/rollback-slot.sh

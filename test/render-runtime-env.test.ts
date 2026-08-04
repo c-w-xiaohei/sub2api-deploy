@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderDotenv, writeRuntimeEnvAtomically } from "../scripts/render-runtime-env.js";
+import { renderAppDotenv, renderDotenv, writeAppEnvAtomically, writeRuntimeEnvAtomically } from "../scripts/render-runtime-env.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,5 +51,21 @@ describe("renderDotenv", () => {
     expect(() => execFileSync("node", ["scripts/read-runtime-env.cjs", code2Path, "BAD-KEY"], { encoding: "utf8" })).toThrow();
     expect(readFileSync(code2Path, "utf8")).not.toContain("code3-secret");
     expect(statSync(code2Path).mode & 0o777).toBe(0o600);
+  });
+
+  it("writes an isolated app.env atomically with stable escaping and mode 0600", () => {
+    const hostRoot = mkdtempSync(join(tmpdir(), "sub2api-app-env-"));
+    const path = join(hostRoot, "sites", "code2", "app.env");
+    const writeAppEnv = writeAppEnvAtomically;
+    writeAppEnv(path, { SMTP_HOST: "mail.example.com", SECRET: "quoted\\value\"" });
+    expect(readFileSync(path, "utf8")).toBe('SECRET="quoted\\\\value\\\""\nSMTP_HOST="mail.example.com"\n');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(() => writeAppEnv(path, { "BAD-KEY": "value" })).toThrow(/invalid environment key/);
+    expect(() => writeAppEnv(path, { SECRET: "line1\nline2" })).toThrow(/newline/);
+    expect(() => writeAppEnv(path, { SECRET: 42 })).toThrow(/must be a string/);
+  });
+
+  it("renders app.env literals safely for Compose interpolation", () => {
+    expect(renderAppDotenv({ LITERAL: 'price $5 ${HOME} "quoted" \\path' })).toBe('LITERAL="price $$5 $${HOME} \\\"quoted\\\" \\\\path"\n');
   });
 });

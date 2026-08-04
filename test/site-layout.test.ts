@@ -75,6 +75,7 @@ describe("Site runtime layout", () => {
         ...process.env,
         SITE_ID: siteId,
         SITE_RUNTIME_ROOT: relative(process.cwd(), root),
+        SITE_APP_ENV_PATH: relative(process.cwd(), join(root, "app.env")),
         COMPOSE_PROJECT_NAME: `sub2api-${siteId}`,
         SITE_ROUTE_PATH: join(hostRoot, "edge", "dynamic", `site-${siteId}.yml`),
         EDGE_NETWORK_NAME: "sub2api-edge",
@@ -110,6 +111,7 @@ describe("Site runtime layout", () => {
         ...process.env,
         SITE_ID: "Code2",
         SITE_RUNTIME_ROOT: code2Root,
+        SITE_APP_ENV_PATH: join(code2Root, "app.env"),
         COMPOSE_PROJECT_NAME: "sub2api-code2",
         SITE_ROUTE_PATH: join(hostRoot, "edge", "dynamic", "site-code2.yml"),
         EDGE_NETWORK_NAME: "sub2api-edge",
@@ -130,6 +132,7 @@ describe("Site runtime layout", () => {
         DOCKER_LOG: dockerLog,
         SITE_ID: "code2",
         SITE_RUNTIME_ROOT: code2Root,
+        SITE_APP_ENV_PATH: join(code2Root, "app.env"),
         COMPOSE_PROJECT_NAME: "sub2api-code2",
         SITE_ROUTE_PATH: join(hostRoot, "edge", "dynamic", "site-code2.yml"),
         EDGE_NETWORK_NAME: "sub2api-edge",
@@ -137,6 +140,12 @@ describe("Site runtime layout", () => {
     });
     expect(readFileSync(dockerLog, "utf8")).toContain("compose --project-name sub2api-code2");
     expect(readFileSync(dockerLog, "utf8")).toContain("stop --timeout 30 sub2api-blue");
+  });
+
+  it("passes runtime.env and app.env to Compose interpolation", () => {
+    const helper = readFileSync(new URL("../scripts/site-compose-common.sh", import.meta.url), "utf8");
+    expect(helper).toContain('--env-file "$SITE_RUNTIME_ROOT/runtime.env"');
+    expect(helper).toContain('--env-file "$SITE_APP_ENV_PATH"');
   });
 
   it("keeps Site and Edge Compose helper contracts separate", () => {

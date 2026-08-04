@@ -9,6 +9,14 @@ The code2 application image digest must remain unchanged for the entire
 architecture adoption. Application updates come later, after adoption evidence
 and journal retirement, as a separate reviewed change.
 
+If `runtime/oidc.env` exists, the first normal code2 reconcile is fail-closed:
+an explicitly supplied encrypted `siteSecrets.code2.appEnv` must contain every
+legacy key with the identical value before managed `runtime/app.env` is written.
+The legacy dotenv is parsed as data, never sourced as shell. Adoption preserves
+the legacy file and journals a mode-state backup only when it adds the verified
+`postgresMode` and `redisMode` metadata needed by the new lifecycle; rollback
+restores that original state.
+
 Before the window, take encrypted backups and a sanitized Pulumi stack export.
 Remove credentials, DSNs, tokens, and IDs that are not needed to inspect URN
 shape. Review `pulumi preview` manually: existing code2 Cloudflare, Neon, and
@@ -31,7 +39,7 @@ action:
 ```bash
 TRAEFIK_IMAGE=... CLOUDFLARE_API_TOKEN=... ACME_EMAIL=... \
 SING_BOX_SERVER_NAME=... SING_BOX_TARGET=... DOMAIN=... ORIGIN_IP=... APP_PROBE_PATH=... \
-SING_BOX_VERIFY_COMMAND='approved-sing-box-verification-command' \
+POSTGRES_MODE=neon REDIS_MODE=docker SING_BOX_VERIFY_COMMAND='approved-sing-box-verification-command' \
 bash scripts/adopt-single-site-layout.sh --environment production --site code2
 ```
 
@@ -40,9 +48,13 @@ During the approved window, run the same command with `--apply`:
 ```bash
 TRAEFIK_IMAGE=... CLOUDFLARE_API_TOKEN=... ACME_EMAIL=... \
 SING_BOX_SERVER_NAME=... SING_BOX_TARGET=... DOMAIN=... ORIGIN_IP=... APP_PROBE_PATH=... \
-SING_BOX_VERIFY_COMMAND='approved-sing-box-verification-command' \
+POSTGRES_MODE=neon REDIS_MODE=docker SING_BOX_VERIFY_COMMAND='approved-sing-box-verification-command' \
 bash scripts/adopt-single-site-layout.sh --environment production --site code2 --apply
 ```
+
+`POSTGRES_MODE=neon` and `REDIS_MODE=docker` are verified lifecycle metadata
+inputs for the existing code2 placement. They let adoption validate or record
+the deployment state without moving or migrating any PostgreSQL or Redis data.
 
 Before the window, prepare the non-mutating preview marker. This records only
 the strictly validated non-secret legacy mapping and does not touch Docker,

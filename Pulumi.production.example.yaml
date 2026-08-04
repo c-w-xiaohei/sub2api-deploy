@@ -1,6 +1,7 @@
 # The public Pulumi interface has four structured objects only:
 # edge, sites, edgeSecrets, and siteSecrets. This example contains ordinary
 # values only. Set the two secret objects with encrypted Pulumi commands below.
+# Optional per-Site application settings belong in siteSecrets.<site>.appEnv.
 # Run a reviewed preview before applying a real stack.
 config:
   sub2api-vps-deploy:edge:
@@ -19,7 +20,7 @@ config:
       domain: code2.example.com
       image: weishaw/sub2api@sha256:0000000000000000000000000000000000000000000000000000000000000000
       adminEmail: admin@example.com
-      appProbePath: /api/ready
+      appProbePath: /
       database:
         mode: docker
         resourceMode: existing
@@ -31,7 +32,7 @@ config:
       domain: code3.example.com
       image: weishaw/sub2api@sha256:0000000000000000000000000000000000000000000000000000000000000000
       adminEmail: admin@example.com
-      appProbePath: /api/ready
+      appProbePath: /
       database:
         mode: docker
         resourceMode: existing

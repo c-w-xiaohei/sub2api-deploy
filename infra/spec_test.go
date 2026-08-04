@@ -90,12 +90,51 @@ func TestValidateHostSpecValidCode2Code3(t *testing.T) {
 	}
 }
 
+func TestSiteAppEnvAcceptsApplicationKeysAndRejectsPlatformCollisions(t *testing.T) {
+	for _, key := range []string{"LINUXDO_CONNECT_CLIENT_ID", "SMTP_HOST", "SITE_ID", "TRAEFIK_IMAGE", "BIND_HOST", "POSTGRES_MAX_CONNECTIONS", "POSTGRES_SHARED_BUFFERS", "POSTGRES_EFFECTIVE_CACHE_SIZE", "POSTGRES_MAINTENANCE_WORK_MEM"} {
+		candidate := validHostSpec()
+		values := map[string]string{key: "value"}
+		secrets := candidate.SiteSecrets["code2"]
+		secrets.AppEnv = &values
+		candidate.SiteSecrets["code2"] = secrets
+		_, _, err := ValidateHostSpec(candidate)
+		if key == "SITE_ID" || key == "TRAEFIK_IMAGE" || strings.Contains(key, "POSTGRES_") || key == "BIND_HOST" {
+			if err == nil || !strings.Contains(err.Error(), "appEnv") {
+				t.Fatalf("collision %q was accepted: %v", key, err)
+			}
+		} else if err != nil {
+			t.Fatalf("application key %q was rejected: %v", key, err)
+		}
+	}
+}
+
+func TestSiteAppEnvPreservesAbsentAndExplicitEmpty(t *testing.T) {
+	for _, raw := range []string{`{}`, `{"appEnv":{}}`} {
+		var secrets SiteSecrets
+		if err := json.Unmarshal([]byte(raw), &secrets); err != nil {
+			t.Fatal(err)
+		}
+		if raw == `{}` && secrets.AppEnv != nil {
+			t.Fatalf("absent appEnv = %#v, want nil", secrets.AppEnv)
+		}
+		if raw != `{}` && (secrets.AppEnv == nil || len(*secrets.AppEnv) != 0) {
+			t.Fatalf("explicit empty appEnv = %#v, want empty map", secrets.AppEnv)
+		}
+	}
+}
+
 func TestStructuredConfigShapesDecodeIntoHostSpec(t *testing.T) {
 	var edge EdgeSpec
-	if err := json.Unmarshal([]byte(`{"originIp":"203.0.113.10","cloudflareZoneId":"zone","acmeEmail":"ops@example.com","traefikImage":"traefik:v3.3.3","singBox":{"serverName":"www.cloudflare.com","target":"host.docker.internal:8443"}}`), &edge); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal([]byte(`{"originIp":"203.0.113.10","cloudflareZoneId":"zone","acmeEmail":"ops@example.com","traefikImage":"traefik:v3.3.3","singBox":{"serverName":"www.cloudflare.com","target":"host.docker.internal:8443"}}`), &edge); err != nil {
+		t.Fatal(err)
+	}
 	var sites map[string]SiteSpec
-	if err := json.Unmarshal([]byte(`{"code2":{"domain":"code2.contextid.cn","image":"weishaw/sub2api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","adminEmail":"ops@example.com","appProbePath":"/api/ready","database":{"mode":"docker"},"redis":{"mode":"upstash","resourceMode":"existing","endpoint":"cache.code2.upstash.io"}}}`), &sites); err != nil { t.Fatal(err) }
-	if edge.OriginIP != "203.0.113.10" || sites["code2"].Redis.Endpoint != "cache.code2.upstash.io" { t.Fatalf("decoded config = %+v %+v", edge, sites["code2"]) }
+	if err := json.Unmarshal([]byte(`{"code2":{"domain":"code2.contextid.cn","image":"weishaw/sub2api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","adminEmail":"ops@example.com","appProbePath":"/api/ready","database":{"mode":"docker"},"redis":{"mode":"upstash","resourceMode":"existing","endpoint":"cache.code2.upstash.io"}}}`), &sites); err != nil {
+		t.Fatal(err)
+	}
+	if edge.OriginIP != "203.0.113.10" || sites["code2"].Redis.Endpoint != "cache.code2.upstash.io" {
+		t.Fatalf("decoded config = %+v %+v", edge, sites["code2"])
+	}
 }
 
 func TestValidateHostSpecDeterministicOrdering(t *testing.T) {
@@ -511,8 +550,12 @@ func TestValidateHostSpecExistingUpstashEndpoint(t *testing.T) {
 	secrets.Redis = RedisSecrets{Password: "code2-upstash-password"}
 	spec.SiteSecrets["code2"] = secrets
 	resolved, _, err := ValidateHostSpec(spec)
-	if err != nil { t.Fatalf("ValidateHostSpec() error = %v", err) }
-	if got := resolved.Sites["code2"].Redis.Endpoint; got != "cache.code2.upstash.io" { t.Fatalf("endpoint = %q", got) }
+	if err != nil {
+		t.Fatalf("ValidateHostSpec() error = %v", err)
+	}
+	if got := resolved.Sites["code2"].Redis.Endpoint; got != "cache.code2.upstash.io" {
+		t.Fatalf("endpoint = %q", got)
+	}
 
 	for _, endpoint := range []string{"", "rediss://cache.upstash.io", "cache.upstash.io:6379", "cache.upstash.io/path"} {
 		spec := validHostSpec()
@@ -522,22 +565,35 @@ func TestValidateHostSpecExistingUpstashEndpoint(t *testing.T) {
 		secrets := spec.SiteSecrets["code2"]
 		secrets.Redis = RedisSecrets{Password: "code2-upstash-password"}
 		spec.SiteSecrets["code2"] = secrets
-		if _, _, err := ValidateHostSpec(spec); err == nil { t.Fatalf("endpoint %q was accepted", endpoint) }
+		if _, _, err := ValidateHostSpec(spec); err == nil {
+			t.Fatalf("endpoint %q was accepted", endpoint)
+		}
 	}
 }
 
 func TestValidateHostSpecSupportsAllSelectedDataModeCombinations(t *testing.T) {
-	for _, modes := range []struct { database, redis string }{{"docker", "docker"}, {"neon", "docker"}, {"docker", "upstash"}, {"neon", "upstash"}} {
+	for _, modes := range []struct{ database, redis string }{{"docker", "docker"}, {"neon", "docker"}, {"docker", "upstash"}, {"neon", "upstash"}} {
 		t.Run(modes.database+"/"+modes.redis, func(t *testing.T) {
 			spec := validHostSpec()
 			site := spec.Sites["code2"]
 			secrets := spec.SiteSecrets["code2"]
 			site.Database = DatabaseSpec{Mode: modes.database, ResourceMode: "existing"}
-			if modes.database == "docker" { secrets.Database = DatabaseSecrets{Password: "postgres-secret"} } else { secrets.Database = DatabaseSecrets{DSN: "postgresql://sub2api:secret@ep.code2.neon.tech/sub2api?sslmode=require"} }
+			if modes.database == "docker" {
+				secrets.Database = DatabaseSecrets{Password: "postgres-secret"}
+			} else {
+				secrets.Database = DatabaseSecrets{DSN: "postgresql://sub2api:secret@ep.code2.neon.tech/sub2api?sslmode=require"}
+			}
 			site.Redis = RedisSpec{Mode: modes.redis, ResourceMode: "existing"}
-			if modes.redis == "docker" { secrets.Redis = RedisSecrets{Password: "redis-secret"} } else { site.Redis.Endpoint = "cache.code2.upstash.io"; secrets.Redis = RedisSecrets{Password: "upstash-secret"} }
+			if modes.redis == "docker" {
+				secrets.Redis = RedisSecrets{Password: "redis-secret"}
+			} else {
+				site.Redis.Endpoint = "cache.code2.upstash.io"
+				secrets.Redis = RedisSecrets{Password: "upstash-secret"}
+			}
 			spec.Sites["code2"], spec.SiteSecrets["code2"] = site, secrets
-			if _, _, err := ValidateHostSpec(spec); err != nil { t.Fatalf("ValidateHostSpec() error = %v", err) }
+			if _, _, err := ValidateHostSpec(spec); err != nil {
+				t.Fatalf("ValidateHostSpec() error = %v", err)
+			}
 		})
 	}
 }
