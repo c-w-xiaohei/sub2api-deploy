@@ -21,6 +21,10 @@ export function renderDotenv(values: Record<string, unknown>): string {
     .join("\n") + "\n";
 }
 
+export function renderAppDotenv(values: Record<string, unknown>): string {
+  return renderDotenv(values).replaceAll("$", "$$$$");
+}
+
 export function writeRuntimeEnvAtomically(path: string, values: Record<string, unknown>): void {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true });
@@ -34,10 +38,26 @@ export function writeRuntimeEnvAtomically(path: string, values: Record<string, u
   }
 }
 
+export function writeAppEnvAtomically(path: string, values: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value !== "string") throw new Error(`${key} must be a string`);
+  }
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true });
+  const temporary = join(directory, `.app-env.${process.pid}.tmp`);
+  try {
+    writeFileSync(temporary, renderAppDotenv(values), { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* already renamed */ }
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [, , command, outputPath] = process.argv;
-  if (command !== "write" || !outputPath) {
-    throw new Error("usage: render-runtime-env.ts write PATH [--auto-setup=false] [--slot=SLOT] [--slot-data-dir=PATH]");
+  if ((command !== "write" && command !== "write-app") || !outputPath) {
+    throw new Error("usage: render-runtime-env.ts write|write-app PATH [--auto-setup=false] [--slot=SLOT] [--slot-data-dir=PATH]");
   }
   const input = readFileSync(0, "utf8");
   const values = JSON.parse(input) as Record<string, unknown>;
@@ -46,5 +66,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const slotDataDir = process.argv.find((argument) => argument.startsWith("--slot-data-dir="))?.slice("--slot-data-dir=".length);
   if (slot) values.SLOT = slot;
   if (slotDataDir) values.SLOT_DATA_DIR = slotDataDir;
-  writeRuntimeEnvAtomically(outputPath, values);
+  if (command === "write-app") writeAppEnvAtomically(outputPath, values);
+  else writeRuntimeEnvAtomically(outputPath, values);
 }

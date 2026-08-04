@@ -19,12 +19,12 @@ type HostSpec struct {
 }
 
 type EdgeSpec struct {
-	OriginIP         string      `json:"originIp"`
-	CloudflareZoneID string      `json:"cloudflareZoneId"`
-	ACMEEmail        string      `json:"acmeEmail"`
+	OriginIP         string `json:"originIp"`
+	CloudflareZoneID string `json:"cloudflareZoneId"`
+	ACMEEmail        string `json:"acmeEmail"`
 	// The shared Edge Traefik image intentionally permits a stable version tag.
-	TraefikImage     string      `json:"traefikImage"`
-	SingBox          SingBoxSpec `json:"singBox"`
+	TraefikImage string      `json:"traefikImage"`
+	SingBox      SingBoxSpec `json:"singBox"`
 }
 
 type SingBoxSpec struct {
@@ -60,11 +60,12 @@ type EdgeSecrets struct {
 }
 
 type SiteSecrets struct {
-	AdminPassword     string          `json:"adminPassword"`
-	JWTSecret         string          `json:"jwtSecret"`
-	TOTPEncryptionKey string          `json:"totpEncryptionKey"`
-	Database          DatabaseSecrets `json:"database"`
-	Redis             RedisSecrets    `json:"redis"`
+	AdminPassword     string             `json:"adminPassword"`
+	JWTSecret         string             `json:"jwtSecret"`
+	TOTPEncryptionKey string             `json:"totpEncryptionKey"`
+	Database          DatabaseSecrets    `json:"database"`
+	Redis             RedisSecrets       `json:"redis"`
+	AppEnv            *map[string]string `json:"appEnv"`
 }
 
 type DatabaseSecrets struct {
@@ -325,6 +326,74 @@ func validateSiteSecrets(siteID string, site SiteSpec, secrets SiteSecrets) erro
 	case site.Redis.Mode == "upstash":
 		if _, err := required(secrets.Redis.Password, name("redis.password")); err != nil {
 			return err
+		}
+	}
+	if err := validateAppEnv(siteID, secrets.AppEnv); err != nil {
+		return err
+	}
+	return nil
+}
+
+var appEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+var reservedAppEnvKeys = map[string]bool{
+	"SITE_ID": true, "SITE_RUNTIME_ROOT": true, "SITE_RUNTIME_ENV_PATH": true, "SITE_APP_ENV_PATH": true,
+	"SITE_DEPLOY_STATE_PATH": true, "SITE_BOOTSTRAP_MARKER_PATH": true, "COMPOSE_PROJECT_NAME": true,
+	"SITE_ROUTE_PATH": true, "BLUE_DATA_PATH": true, "GREEN_DATA_PATH": true, "BLUE_EDGE_ALIAS": true,
+	"GREEN_EDGE_ALIAS": true, "ACTIVE_EDGE_ALIAS": true, "EDGE_NETWORK_NAME": true, "DOMAIN": true,
+	"ORIGIN_IP": true, "APP_PROBE_PATH": true, "DRAIN_SECONDS": true, "CONFIGURED_SITE_IDS": true,
+	"HOST_STATE_PATH": true, "SUB2API_IMAGE": true, "SLOT": true, "SLOT_DATA_DIR": true,
+	"AUTO_SETUP": true, "RUNTIME_ROOT": true, "ACTIVE_SLOT": true, "APP_ENV_CONFIGURED": true, "APP_ENV_JSON": true, "RUNTIME_JSON": true,
+	"TRAEFIK_IMAGE": true, "CLOUDFLARE_DNS_API_TOKEN": true, "CLOUDFLARE_API_TOKEN": true, "ACME_EMAIL": true,
+	"SING_BOX_SERVER_NAME": true, "SING_BOX_TARGET": true, "SING_BOX_CONFIG": true, "EDGE_RUNTIME_ROOT": true,
+	"POSTGRES_MODE": true, "REDIS_MODE": true, "PROBE_RETRIES": true, "PROBE_DELAY_SECONDS": true,
+}
+
+var reservedAppEnvPrefixes = []string{"DATABASE_", "POSTGRES_", "REDIS_", "SITE_", "COMPOSE_"}
+
+var upstreamEnvironmentKeys = map[string]bool{
+	"BIND_HOST": true, "SERVER_HOST": true, "SERVER_PORT": true, "SERVER_MODE": true, "ENABLE_SERVER_TIMING": true, "RUN_MODE": true,
+	"UPDATE_GITHUB_TOKEN": true, "ALIPAY_MOBILE_PRECREATE_DEEP_LINK": true, "DATABASE_HOST": true, "DATABASE_PORT": true,
+	"DATABASE_USER": true, "DATABASE_PASSWORD": true, "DATABASE_DBNAME": true, "DATABASE_SSLMODE": true,
+	"DATABASE_MAX_OPEN_CONNS": true, "DATABASE_MAX_IDLE_CONNS": true, "DATABASE_CONN_MAX_LIFETIME_MINUTES": true,
+	"DATABASE_CONN_MAX_IDLE_TIME_MINUTES": true, "REDIS_HOST": true, "REDIS_PORT": true, "REDIS_USERNAME": true,
+	"REDIS_PASSWORD": true, "REDIS_DB": true, "REDIS_POOL_SIZE": true, "REDIS_MIN_IDLE_CONNS": true, "REDIS_ENABLE_TLS": true,
+	"ADMIN_EMAIL": true, "ADMIN_PASSWORD": true, "JWT_SECRET": true, "JWT_EXPIRE_HOUR": true, "SETUP_MIGRATION_TIMEOUT_SECONDS": true,
+	"TOTP_ENCRYPTION_KEY": true, "TZ": true, "POSTGRES_USER": true, "POSTGRES_PASSWORD": true, "POSTGRES_DB": true,
+	"PGDATA": true, "REDISCLI_AUTH": true, "GEMINI_OAUTH_CLIENT_ID": true, "GEMINI_OAUTH_CLIENT_SECRET": true,
+	"GEMINI_OAUTH_SCOPES": true, "GEMINI_QUOTA_POLICY": true, "GEMINI_CLI_OAUTH_CLIENT_SECRET": true,
+	"ANTIGRAVITY_OAUTH_CLIENT_SECRET": true, "ANTIGRAVITY_USER_AGENT_VERSION": true, "SECURITY_URL_ALLOWLIST_ENABLED": true,
+	"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP": true, "SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS": true,
+	"SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS": true, "UPDATE_PROXY_URL": true, "GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT": true,
+	"GATEWAY_OPENAI_HTTP2_ENABLED": true, "GATEWAY_OPENAI_HTTP2_ALLOW_PROXY_FALLBACK_TO_HTTP1": true,
+	"GATEWAY_OPENAI_HTTP2_FALLBACK_ERROR_THRESHOLD": true, "GATEWAY_OPENAI_HTTP2_FALLBACK_WINDOW_SECONDS": true,
+	"GATEWAY_OPENAI_HTTP2_FALLBACK_TTL_SECONDS": true, "GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_FAILURE_THRESHOLD": true,
+	"GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_WINDOW_SECONDS": true, "GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_TTL_SECONDS": true,
+	"GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT": true, "GATEWAY_IMAGE_STREAM_KEEPALIVE_INTERVAL": true,
+	"GATEWAY_IMAGE_CONCURRENCY_ENABLED": true, "GATEWAY_IMAGE_CONCURRENCY_MAX_CONCURRENT_REQUESTS": true,
+	"GATEWAY_IMAGE_CONCURRENCY_OVERFLOW_MODE": true, "GATEWAY_IMAGE_CONCURRENCY_WAIT_TIMEOUT_SECONDS": true,
+	"GATEWAY_IMAGE_CONCURRENCY_MAX_WAITING_REQUESTS": true,
+	"POSTGRES_MAX_CONNECTIONS": true, "POSTGRES_SHARED_BUFFERS": true, "POSTGRES_EFFECTIVE_CACHE_SIZE": true,
+	"POSTGRES_MAINTENANCE_WORK_MEM": true,
+}
+
+func validateAppEnv(siteID string, appEnv *map[string]string) error {
+	if appEnv == nil {
+		return nil
+	}
+	for key, value := range *appEnv {
+		if !appEnvKeyPattern.MatchString(key) {
+			return fmt.Errorf("siteSecrets.%s.appEnv key %q is invalid", siteID, key)
+		}
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("siteSecrets.%s.appEnv.%s contains NUL or newline", siteID, key)
+		}
+		reserved := reservedAppEnvKeys[key] || upstreamEnvironmentKeys[key]
+		for _, prefix := range reservedAppEnvPrefixes {
+			reserved = reserved || strings.HasPrefix(key, prefix)
+		}
+		if reserved {
+			return fmt.Errorf("siteSecrets.%s.appEnv key %q is deployment or Compose-owned", siteID, key)
 		}
 	}
 	return nil

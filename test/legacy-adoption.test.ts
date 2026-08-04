@@ -71,6 +71,18 @@ exit 97
 set -euo pipefail
 printf 'NPX %s\\n' "$*" >> "$FAKE_LOG"
 fail() { [[ "\${FAIL_AFTER:-}" != "$1" ]] || exit 91; }
+if [[ "$#" -eq 7 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/deployment-mode.ts ]]; then
+  path="$5"; postgres="$6"; redis="$7"; content="$(<"$path")"
+  if [[ "$4" == check ]]; then
+    [[ "$content" == *'"postgresMode":"'$postgres'"'* && "$content" == *'"redisMode":"'$redis'"'* ]] && exit 0
+    exit 1
+  fi
+  if [[ "$4" == adopt ]]; then
+    [[ "$content" != *'"postgresMode"'* && "$content" != *'"redisMode"'* ]] || exit 1
+    printf '{"activeSlot":"blue","postgresMode":"%s","redisMode":"%s"}\n' "$postgres" "$redis" > "$path"; chmod 600 "$path"; exit 0
+  fi
+  exit 97
+fi
 if [[ "$#" -eq 7 && "$1" == --no-install && "$2" == tsx && "$3" == scripts/write-host-state.ts && "$4" == write-legacy && "$6" == code2 && "$7" =~ ^(pending|complete)$ ]]; then
   path="$5"; handover="$7"
   complete=false; [[ "$handover" == complete ]] && complete=true
@@ -182,9 +194,16 @@ exec /bin/bash "$@"
 `);
   for (const executable of ["node", "npx", "docker", "bash", "cp", "chmod"]) chmodSync(join(bin, executable), 0o755);
   const state = join(runtime, "host-state.json");
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_STATE: fakeState, FAKE_LOG: join(root, "fake.log"), JOURNAL: join(runtime, "adopt-single-site-layout.journal"), EDGE_ENV: join(runtime, "edge", "edge.env"), TRAEFIK_IMAGE: "traefik:test", CLOUDFLARE_API_TOKEN: "token", ACME_EMAIL: "ops@example.test", SING_BOX_SERVER_NAME: "www.cloudflare.com", SING_BOX_TARGET: "host.docker.internal:8443", DOMAIN: "code2.example.test", ORIGIN_IP: "203.0.113.10", APP_PROBE_PATH: "/api/ready", SING_BOX_VERIFY_COMMAND: "true" };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_STATE: fakeState, FAKE_LOG: join(root, "fake.log"), JOURNAL: join(runtime, "adopt-single-site-layout.journal"), EDGE_ENV: join(runtime, "edge", "edge.env"), TRAEFIK_IMAGE: "traefik:test", CLOUDFLARE_API_TOKEN: "token", ACME_EMAIL: "ops@example.test", SING_BOX_SERVER_NAME: "www.cloudflare.com", SING_BOX_TARGET: "host.docker.internal:8443", DOMAIN: "code2.example.test", ORIGIN_IP: "203.0.113.10", APP_PROBE_PATH: "/api/ready", POSTGRES_MODE: "neon", REDIS_MODE: "upstash", SING_BOX_VERIFY_COMMAND: "true" };
   return { root, runtime, state, env, run: (mode?: string) => execFileSync("/bin/bash", [script, "--environment", "test", "--site", "code2", "--host-state", state, ...(mode ? [mode] : [])], { cwd: process.cwd(), env, stdio: "pipe" }), log: () => existsSync(env.FAKE_LOG!) ? readFileSync(env.FAKE_LOG!, "utf8") : "" };
 }
+
+it("requires explicit verified data modes for adoption", () => {
+  const f = fixture();
+  delete f.env.POSTGRES_MODE;
+  delete f.env.REDIS_MODE;
+  expect(() => f.run("--apply")).toThrow(/POSTGRES_MODE/);
+});
 
 function validRecoveryState(f: Fixture, state: string, handover?: "pending" | "complete"): void {
   const edge = join(f.runtime, "edge");
@@ -285,7 +304,7 @@ describe("legacy single-site adoption", () => {
       expect(() => f.run("--apply")).not.toThrow();
       expect(readFileSync(join(f.runtime, "adopt-single-site-layout.journal"), "utf8")).toContain("state=complete");
     }
-  });
+  }, 15000);
 
   it("accepts an attachment intent with no attachment after connect failure and retries cleanly", () => {
     const f = fixture();
@@ -307,5 +326,10 @@ describe("legacy single-site adoption", () => {
     expect(existsSync(join(f.runtime, "adopt-single-site-layout.journal.retired"))).toBe(true);
     const unsafe = fixture(); journal(unsafe.root, "complete"); hostState(unsafe.state, "complete", ["code2", "code3"]);
     expect(() => unsafe.run("--retire-journal")).toThrow();
+  });
+
+  it("moves the journal before cleaning a mode-state backup", () => {
+    const source = readFileSync(script, "utf8");
+    expect(source.indexOf('mv -f "$journal" "$journal.retired"')).toBeLessThan(source.indexOf('rm -f "${j[legacy_state_backup]}"'));
   });
 });

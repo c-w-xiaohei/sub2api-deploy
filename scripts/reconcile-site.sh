@@ -5,6 +5,7 @@ umask 077
 : "${SITE_ID:?SITE_ID is required}"
 : "${SITE_RUNTIME_ROOT:?SITE_RUNTIME_ROOT is required}"
 : "${SITE_RUNTIME_ENV_PATH:?SITE_RUNTIME_ENV_PATH is required}"
+: "${SITE_APP_ENV_PATH:?SITE_APP_ENV_PATH is required}"
 : "${SITE_DEPLOY_STATE_PATH:?SITE_DEPLOY_STATE_PATH is required}"
 : "${SITE_BOOTSTRAP_MARKER_PATH:?SITE_BOOTSTRAP_MARKER_PATH is required}"
 : "${BLUE_DATA_PATH:?BLUE_DATA_PATH is required}"
@@ -22,6 +23,11 @@ umask 077
 : "${APP_PROBE_PATH:?APP_PROBE_PATH is required}"
 : "${CONFIGURED_SITE_IDS:?CONFIGURED_SITE_IDS is required}"
 : "${HOST_STATE_PATH:?HOST_STATE_PATH is required}"
+: "${APP_ENV_CONFIGURED:?APP_ENV_CONFIGURED is required}"
+
+if [[ "$SITE_ID" == code2 && "$SITE_RUNTIME_ROOT" == runtime && -f "$SITE_RUNTIME_ROOT/oidc.env" ]]; then
+  printf '%s' "${APP_ENV_JSON:?APP_ENV_JSON is required}" | npx --no-install tsx scripts/verify-legacy-app-env.ts "$SITE_RUNTIME_ROOT/oidc.env" "$APP_ENV_CONFIGURED"
+fi
 
 npx --no-install tsx scripts/host-preflight.ts check "$CONFIGURED_SITE_IDS" "$HOST_STATE_PATH"
 npx --no-install tsx src/deployment-preflight.ts check "$SITE_DEPLOY_STATE_PATH" "$SITE_BOOTSTRAP_MARKER_PATH" "$POSTGRES_MODE" "$REDIS_MODE"
@@ -31,6 +37,7 @@ active_slot="$(node -e 'const s=require(process.argv[1]); process.stdout.write(s
 SUB2API_IMAGE="$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.activeImage)' "$SITE_DEPLOY_STATE_PATH")"
 mkdir -p "$BLUE_DATA_PATH" "$GREEN_DATA_PATH"
 printf '%s' "$RUNTIME_JSON" | npx --no-install tsx scripts/render-runtime-env.ts write "$SITE_RUNTIME_ENV_PATH" --slot="$active_slot" --slot-data-dir="$active_slot"
+printf '%s' "${APP_ENV_JSON:?APP_ENV_JSON is required}" | npx --no-install tsx scripts/render-runtime-env.ts write-app "$SITE_APP_ENV_PATH"
 export SUB2API_IMAGE SLOT="$active_slot" SLOT_DATA_DIR="$active_slot" AUTO_SETUP=true
 source scripts/site-compose-common.sh
 

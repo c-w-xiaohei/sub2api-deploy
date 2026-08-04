@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -19,6 +19,7 @@ function siteEnv(siteId: string): string[] {
   return [
     "SUB2API_IMAGE=image@sha256:digest",
     `SITE_RUNTIME_ROOT=${process.cwd()}/runtime/sites/${siteId}`,
+    `SITE_APP_ENV_PATH=${process.cwd()}/runtime/sites/${siteId}/app.env`,
     `BLUE_EDGE_ALIAS=sub2api-${siteId}-blue`,
     `GREEN_EDGE_ALIAS=sub2api-${siteId}-green`,
     "SLOT_DATA_DIR=blue",
@@ -37,6 +38,8 @@ function renderCompose(projectName: string, files: string[], env: string[], prof
 } {
   const envPath = join(mkdtempSync(join(tmpdir(), "sub2api-compose-")), ".env");
   writeFileSync(envPath, env.join("\n"));
+  const appEnvPath = env.find((value) => value.startsWith("SITE_APP_ENV_PATH="))?.slice("SITE_APP_ENV_PATH=".length);
+  if (appEnvPath) { mkdirSync(join(appEnvPath, ".."), { recursive: true }); writeFileSync(appEnvPath, ""); }
   const args = [
     "compose", "--project-name", projectName, "--env-file", envPath,
     ...files.flatMap((file) => ["-f", file]),
@@ -53,6 +56,33 @@ describe("compose deployment contract", () => {
     expect(upstream).toContain("# Source: Wei-Shaw/sub2api deploy/docker-compose.yml");
     expect(upstream).toContain("security_opt:");
     expect(upstream).toContain("healthcheck:");
+  });
+
+  it("provides an existing temporary app env file to every Compose validation", () => {
+    const validation = readPath("../scripts/validate-compose.sh");
+    expect(validation).toContain("SITE_APP_ENV_PATH=");
+    expect(validation).toContain("mktemp");
+    expect(validation).toContain("trap");
+    expect(validation).toContain("rm -f");
+    expect(validation).toContain('if [[ -n "$env_file" ]]');
+  });
+
+  it("passes an existing app env file to every validation Compose call", () => {
+    const bin = mkdtempSync(join(tmpdir(), "sub2api-validate-compose-bin-"));
+    const fakeDocker = join(bin, "docker");
+    writeFileSync(fakeDocker, `#!/usr/bin/env bash
+set -euo pipefail
+while (($#)); do
+  if [[ "$1" == --env-file ]]; then shift; [[ -f "$1" ]] || exit 1; fi
+  shift
+done
+`);
+    chmodSync(fakeDocker, 0o755);
+    expect(() => execFileSync("bash", ["scripts/validate-compose.sh"], {
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      stdio: "pipe",
+    })).not.toThrow();
   });
 
   it("splits edge and site Compose ownership", () => {
@@ -130,6 +160,15 @@ describe("compose deployment contract", () => {
     expect(site).toContain("external: true");
     expect(readPath("../traefik/traefik.yml")).toContain("/etc/traefik/dynamic");
     expect(readPath("../traefik/traefik.yml")).toContain("acme.json");
+  });
+
+  it("loads app.env only into application slots and protects control keys", () => {
+    const site = read("site.yml");
+    expect(site).toMatch(/sub2api-blue:[\s\S]*env_file:[\s\S]*SITE_APP_ENV_PATH/);
+    expect(site).toMatch(/sub2api-green:[\s\S]*env_file:[\s\S]*SITE_APP_ENV_PATH/);
+    expect(site).not.toMatch(/postgres:[\s\S]*env_file/);
+    expect(site).not.toMatch(/redis:[\s\S]*env_file/);
+    expect(site).toContain("APP_ENV");
   });
 
   it("keeps upstream auto setup enabled after installation", () => {

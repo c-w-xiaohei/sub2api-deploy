@@ -3,6 +3,7 @@
 # Site Compose owns one application project; the Edge project is deliberately separate.
 : "${SITE_ID:?SITE_ID is required}"
 : "${SITE_RUNTIME_ROOT:?SITE_RUNTIME_ROOT is required}"
+: "${SITE_APP_ENV_PATH:?SITE_APP_ENV_PATH is required}"
 : "${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}"
 : "${SITE_ROUTE_PATH:?SITE_ROUTE_PATH is required}"
 
@@ -13,6 +14,7 @@ fi
 
 : "${EDGE_NETWORK_NAME:?EDGE_NETWORK_NAME is required}"
 SITE_RUNTIME_ROOT="$(realpath -m "$SITE_RUNTIME_ROOT")"
+SITE_APP_ENV_PATH="$(realpath -m "$SITE_APP_ENV_PATH")"
 export SITE_RUNTIME_ROOT
 
 site_runtime_value() {
@@ -24,6 +26,7 @@ SITE_COMPOSE=(
   docker compose
   --project-name "$COMPOSE_PROJECT_NAME"
   --env-file "$SITE_RUNTIME_ROOT/runtime.env"
+  --env-file "$SITE_APP_ENV_PATH"
   --profile app
   -f compose/upstream.yml
   -f compose/site.yml

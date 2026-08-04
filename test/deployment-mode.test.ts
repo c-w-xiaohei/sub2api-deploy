@@ -27,4 +27,12 @@ describe("setup-only data modes", () => {
     adoptDeploymentModes(path, "docker", "upstash");
     expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ postgresMode: "docker", redisMode: "upstash" });
   });
+
+  it("adopts legacy mode metadata atomically without changing unrelated state", () => {
+    const directory = mkdtempSync(join(tmpdir(), "sub2api-adopt-metadata-"));
+    const path = join(directory, "deploy-state.json");
+    writeFileSync(path, JSON.stringify({ activeSlot: "blue", activeImage: "image@sha256:old" }));
+    adoptDeploymentModes(path, "neon", "docker");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ activeSlot: "blue", activeImage: "image@sha256:old", postgresMode: "neon", redisMode: "docker" });
+  });
 });

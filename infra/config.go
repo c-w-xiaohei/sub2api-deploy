@@ -20,8 +20,9 @@ type ProgramConfig struct {
 // SecretHostSpec retains the Pulumi-secret wrapper from the two secret object
 // settings while keeping resource construction independent from config loading.
 type SecretHostSpec struct {
-	Edge  pulumi.StringOutput
-	Sites map[string]pulumi.StringOutput
+	Edge   pulumi.StringOutput
+	Sites  map[string]pulumi.StringOutput
+	AppEnv map[string]pulumi.StringOutput
 }
 
 // resolveHostConfig is the shared boundary after Pulumi decodes the four
@@ -96,10 +97,11 @@ func loadProgramConfig(ctx *pulumi.Context) (ProgramConfig, error) {
 // wrapHostSecrets is the only transition from decoded secret objects to
 // runtime-compatible Pulumi secret outputs.
 func wrapHostSecrets(host HostSpec, layouts []SiteLayout) SecretHostSpec {
-	secrets := SecretHostSpec{Edge: pulumi.ToSecret(pulumi.String(host.EdgeSecrets.CloudflareAPIToken)).(pulumi.StringOutput), Sites: make(map[string]pulumi.StringOutput, len(layouts))}
+	secrets := SecretHostSpec{Edge: pulumi.ToSecret(pulumi.String(host.EdgeSecrets.CloudflareAPIToken)).(pulumi.StringOutput), Sites: make(map[string]pulumi.StringOutput, len(layouts)), AppEnv: make(map[string]pulumi.StringOutput, len(layouts))}
 	for _, layout := range layouts {
 		siteID := layout.SiteID
 		secrets.Sites[siteID] = pulumi.ToSecret(pulumi.String(marshalRuntimeSecrets(host.SiteSecrets[siteID]))).(pulumi.StringOutput)
+		secrets.AppEnv[siteID] = pulumi.ToSecret(pulumi.String(marshalAppEnv(host.SiteSecrets[siteID].AppEnv))).(pulumi.StringOutput)
 	}
 	return secrets
 }

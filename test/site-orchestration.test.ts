@@ -26,7 +26,7 @@ function createShellFixture(existing = true): { root: string; log: string; envir
   fake("npx", [
     '{ printf "npx"; printf " %s" "$@"; printf "\\n"; } >> "$COMMAND_LOG"',
     'case "$3:$4" in',
-    '  scripts/render-runtime-env.ts:write) cat >/dev/null; mkdir -p "$(dirname "$5")"; printf "POSTGRES_MODE=neon\\nREDIS_MODE=upstash\\n" > "$5" ;;',
+    '  scripts/render-runtime-env.ts:write|scripts/render-runtime-env.ts:write-app) cat >/dev/null; mkdir -p "$(dirname "$5")"; printf "POSTGRES_MODE=neon\\nREDIS_MODE=upstash\\n" > "$5" ;;',
     '  scripts/render-site-route.ts:write) mkdir -p "$(dirname "$6")"; printf "route\\n" > "$6" ;;',
     '  scripts/write-deploy-state.ts:write) mkdir -p "$(dirname "$5")"; printf "%s\\n" "$6" > "$5" ;;',
     '  scripts/write-bootstrap-marker.ts:write) mkdir -p "$(dirname "$5")"; printf "marker\\n" > "$5" ;;',
@@ -75,6 +75,7 @@ function createShellFixture(existing = true): { root: string; log: string; envir
       COMPOSE_PROJECT_NAME: "sub2api-code2",
       SITE_ROUTE_PATH: join(root, "runtime", "edge", "dynamic", "site-code2.yml"),
       SITE_RUNTIME_ENV_PATH: join(root, "runtime", "sites", "code2", "runtime.env"),
+      SITE_APP_ENV_PATH: join(root, "runtime", "sites", "code2", "app.env"),
       SITE_DEPLOY_STATE_PATH: join(root, "runtime", "sites", "code2", "deploy-state.json"),
       SITE_BOOTSTRAP_MARKER_PATH: join(root, "runtime", "sites", "code2", "bootstrap.marker"),
       BLUE_DATA_PATH: join(root, "runtime", "sites", "code2", "data", "blue"),
@@ -100,6 +101,8 @@ function createShellFixture(existing = true): { root: string; log: string; envir
       PROBE_RETRIES: "1",
       PROBE_DELAY_SECONDS: "0",
       RUNTIME_JSON: JSON.stringify({ SITE_ID: "code2", POSTGRES_MODE: "neon", REDIS_MODE: "upstash", APP_PROBE_PATH: "/health", DRAIN_SECONDS: "10" }),
+      APP_ENV_JSON: "{}",
+      APP_ENV_CONFIGURED: "false",
     },
   };
 }

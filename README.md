@@ -90,6 +90,12 @@ immutable digests. The shared Edge Traefik image is the intentional exception:
 Database and Redis modes are selected inside each Site. The current host
 remains resource-constrained even for two low-traffic Sites.
 
+Optional application settings belong in the encrypted `siteSecrets.<site>.appEnv`
+object. Keys may be arbitrary valid application dotenv names, including
+provider-specific settings, but deployment, Compose control, data-service,
+slot, path, probe, and image keys are rejected. Values are rendered only to
+that Site's `app.env`; they are not part of `runtime.env` or public Stack data.
+
 The `edge` object contains `originIp`, `cloudflareZoneId`, `acmeEmail`,
 `traefikImage`, and `singBox.serverName`/`target`. A Site may contain
 `database.mode` (`docker` or `neon`), `database.resourceMode`, `redis.mode`

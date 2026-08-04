@@ -5,7 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 edge_env="$(mktemp)"
-trap 'rm -f "$edge_env"' EXIT
+env_file=""
+app_env_file=""
+cleanup() {
+  if [[ -n "$edge_env" ]]; then rm -f "$edge_env"; fi
+  if [[ -n "$env_file" ]]; then rm -f "$env_file"; fi
+  if [[ -n "$app_env_file" ]]; then rm -f "$app_env_file"; fi
+}
+trap cleanup EXIT
 cat > "$edge_env" <<EOF
 TRAEFIK_IMAGE=traefik:v3.3.3
 CLOUDFLARE_DNS_API_TOKEN=not-used-in-verification
@@ -14,17 +21,17 @@ EDGE_RUNTIME_ROOT=${ROOT_DIR}/runtime/edge
 EOF
 docker compose --project-name sub2api-edge --env-file "$edge_env" -f compose/edge.yml config >/dev/null
 rm -f "$edge_env"
-trap - EXIT
 
 for site_id in code2 code3; do
   for pair in docker-docker neon-docker docker-upstash neon-upstash; do
     postgres_mode="${pair%-*}"
     redis_mode="${pair#*-}"
     env_file="$(mktemp)"
-    trap 'rm -f "$env_file"' EXIT
+    app_env_file="$(mktemp)"
     cat > "$env_file" <<EOF
 SUB2API_IMAGE=weishaw/sub2api@sha256:abcdef1234567890
 SITE_RUNTIME_ROOT=${ROOT_DIR}/runtime/sites/${site_id}
+SITE_APP_ENV_PATH=${app_env_file}
 BLUE_EDGE_ALIAS=sub2api-${site_id}-blue
 GREEN_EDGE_ALIAS=sub2api-${site_id}-green
 SLOT=blue
@@ -50,7 +57,8 @@ EOF
     [[ "$postgres_mode" == docker ]] && profiles+=(--profile postgres)
     [[ "$redis_mode" == docker ]] && profiles+=(--profile redis)
     docker compose --project-name "sub2api-${site_id}" --env-file "$env_file" "${profiles[@]}" --profile app -f compose/upstream.yml -f compose/site.yml config >/dev/null
-    rm -f "$env_file"
-    trap - EXIT
+    rm -f "$env_file" "$app_env_file"
+    env_file=""
+    app_env_file=""
   done
 done
