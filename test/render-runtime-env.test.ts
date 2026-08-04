@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderDotenv, writeRuntimeEnvAtomically } from "../scripts/render-runtime-env.js";
+import { renderDotenv, writeAppEnvAtomically, writeRuntimeEnvAtomically } from "../scripts/render-runtime-env.js";
 import * as runtimeEnv from "../scripts/render-runtime-env.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
@@ -57,12 +57,13 @@ describe("renderDotenv", () => {
   it("writes an isolated app.env atomically with stable escaping and mode 0600", () => {
     const hostRoot = mkdtempSync(join(tmpdir(), "sub2api-app-env-"));
     const path = join(hostRoot, "sites", "code2", "app.env");
-    (runtimeEnv as Record<string, unknown>).writeAppEnvAtomically(path, { SMTP_HOST: "mail.example.com", SECRET: "quoted\\value\"" });
+    const writeAppEnv = writeAppEnvAtomically;
+    writeAppEnv(path, { SMTP_HOST: "mail.example.com", SECRET: "quoted\\value\"" });
     expect(readFileSync(path, "utf8")).toBe('SECRET="quoted\\\\value\\\""\nSMTP_HOST="mail.example.com"\n');
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(() => (runtimeEnv as Record<string, unknown>).writeAppEnvAtomically(path, { "BAD-KEY": "value" })).toThrow(/invalid environment key/);
-    expect(() => (runtimeEnv as Record<string, unknown>).writeAppEnvAtomically(path, { SECRET: "line1\nline2" })).toThrow(/newline/);
-    expect(() => (runtimeEnv as Record<string, unknown>).writeAppEnvAtomically(path, { SECRET: 42 })).toThrow(/must be a string/);
+    expect(() => writeAppEnv(path, { "BAD-KEY": "value" })).toThrow(/invalid environment key/);
+    expect(() => writeAppEnv(path, { SECRET: "line1\nline2" })).toThrow(/newline/);
+    expect(() => writeAppEnv(path, { SECRET: 42 })).toThrow(/must be a string/);
   });
 
   it("renders app.env literals safely for Compose interpolation", () => {
