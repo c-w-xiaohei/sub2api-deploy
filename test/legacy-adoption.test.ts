@@ -46,26 +46,7 @@ function fixture(): { root: string; runtime: string; state: string; env: NodeJS.
   writeFileSync(join(runtime, "data", "must-not-move"), "legacy data\n");
 
   writeFileSync(join(bin, "node"), `#!/bin/bash
-set -euo pipefail
-slot_code='const x=require(process.argv[1]); if(!["blue","green"].includes(x.activeSlot)) process.exit(1); process.stdout.write(x.activeSlot)'
-mapping_code='const x=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const want=process.argv[2]; const ok=x.version===1&&x.sites?.length===1&&x.sites[0]==="code2"&&x.legacyCode2?.runtimeRoot==="runtime"&&x.legacyCode2?.composeProject==="sub2api"&&x.legacyCode2?.routeLayout==="flat"&&(want==="either"||x.legacyCode2?.handoverComplete===(want==="complete")); process.exit(ok?0:1)'
-payload_code='process.stdout.write(JSON.stringify({TRAEFIK_IMAGE:process.env.TRAEFIK_IMAGE,CLOUDFLARE_DNS_API_TOKEN:process.env.CLOUDFLARE_API_TOKEN,ACME_EMAIL:process.env.ACME_EMAIL,EDGE_RUNTIME_ROOT:process.env.EDGE_RUNTIME_ROOT}))'
-if [[ "$#" -eq 3 && "$1" == -e && "$2" == "$slot_code" ]]; then
-  [[ -f "$3" && "$(<"$3")" == *'"activeSlot":"blue"'* ]] || exit 1
-  printf blue; exit 0
-fi
-if [[ "$#" -eq 4 && "$1" == -e && "$2" == "$mapping_code" ]]; then
-  path="$3"; want="$4"; [[ -f "$path" && "$want" =~ ^(pending|complete|either)$ ]] || exit 1
-  mapping="$(<"$path")"; [[ "$mapping" == *'"version":1'* && "$mapping" == *'"sites":["code2"]'* && "$mapping" == *'"runtimeRoot":"runtime"'* && "$mapping" == *'"composeProject":"sub2api"'* && "$mapping" == *'"routeLayout":"flat"'* ]] || exit 1
-  [[ "$want" == either || ( "$want" == complete && "$mapping" == *'"handoverComplete":true'* ) || ( "$want" == pending && "$mapping" == *'"handoverComplete":false'* ) ]] || exit 1
-  exit 0
-fi
-if [[ "$#" -eq 2 && "$1" == -e && "$2" == "$payload_code" ]]; then
-  for value in "$TRAEFIK_IMAGE" "$CLOUDFLARE_API_TOKEN" "$ACME_EMAIL" "$EDGE_RUNTIME_ROOT"; do [[ "$value" =~ ^[A-Za-z0-9_./:@-]+$ ]] || exit 97; done
-  printf '{"TRAEFIK_IMAGE":"%s","CLOUDFLARE_DNS_API_TOKEN":"%s","ACME_EMAIL":"%s","EDGE_RUNTIME_ROOT":"%s"}' "$TRAEFIK_IMAGE" "$CLOUDFLARE_API_TOKEN" "$ACME_EMAIL" "$EDGE_RUNTIME_ROOT"
-  exit 0
-fi
-exit 97
+exec ${process.execPath} "$@"
 `);
   writeFileSync(join(bin, "npx"), `#!/bin/bash
 set -euo pipefail
@@ -226,6 +207,12 @@ function validRecoveryState(f: Fixture, state: string, handover?: "pending" | "c
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe("legacy single-site adoption", () => {
+  it("reads state files directly rather than resolving relative paths as Node modules", () => {
+    const source = readFileSync(script, "utf8");
+    expect(source).toContain('require("fs").readFileSync(process.argv[1], "utf8")');
+    expect(source).not.toContain('require(process.argv[1])');
+  });
+
   it("dry-run leaves the legacy host and Docker untouched", () => {
     const f = fixture();
     f.run();

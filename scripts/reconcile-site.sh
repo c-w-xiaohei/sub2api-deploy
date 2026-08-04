@@ -33,8 +33,8 @@ npx --no-install tsx scripts/host-preflight.ts check "$CONFIGURED_SITE_IDS" "$HO
 npx --no-install tsx src/deployment-preflight.ts check "$SITE_DEPLOY_STATE_PATH" "$SITE_BOOTSTRAP_MARKER_PATH" "$POSTGRES_MODE" "$REDIS_MODE"
 [[ -f "$SITE_DEPLOY_STATE_PATH" ]] || exit 0
 npx --no-install tsx scripts/deployment-mode.ts check "$SITE_DEPLOY_STATE_PATH" "$POSTGRES_MODE" "$REDIS_MODE"
-active_slot="$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.activeSlot)' "$SITE_DEPLOY_STATE_PATH")"
-SUB2API_IMAGE="$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.activeImage)' "$SITE_DEPLOY_STATE_PATH")"
+active_slot="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeSlot)' "$SITE_DEPLOY_STATE_PATH")"
+SUB2API_IMAGE="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeImage)' "$SITE_DEPLOY_STATE_PATH")"
 mkdir -p "$BLUE_DATA_PATH" "$GREEN_DATA_PATH"
 printf '%s' "$RUNTIME_JSON" | npx --no-install tsx scripts/render-runtime-env.ts write "$SITE_RUNTIME_ENV_PATH" --slot="$active_slot" --slot-data-dir="$active_slot"
 printf '%s' "${APP_ENV_JSON:?APP_ENV_JSON is required}" | npx --no-install tsx scripts/render-runtime-env.ts write-app "$SITE_APP_ENV_PATH"

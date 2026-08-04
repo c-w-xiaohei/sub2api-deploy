@@ -22,11 +22,11 @@ drain_seconds="${DRAIN_SECONDS:-10}"
 public_probe_path="/health"
 
 if [[ -f "$state_file" ]]; then
-  active_slot="$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.activeSlot)' "$state_file")"
+  active_slot="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeSlot)' "$state_file")"
 else
   active_slot=blue
 fi
-previous_image="$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.activeImage)' "$state_file")"
+previous_image="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeImage)' "$state_file")"
 if [[ "$active_slot" == blue ]]; then inactive_slot=green; else inactive_slot=blue; fi
 
 # The inactive volume must be stopped before copying install/config markers.
@@ -64,5 +64,5 @@ rm -f "$previous_route"
 
 sleep "$drain_seconds"
 site_stop_service "sub2api-${active_slot}"
-state_json="$(node -e 'const s=require(process.argv[1]); s.previousSlot=s.activeSlot; s.previousImage=s.activeImage; s.activeSlot=process.argv[2]; s.activeImage=process.argv[3]; process.stdout.write(JSON.stringify(s))' "$state_file" "$inactive_slot" "$image")"
+state_json="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); s.previousSlot=s.activeSlot; s.previousImage=s.activeImage; s.activeSlot=process.argv[2]; s.activeImage=process.argv[3]; process.stdout.write(JSON.stringify(s))' "$state_file" "$inactive_slot" "$image")"
 npx --no-install tsx scripts/write-deploy-state.ts write "$state_file" "$state_json"

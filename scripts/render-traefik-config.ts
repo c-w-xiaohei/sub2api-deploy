@@ -21,7 +21,7 @@ export function writeTraefikConfigAtomically(templatePath: string, outputPath: s
   }
 }
 
-if (process.argv[2] === "write") {
+if (import.meta.url === `file://${process.argv[1]}` && process.argv[2] === "write") {
   const [, , , templatePath, outputPath, acmeEmail] = process.argv;
   if (!templatePath || !outputPath || !acmeEmail) throw new Error("usage: render-traefik-config.ts write TEMPLATE OUTPUT EMAIL");
   writeTraefikConfigAtomically(templatePath, outputPath, acmeEmail);

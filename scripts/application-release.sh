@@ -9,6 +9,6 @@ if [[ ! -f "$SITE_DEPLOY_STATE_PATH" ]]; then
 fi
 source scripts/site-compose-common.sh
 npx --no-install tsx scripts/deployment-mode.ts check "$SITE_DEPLOY_STATE_PATH" "${POSTGRES_MODE:?POSTGRES_MODE is required}" "${REDIS_MODE:?REDIS_MODE is required}"
-active_image="$(node -e 'const s=require(process.argv[1]); process.stdout.write(s.activeImage)' "$SITE_DEPLOY_STATE_PATH")"
+active_image="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeImage)' "$SITE_DEPLOY_STATE_PATH")"
 [[ "$active_image" == "$SUB2API_IMAGE" ]] && exit 0
 bash scripts/switch-slot.sh "$SUB2API_IMAGE" "$DOMAIN"
