@@ -214,6 +214,11 @@ describe("legacy single-site adoption", () => {
     expect(source).not.toContain('require(process.argv[1])');
   });
 
+  it("normalizes the shared Edge runtime to an absolute host path", () => {
+    const source = readFileSync(script, "utf8");
+    expect(source).toContain('runtime_root="$(realpath -m "$(dirname "$host_state")")"');
+  });
+
   it("waits for the legacy public ports to be released before starting the Edge", () => {
     const source = readFileSync(script, "utf8");
     expect(source).toContain("wait_for_ports_released");

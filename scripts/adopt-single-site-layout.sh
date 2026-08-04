@@ -6,7 +6,7 @@ usage() { printf 'usage: %s --environment ENVIRONMENT --site code2 [--host-state
 environment=""; site=""; host_state="runtime/host-state.json"; mode=dry-run
 while (($#)); do case "$1" in --environment) environment="${2:-}"; shift 2 ;; --site) site="${2:-}"; shift 2 ;; --host-state) host_state="${2:-}"; shift 2 ;; --prepare-preview) mode=prepare-preview; shift ;; --apply) mode=apply; shift ;; --rollback) mode=rollback; shift ;; --retire-journal) mode=retire-journal; shift ;; *) usage ;; esac; done
 [[ -n "$environment" && "$site" == code2 ]] || usage
-runtime_root="$(dirname "$host_state")"; legacy_state="$runtime_root/deploy-state.json"; legacy_state_backup="$runtime_root/deploy-state.json.before-adoption"; legacy_acme="$runtime_root/acme.json"
+runtime_root="$(realpath -m "$(dirname "$host_state")")"; host_state="$runtime_root/$(basename "$host_state")"; legacy_state="$runtime_root/deploy-state.json"; legacy_state_backup="$runtime_root/deploy-state.json.before-adoption"; legacy_acme="$runtime_root/acme.json"
 edge_root="$runtime_root/edge"; edge_env="$edge_root/edge.env"; edge_static="$edge_root/traefik.yml"; edge_singbox="$edge_root/dynamic/00-sing-box.yml"; edge_acme="$edge_root/acme.json"; route="$edge_root/dynamic/site-code2.yml"; route_backup="$route.before-adoption"; journal="$runtime_root/adopt-single-site-layout.journal"
 
 require_legacy() { [[ -f "$legacy_state" && ! -e "$host_state" ]] || { printf 'expected legacy deploy state and no host state\n' >&2; exit 1; }; }
