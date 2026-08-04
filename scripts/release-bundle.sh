@@ -221,7 +221,7 @@ check_site_route_template() {
 
 verify_content() {
   local bundle_root="$1"
-  local verification_dir edge_env edge_json site_env site_json site_id
+  local verification_dir edge_env edge_json site_env app_env site_json site_id
 
   for path in bin/go bin/pulumi bin/pulumi-program; do
     [[ -x "$bundle_root/$path" ]] || die "required executable is missing: $path"
@@ -258,10 +258,13 @@ verify_content() {
 
   for site_id in code2 code3; do
     site_env="$verification_dir/sites/$site_id.env"
+    app_env="$verification_dir/sites/$site_id.app.env"
     site_json="$verification_dir/sites/$site_id.json"
+    : > "$app_env"
     printf '%s\n' \
       'SUB2API_IMAGE=weishaw/sub2api@sha256:abcdef1234567890' \
       "SITE_RUNTIME_ROOT=$verification_dir/sites/$site_id" \
+      "SITE_APP_ENV_PATH=$app_env" \
       "BLUE_EDGE_ALIAS=sub2api-$site_id-blue" \
       "GREEN_EDGE_ALIAS=sub2api-$site_id-green" \
       'SLOT=blue' \
