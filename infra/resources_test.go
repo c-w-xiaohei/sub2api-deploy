@@ -116,6 +116,16 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 			assertParent(t, item, parent, "selected provider must be Site-parented")
 			assertDependsOn(t, item, preflight.Name, "selected provider must not run before host preflight")
 		}
+		neon := requireSiteProvider(t, mocks.resources, siteID, "neon")
+		if neon.RegisterRPC.GetVersion() != "0.0.1-alpha.1" {
+			t.Fatalf("%s Neon provider version = %q", siteID, neon.RegisterRPC.GetVersion())
+		}
+		ignoresVersion := false
+		for _, field := range neon.RegisterRPC.GetIgnoreChanges() {
+			if field == "version" { ignoresVersion = true }
+		}
+		if siteID == "code2" && !ignoresVersion { t.Fatal("legacy code2 Neon provider must ignore its historical version metadata") }
+		if siteID == "code3" && ignoresVersion { t.Fatal("new code3 Neon provider must not ignore version changes") }
 	}
 	if countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord") != 2 {
 		t.Fatalf("DNS record count = %d, want 2", countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord"))
