@@ -1,28 +1,40 @@
-# The Pulumi program uses the prebuilt Go binary declared by Pulumi.yaml.
-# Run the offline checks and pulumi preview before applying a real stack.
+# The public Pulumi interface has four structured objects only:
+# edge, sites, edgeSecrets, and siteSecrets. This example contains ordinary
+# values only. Set the two secret objects with encrypted Pulumi commands below.
+# Run a reviewed preview before applying a real stack.
 config:
-  sub2api-vps-deploy:resourceNamespace: sub2api
-  sub2api-vps-deploy:domain: sub2api.example.com
-  sub2api-vps-deploy:originIp: 203.0.113.10
-  sub2api-vps-deploy:postgresMode: docker
-  sub2api-vps-deploy:redisMode: docker
-  sub2api-vps-deploy:sub2apiImage: weishaw/sub2api@sha256:REPLACE_WITH_IMMUTABLE_DIGEST
-  sub2api-vps-deploy:traefikImage: traefik:v3.3.3
-  sub2api-vps-deploy:cloudflareZoneId: replace-with-zone-id
-  sub2api-vps-deploy:acmeEmail: ops@example.com
-  sub2api-vps-deploy:adminEmail: admin@example.com
-  sub2api-vps-deploy:appProbePath: /api/ready
-  sub2api-vps-deploy:neonResourceMode: existing
-  sub2api-vps-deploy:upstashResourceMode: existing
-  # Managed Neon creates a Project; Neon provisions its default Branch, Role,
-  # Database, and Endpoint. It uses resourceNamespace for the project name.
-  # Set neonResourceMode to create and provide neonApiToken. neonOrgId is an
-  # optional override.
-  # Managed Upstash derives upstashDatabaseName from resourceNamespace and
-  # defaults upstashRegion to us-east-1. Set upstashResourceMode to create and
-  # provide upstashApiKey plus upstashEmail.
-  # For an existing external PostgreSQL service, set neonResourceMode to
-  # existing and use `pulumi config set --secret neonDsn 'postgresql://...'`.
-  # All passwords, tokens, and API keys use `pulumi config set --secret`:
-  # cloudflareApiToken, postgresPassword, redisPassword, adminPassword,
-  # jwtSecret, totpEncryptionKey, neonDsn, neonApiToken, upstashApiKey
+  sub2api-vps-deploy:edge:
+    originIp: 203.0.113.10
+    cloudflareZoneId: replace-with-zone-id
+    acmeEmail: ops@example.com
+    # Shared Edge exception: Traefik may use a stable version tag. Site images
+    # below must remain immutable name@sha256 digests.
+    traefikImage: traefik:v3.3.3
+    singBox:
+      serverName: www.cloudflare.com
+      target: host.docker.internal:8443
+  sub2api-vps-deploy:sites:
+    # code2 is the existing application adopted during the maintenance window.
+    code2:
+      domain: code2.example.com
+      image: weishaw/sub2api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      adminEmail: admin@example.com
+      appProbePath: /api/ready
+      database:
+        mode: docker
+        resourceMode: existing
+      redis:
+        mode: docker
+        resourceMode: existing
+    # code3 is declared in the same Stack after code2 adoption is complete.
+    code3:
+      domain: code3.example.com
+      image: weishaw/sub2api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      adminEmail: admin@example.com
+      appProbePath: /api/ready
+      database:
+        mode: docker
+        resourceMode: existing
+      redis:
+        mode: docker
+        resourceMode: existing

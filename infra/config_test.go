@@ -1,168 +1,201 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"gopkg.in/yaml.v3"
 )
 
-func validDeploymentInput() DeploymentInput {
-	return DeploymentInput{
-		Domain:             "sub2api.example.com",
-		OriginIP:           "203.0.113.10",
-		PostgresMode:       "docker",
-		RedisMode:          "docker",
-		Sub2APIImage:       "weishaw/sub2api@sha256:abcdef1234567890",
-		TraefikImage:       "traefik:v3.3.3",
-		CloudflareAPIToken: "cloudflare-secret",
-		CloudflareZoneID:   "zone-id",
-		ACMEEmail:          "ops@example.com",
-		AppProbePath:       "/api/ready",
-		PostgresPassword:   "postgres-secret",
-		RedisPassword:      "redis-secret",
-	}
-}
-
-func TestValidateDeploymentConfigDefaultsAndDigest(t *testing.T) {
-	config, err := ValidateDeploymentConfig(validDeploymentInput())
-	if err != nil {
-		t.Fatalf("ValidateDeploymentConfig() error = %v", err)
-	}
-	if config.ResourceNamespace != "sub2api" || config.PostgresUser != "sub2api" || config.PostgresDB != "sub2api" {
-		t.Fatalf("unexpected PostgreSQL defaults: %+v", config)
-	}
-	if config.TraefikImage != "traefik:v3.3.3" || config.NeonPort != 5432 || config.RedisPort != 6379 {
-		t.Fatalf("unexpected provider defaults: %+v", config)
-	}
-	if config.UpstashDatabaseName != "sub2api-redis" || config.UpstashRegion != "us-east-1" || config.DrainSeconds != 10 {
-		t.Fatalf("unexpected managed defaults: %+v", config)
-	}
-	if config.NeonResourceMode != "existing" || config.UpstashResourceMode != "existing" {
-		t.Fatalf("unexpected resource mode defaults: %+v", config)
+func TestProgramConfigModelHasNoFlatDeploymentFallback(t *testing.T) {
+	if _, _, err := ValidateHostSpec(validHostSpec()); err != nil {
+		t.Fatalf("ValidateHostSpec() error = %v", err)
 	}
 }
 
 func TestDefaultIntPreservesExplicitZero(t *testing.T) {
 	zero := 0
-	if got := defaultInt(&zero, 10); got != 0 {
-		t.Fatalf("defaultInt(explicit zero) = %d, want 0", got)
-	}
+	if got := defaultInt(&zero, 10); got != 0 { t.Fatalf("defaultInt(explicit zero) = %d, want 0", got) }
 }
 
-func TestValidateDeploymentConfigPreservesExplicitZeroIntegers(t *testing.T) {
-	input := validDeploymentInput()
-	input.PostgresMode = "neon"
-	input.PostgresPassword = ""
-	input.NeonHost = "ep.example.neon.tech"
-	input.NeonPassword = "neon-secret"
-	input.RedisMode = "upstash"
-	input.RedisPassword = ""
-	input.UpstashHost = "upstash.example.com"
-	input.UpstashPassword = "upstash-secret"
-	input.NeonPort = intPointer(0)
-	input.RedisPort = intPointer(0)
-	input.UpstashPort = intPointer(0)
-	input.DrainSeconds = intPointer(0)
+func TestResolveHostConfigDecodesOnlyStructuredObjects(t *testing.T) {
+	var edge EdgeSpec
+	var sites map[string]SiteSpec
+	var edgeSecrets EdgeSecrets
+	var siteSecrets map[string]SiteSecrets
+	if err := json.Unmarshal([]byte(`{"originIp":"203.0.113.10","cloudflareZoneId":"zone-id","acmeEmail":"ops@example.com","traefikImage":"traefik:v3.3.3","singBox":{"serverName":"www.cloudflare.com","target":"host.docker.internal:8443"}}`), &edge); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal([]byte(`{"code2":{"domain":"code2.contextid.cn","image":"weishaw/sub2api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","adminEmail":"code2-admin@example.com","appProbePath":"/api/ready","database":{"mode":"docker"},"redis":{"mode":"docker"}}}`), &sites); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal([]byte(`{"cloudflareApiToken":"edge-token"}`), &edgeSecrets); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal([]byte(`{"code2":{"adminPassword":"code2-admin-password","jwtSecret":"code2-jwt","totpEncryptionKey":"code2-totp","database":{"password":"code2-postgres-password"},"redis":{"password":"code2-redis-password"}}}`), &siteSecrets); err != nil { t.Fatal(err) }
 
-	config, err := ValidateDeploymentConfig(input)
+	host, layouts, err := resolveHostConfig(edge, sites, edgeSecrets, siteSecrets)
+	if err != nil { t.Fatalf("resolveHostConfig() error = %v", err) }
+	if len(layouts) != 1 || layouts[0].SiteID != "code2" { t.Fatalf("layouts = %#v", layouts) }
+	if host.EdgeSecrets.CloudflareAPIToken != "edge-token" { t.Fatalf("edge secret lost before wrapping") }
+	if got := host.SiteSecrets["code2"].AdminPassword; got != "code2-admin-password" { t.Fatalf("site secret identity lost before wrapping: %q", got) }
+	if host.EdgeSecrets.CloudflareAPIToken == host.SiteSecrets["code2"].AdminPassword { t.Fatal("edge and Site secret objects were conflated") }
+}
+
+func TestProductionExampleUsesStructuredPublicConfig(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "Pulumi.production.example.yaml"))
 	if err != nil {
-		t.Fatalf("ValidateDeploymentConfig() error = %v", err)
+		t.Fatalf("read production example: %v", err)
 	}
-	if config.NeonPort != 0 || config.RedisPort != 0 || config.UpstashPort != 0 || config.DrainSeconds != 0 {
-		t.Fatalf("explicit zero values were defaulted: %+v", config)
+
+	var document struct {
+		Config map[string]yaml.Node `yaml:"config"`
+	}
+	if err := yaml.Unmarshal(contents, &document); err != nil {
+		t.Fatalf("decode production example YAML: %v", err)
+	}
+
+	const prefix = "sub2api-vps-deploy:"
+	expectedKeys := map[string]bool{
+		prefix + "edge":  true,
+		prefix + "sites": true,
+	}
+	if len(document.Config) != len(expectedKeys) {
+		t.Fatalf("project configuration keys = %v, want only edge and sites", configKeys(document.Config))
+	}
+	for key := range document.Config {
+		if !expectedKeys[key] {
+			t.Fatalf("unexpected project configuration key %q", key)
+		}
+	}
+
+	var edge EdgeSpec
+	decodeYAMLObject(t, document.Config[prefix+"edge"], &edge)
+	var sites map[string]SiteSpec
+	decodeYAMLObject(t, document.Config[prefix+"sites"], &sites)
+
+	siteSecrets := make(map[string]SiteSecrets, len(sites))
+	for siteID, site := range sites {
+		siteSecrets[siteID] = fakeExampleSiteSecrets(siteID, site)
+	}
+	host, layouts, err := resolveHostConfig(edge, sites, EdgeSecrets{CloudflareAPIToken: "example-cloudflare-token"}, siteSecrets)
+	if err != nil {
+		t.Fatalf("resolveHostConfig() from production example: %v", err)
+	}
+
+	if !reflect.DeepEqual(sortedSiteIDs(sites), []string{"code2", "code3"}) {
+		t.Fatalf("sites = %v, want code2 and code3", sortedSiteIDs(sites))
+	}
+	wantLayouts := []SiteLayout{
+		DeriveSiteLayout("code2", defaultString(sites["code2"].ResourcePrefix, "code2")),
+		DeriveSiteLayout("code3", defaultString(sites["code3"].ResourcePrefix, "code3")),
+	}
+	if !reflect.DeepEqual(layouts, wantLayouts) {
+		t.Fatalf("resolved layouts = %#v, want %#v", layouts, wantLayouts)
+	}
+	for siteID, site := range sites {
+		resolvedSite := host.Sites[siteID]
+		if resolvedSite.Database.Mode != defaultString(site.Database.Mode, "docker") {
+			t.Fatalf("%s database mode = %q, want %q", siteID, resolvedSite.Database.Mode, site.Database.Mode)
+		}
+		if resolvedSite.Redis.Mode != defaultString(site.Redis.Mode, "docker") {
+			t.Fatalf("%s redis mode = %q, want %q", siteID, resolvedSite.Redis.Mode, site.Redis.Mode)
+		}
 	}
 }
 
-func intPointer(value int) *int { return &value }
-
-func TestValidateDeploymentConfigPreservesValidationContracts(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   func() DeploymentInput
-		message string
-	}{
-		{
-			name: "unsupported postgres mode",
-			input: func() DeploymentInput {
-				input := validDeploymentInput()
-				input.PostgresMode = "mysql"
-				return input
-			},
-			message: "postgresMode must be docker or neon",
-		},
-		{
-			name: "mutable image",
-			input: func() DeploymentInput {
-				input := validDeploymentInput()
-				input.Sub2APIImage = "weishaw/sub2api:latest"
-				return input
-			},
-			message: "sub2apiImage must contain an immutable @sha256 digest",
-		},
-		{
-			name: "health probe",
-			input: func() DeploymentInput {
-				input := validDeploymentInput()
-				input.AppProbePath = "/health"
-				return input
-			},
-			message: "appProbePath must not be /health",
-		},
-		{
-			name: "unsafe namespace",
-			input: func() DeploymentInput {
-				input := validDeploymentInput()
-				input.ResourceNamespace = "Sub2API prod"
-				return input
-			},
-			message: "resourceNamespace must contain only lowercase letters, numbers, and hyphens",
-		},
-		{
-			name: "missing cloudflare token",
-			input: func() DeploymentInput {
-				input := validDeploymentInput()
-				input.CloudflareAPIToken = ""
-				return input
-			},
-			message: "cloudflareApiToken is required",
-		},
+func decodeYAMLObject(t *testing.T, node yaml.Node, target interface{}) {
+	t.Helper()
+	encoded, err := yaml.Marshal(&node)
+	if err != nil {
+		t.Fatalf("marshal YAML object: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := ValidateDeploymentConfig(tt.input())
-			if err == nil || !strings.Contains(err.Error(), tt.message) {
-				t.Fatalf("error = %v, want substring %q", err, tt.message)
-			}
-		})
+	var object map[string]interface{}
+	if err := yaml.Unmarshal(encoded, &object); err != nil {
+		t.Fatalf("decode YAML object: %v", err)
+	}
+	jsonValue, err := json.Marshal(object)
+	if err != nil {
+		t.Fatalf("marshal decoded YAML object: %v", err)
+	}
+	if err := json.Unmarshal(jsonValue, target); err != nil {
+		t.Fatalf("decode object into %T: %v", target, err)
 	}
 }
 
-func TestValidateDeploymentConfigAllowsManagedAndDSNModes(t *testing.T) {
-	neon := validDeploymentInput()
-	neon.PostgresMode = "neon"
-	neon.PostgresPassword = ""
-	neon.NeonResourceMode = "create"
-	neon.NeonAPIToken = "neon-api-token"
-	if config, err := ValidateDeploymentConfig(neon); err != nil || config.NeonResourceMode != "create" {
-		t.Fatalf("managed Neon config = %+v, error = %v", config, err)
+func configKeys(config map[string]yaml.Node) []string {
+	keys := make([]string, 0, len(config))
+	for key := range config {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func sortedSiteIDs(sites map[string]SiteSpec) []string {
+	ids := make([]string, 0, len(sites))
+	for siteID := range sites {
+		ids = append(ids, siteID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func fakeExampleSiteSecrets(siteID string, site SiteSpec) SiteSecrets {
+	secrets := SiteSecrets{
+		AdminPassword:     siteID + "-admin-password",
+		JWTSecret:         siteID + "-jwt-secret",
+		TOTPEncryptionKey: siteID + "-totp-key",
 	}
 
-	dsn := validDeploymentInput()
-	dsn.PostgresMode = "neon"
-	dsn.PostgresPassword = ""
-	dsn.NeonDSN = "postgresql://sub2api:secret@ep.example.neon.tech/sub2api?sslmode=require"
-	if config, err := ValidateDeploymentConfig(dsn); err != nil || config.NeonDSN == "" {
-		t.Fatalf("Neon DSN config = %+v, error = %v", config, err)
+	databaseMode := defaultString(site.Database.Mode, "docker")
+	databaseResourceMode := defaultString(site.Database.ResourceMode, "existing")
+	if databaseMode == "docker" {
+		secrets.Database.Password = siteID + "-database-password"
+	} else if databaseResourceMode == "create" {
+		secrets.Database.APIToken = siteID + "-neon-api-token"
+	} else {
+		secrets.Database.DSN = "postgresql://sub2api:secret@" + siteID + ".neon.tech/sub2api?sslmode=require"
 	}
 
-	upstash := validDeploymentInput()
-	upstash.RedisMode = "upstash"
-	upstash.RedisPassword = ""
-	upstash.UpstashResourceMode = "create"
-	upstash.UpstashAPIKey = "upstash-api-key"
-	upstash.UpstashEmail = "ops@example.com"
-	config, err := ValidateDeploymentConfig(upstash)
-	if err != nil || config.UpstashResourceMode != "create" {
-		t.Fatalf("managed Upstash config = %+v, error = %v", config, err)
+	redisMode := defaultString(site.Redis.Mode, "docker")
+	redisResourceMode := defaultString(site.Redis.ResourceMode, "existing")
+	if redisMode == "docker" {
+		secrets.Redis.Password = siteID + "-redis-password"
+	} else if redisResourceMode == "create" {
+		secrets.Redis.APIKey = siteID + "-upstash-api-key"
+	} else {
+		secrets.Redis.Password = siteID + "-upstash-password"
 	}
+	return secrets
+}
+
+func TestWrapHostSecretsKeepsStructuredSecretsIndependentAndTainted(t *testing.T) {
+	input := validHostSpec()
+	ordinary, err := json.Marshal(struct {
+		Edge  EdgeSpec            `json:"edge"`
+		Sites map[string]SiteSpec `json:"sites"`
+	}{Edge: input.Edge, Sites: input.Sites})
+	if err != nil { t.Fatal(err) }
+	secretObjects, err := json.Marshal(struct {
+		EdgeSecrets EdgeSecrets            `json:"edgeSecrets"`
+		SiteSecrets map[string]SiteSecrets `json:"siteSecrets"`
+	}{EdgeSecrets: input.EdgeSecrets, SiteSecrets: input.SiteSecrets})
+	if err != nil { t.Fatal(err) }
+	var decoded struct { Edge EdgeSpec `json:"edge"`; Sites map[string]SiteSpec `json:"sites"` }
+	if err := json.Unmarshal(ordinary, &decoded); err != nil { t.Fatal(err) }
+	var decodedSecrets struct { EdgeSecrets EdgeSecrets `json:"edgeSecrets"`; SiteSecrets map[string]SiteSecrets `json:"siteSecrets"` }
+	if err := json.Unmarshal(secretObjects, &decodedSecrets); err != nil { t.Fatal(err) }
+	host, layouts, err := resolveHostConfig(decoded.Edge, decoded.Sites, decodedSecrets.EdgeSecrets, decodedSecrets.SiteSecrets)
+	if err != nil { t.Fatal(err) }
+
+	if err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		secrets := wrapHostSecrets(host, layouts)
+		for name, output := range map[string]pulumi.StringOutput{"edge": secrets.Edge, "code2": secrets.Sites["code2"], "code3": secrets.Sites["code3"]} {
+			if !pulumi.IsSecret(output) { t.Errorf("%s secret output lost Pulumi taint", name) }
+		}
+		secrets.Edge.ApplyT(func(value string) string { if value != "cloudflare-secret" { t.Errorf("edge secret = %q", value) }; return value })
+		secrets.Sites["code2"].ApplyT(func(value string) string { if !strings.Contains(value, "code2-admin-secret") || strings.Contains(value, "code3-admin-secret") { t.Errorf("code2 payload is not isolated: %q", value) }; return value })
+		secrets.Sites["code3"].ApplyT(func(value string) string { if !strings.Contains(value, "code3-admin-secret") || strings.Contains(value, "code2-admin-secret") { t.Errorf("code3 payload is not isolated: %q", value) }; return value })
+		return nil
+	}, pulumi.WithMocks("sub2api-vps-deploy", "test", &graphMocks{})); err != nil { t.Fatal(err) }
 }

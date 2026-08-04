@@ -7,15 +7,16 @@ import { adoptDeploymentModes } from "../scripts/deployment-mode.js";
 
 describe("setup-only data modes", () => {
   it("accepts the persisted modes when the requested modes are unchanged", () => {
-    expect(() => assertDeploymentModes({ postgresMode: "docker", redisMode: "upstash" }, "docker", "upstash")).not.toThrow();
+    expect(() => assertDeploymentModes({ postgresMode: "docker", redisMode: "upstash" }, "docker", "upstash", "runtime/sites/code2/deploy-state.json")).not.toThrow();
   });
 
   it("fails closed for a legacy state without persisted modes", () => {
-    expect(() => assertDeploymentModes({}, "docker", "docker")).toThrow(/adopt|migration required/);
+    expect(() => assertDeploymentModes({}, "docker", "docker", "runtime/sites/code2/deploy-state.json"))
+      .toThrow(/adopt runtime\/sites\/code2\/deploy-state\.json docker docker/);
   });
 
   it("rejects a mode change before deployment side effects", () => {
-    expect(() => assertDeploymentModes({ postgresMode: "docker", redisMode: "docker" }, "neon", "docker"))
+    expect(() => assertDeploymentModes({ postgresMode: "docker", redisMode: "docker" }, "neon", "docker", "runtime/sites/code2/deploy-state.json"))
       .toThrow(/requires migration/);
   });
 

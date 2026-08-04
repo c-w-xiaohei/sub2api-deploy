@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "deployment": {
+    "resources": [
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:cloudflare::cloudflare","type":"pulumi:providers:cloudflare","name":"cloudflare","parent":"","provider":"","id":"cloudflare-provider-id","protect":false,"retainOnDelete":false,"inputs":{"apiToken":"[secret]"}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::cloudflare:index/zoneSetting:ZoneSetting::cloudflare-full-strict","type":"cloudflare:index/zoneSetting:ZoneSetting","name":"cloudflare-full-strict","parent":"","provider":"urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:cloudflare::cloudflare::cloudflare-provider-id","id":"ssl-id","protect":false,"retainOnDelete":false,"inputs":{"settingId":"ssl","value":"strict"}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::cloudflare:index/dnsRecord:DnsRecord::sub2api-origin","type":"cloudflare:index/dnsRecord:DnsRecord","name":"sub2api-origin","parent":"","provider":"urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:cloudflare::cloudflare::cloudflare-provider-id","id":"dns-id","protect":false,"retainOnDelete":false,"inputs":{"zoneId":"zone-id","name":"code2.contextid.cn","type":"A","content":"203.0.113.10","proxied":true,"ttl":1}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:neon::neon","type":"pulumi:providers:neon","name":"neon","parent":"","provider":"","id":"neon-provider-id","protect":false,"retainOnDelete":false,"inputs":{"api_key":"[secret]"}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::neon:provider:Project::contextid-us-neon-project","type":"neon:provider:Project","name":"contextid-us-neon-project","parent":"","provider":"urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:neon::neon::neon-provider-id","id":"neon-project-id","protect":false,"retainOnDelete":false,"inputs":{"name":"contextid-us-postgres","org_id":"historical-org"}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:upstash::upstash","type":"pulumi:providers:upstash","name":"upstash","parent":"","provider":"","id":"upstash-provider-id","protect":false,"retainOnDelete":false,"inputs":{"apiKey":"[secret]","email":"historical@example.invalid"}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::upstash:index/redisDatabase:RedisDatabase::contextid-us-upstash-redis","type":"upstash:index/redisDatabase:RedisDatabase","name":"contextid-us-upstash-redis","parent":"","provider":"urn:pulumi:production::sub2api-vps-deploy::pulumi:providers:upstash::upstash::upstash-provider-id","id":"redis-id","protect":false,"retainOnDelete":false,"inputs":{"databaseName":"contextid-us-redis","region":"us-east-1","tls":true}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::command:local:Command::infra-reconcile","type":"command:local:Command","name":"infra-reconcile","parent":"","provider":"","id":"reconcile-id","protect":false,"retainOnDelete":false,"inputs":{}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::command:local:Command::post-strict-public-readiness","type":"command:local:Command","name":"post-strict-public-readiness","parent":"","provider":"","id":"readiness-id","protect":false,"retainOnDelete":false,"inputs":{}},
+      {"urn":"urn:pulumi:production::sub2api-vps-deploy::command:local:Command::application-release","type":"command:local:Command","name":"application-release","parent":"","provider":"","id":"release-id","protect":false,"retainOnDelete":false,"inputs":{}}
+    ]
+  }
+}

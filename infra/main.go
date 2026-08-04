@@ -2,293 +2,109 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"encoding/hex"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-func main() {
-	if err := pulumi.RunErr(deploymentProgram); err != nil {
-		panic(err)
-	}
-}
+func main() { if err := pulumi.RunErr(deploymentProgram); err != nil { panic(err) } }
 
-type DeploymentExports struct {
-	DomainName        pulumi.StringOutput
-	DNSRecordID       pulumi.IDOutput
-	StrictReadinessID pulumi.IDOutput
-	DeploymentID      pulumi.IDOutput
-}
+type HostGraphExports struct { Sites pulumi.MapOutput; HostStateID pulumi.IDOutput }
+
+type hostDesiredSite struct { ID string; Spec SiteSpec; Layout SiteLayout }
+type hostDesiredState struct { Edge EdgeSpec; Sites []hostDesiredSite }
+type expectedSiteMode struct { PostgresMode string `json:"postgresMode"`; RedisMode string `json:"redisMode"` }
 
 func deploymentProgram(ctx *pulumi.Context) error {
-	programConfig, err := loadProgramConfig(ctx)
-	if err != nil {
-		return err
-	}
-	config := programConfig.DeploymentConfig
-	if err := readDeploymentPreflight(config.PostgresMode, config.RedisMode); err != nil {
-		return err
-	}
-	composeChecksum, err := deploymentChecksum()
-	if err != nil {
-		return err
-	}
-	exports, err := deployResourceGraph(ctx, programConfig, composeChecksum)
-	if err != nil {
-		return err
-	}
-	ctx.Export("domainName", exports.DomainName)
-	ctx.Export("dnsRecordId", exports.DNSRecordID)
-	ctx.Export("strictReadinessId", exports.StrictReadinessID)
-	ctx.Export("deploymentId", exports.DeploymentID)
+	programConfig, err := loadProgramConfig(ctx); if err != nil { return err }
+	allowPendingPreview := ctx.DryRun() && os.Getenv("ALLOW_PENDING_LEGACY_PREVIEW") == "1"
+	layouts, adoptedCode2, err := ResolveHostLayouts("runtime/host-state.json", programConfig.Layouts, allowPendingPreview); if err != nil { return err }
+	edgeChecksum, err := edgeChecksum(); if err != nil { return err }
+	siteChecksum, err := siteChecksum(); if err != nil { return err }
+	hostChecksum, err := hostChecksum(); if err != nil { return err }
+	exports, err := deployHostGraph(ctx, programConfig.Host, layouts, programConfig.Secrets, edgeChecksum, siteChecksum, hostChecksum, adoptedCode2); if err != nil { return err }
+	ctx.Export("sites", exports.Sites)
+	ctx.Export("hostStateId", exports.HostStateID)
 	return nil
 }
 
-func deployResourceGraph(ctx *pulumi.Context, programConfig ProgramConfig, composeChecksum string) (DeploymentExports, error) {
-	config := programConfig.DeploymentConfig
-	database, err := databaseInputs(ctx, config, programConfig.Secrets)
-	if err != nil {
-		return DeploymentExports{}, err
+func deployHostGraph(ctx *pulumi.Context, host HostSpec, layouts []SiteLayout, secrets SecretHostSpec, edgeChecksum, siteChecksum, hostChecksum string, adoptedCode2 ...bool) (HostGraphExports, error) {
+	configuredSiteIDs := ""
+	for index, layout := range layouts { if index > 0 { configuredSiteIDs += "," }; configuredSiteIDs += layout.SiteID }
+	hostStatePath := "runtime/host-state.json"
+	desiredState, err := hostDesiredStateDigest(host, layouts)
+	if err != nil { return HostGraphExports{}, err }
+	expectedModes, err := expectedSiteModesJSON(host, layouts)
+	if err != nil { return HostGraphExports{}, err }
+	preflight, err := newHostCommand(ctx, "host-preflight", "npx --no-install tsx scripts/host-preflight.ts check \"$CONFIGURED_SITE_IDS\" \"$HOST_STATE_PATH\" \"$ALLOW_PENDING_LEGACY_PREVIEW\" \"$EXPECTED_SITE_MODES\"", pulumi.StringMap{
+		"CONFIGURED_SITE_IDS": pulumi.String(configuredSiteIDs), "HOST_STATE_PATH": pulumi.String(hostStatePath),
+		"ALLOW_PENDING_LEGACY_PREVIEW": pulumi.String(fmt.Sprintf("%t", ctx.DryRun() && os.Getenv("ALLOW_PENDING_LEGACY_PREVIEW") == "1")),
+		"EXPECTED_SITE_MODES": pulumi.String(expectedModes),
+	}, []string{"host-preflight-v2", configuredSiteIDs, hostStatePath, expectedModes, desiredState, edgeChecksum, siteChecksum, hostChecksum})
+	if err != nil { return HostGraphExports{}, err }
+	legacyCode2 := len(adoptedCode2) == 1 && adoptedCode2[0]
+	edge, err := DeployEdge(ctx, host.Edge, secrets.Edge, edgeChecksum, preflight, legacyCode2); if err != nil { return HostGraphExports{}, err }
+	// Register Site modules in sorted layout order; each final command gates the next Site.
+	var barrier pulumi.Resource
+	outputs := pulumi.Map{}
+	for _, layout := range layouts {
+		siteID := layout.SiteID
+		site, err := DeploySite(ctx, siteID, host.Sites[siteID], host.SiteSecrets[siteID], layout, edge, preflight, barrier, siteChecksum, configuredSiteIDs)
+		if err != nil { return HostGraphExports{}, err }
+		barrier = site.FinalBarrier
+		outputs[siteID] = site.Status
 	}
-	redis, err := redisInputs(ctx, config, programConfig.Secrets)
-	if err != nil {
-		return DeploymentExports{}, err
-	}
-	runtimePayload := buildRuntimePayload(config, database, redis, programConfig.Secrets)
-
-	domain, err := CreateDomainResources(ctx, config.Domain, config.OriginIP, config.CloudflareZoneID, programConfig.Secrets["cloudflareApiToken"])
-	if err != nil {
-		return DeploymentExports{}, err
-	}
-	infraReconcile, err := CreateInfraReconcileCommand(ctx, config, runtimePayload, composeChecksum, domain.DNSRecord)
-	if err != nil {
-		return DeploymentExports{}, err
-	}
-	strictSSL, err := CreateStrictSSLSetting(ctx, domain, infraReconcile)
-	if err != nil {
-		return DeploymentExports{}, err
-	}
-	strictReadiness, err := CreateStrictReadinessCommand(ctx, config, BuildInfraTriggers(InfraTriggerInput{
-		ResourceNamespace: config.ResourceNamespace,
-		Domain:            config.Domain,
-		OriginIP:          config.OriginIP,
-		PostgresMode:      config.PostgresMode,
-		RedisMode:         config.RedisMode,
-		TraefikImage:      config.TraefikImage,
-		ACMEEmail:         config.ACMEEmail,
-		AppProbePath:      config.AppProbePath,
-		DrainSeconds:      config.DrainSeconds,
-		ComposeChecksum:   composeChecksum,
-		ResourceModes:     BuildResourceModes(config),
-	}), strictSSL)
-	if err != nil {
-		return DeploymentExports{}, err
-	}
-	applicationRelease, err := CreateApplicationReleaseCommand(ctx, config, strictReadiness, infraReconcile)
-	if err != nil {
-		return DeploymentExports{}, err
-	}
-	return DeploymentExports{
-		DomainName:        pulumi.String(config.Domain).ToStringOutput(),
-		DNSRecordID:       domain.DNSRecordID,
-		StrictReadinessID: strictReadiness.ID(),
-		DeploymentID:      applicationRelease.ID(),
-	}, nil
+	statePaths := ""
+	for index, layout := range layouts { if index > 0 { statePaths += "," }; statePaths += layout.DeployStatePath }
+	finalize, err := newHostCommand(ctx, "host-finalize-state", "bash scripts/finalize-host-state.sh", pulumi.StringMap{
+		"CONFIGURED_SITE_IDS": pulumi.String(configuredSiteIDs), "HOST_STATE_PATH": pulumi.String(hostStatePath), "SITE_DEPLOY_STATE_PATHS": pulumi.String(statePaths),
+	}, []string{"host-finalize-state-v1", configuredSiteIDs, hostStatePath, statePaths, hostChecksum}, preflight, barrier)
+	if err != nil { return HostGraphExports{}, err }
+	return HostGraphExports{Sites: outputs.ToMapOutput(), HostStateID: finalize.ID()}, nil
 }
 
-func databaseInputs(ctx *pulumi.Context, config DeploymentConfig, secrets map[string]pulumi.StringOutput) (DatabaseConnectionInputs, error) {
-	if config.PostgresMode == "neon" && config.NeonResourceMode == "create" {
-		return CreateNeonConnection(ctx, config, secrets["neonApiToken"])
+func expectedSiteModesJSON(host HostSpec, layouts []SiteLayout) (string, error) {
+	modes := make(map[string]expectedSiteMode, len(layouts))
+	for _, layout := range layouts {
+		site := host.Sites[layout.SiteID]
+		modes[layout.SiteID] = expectedSiteMode{PostgresMode: site.Database.Mode, RedisMode: site.Redis.Mode}
 	}
-	if config.PostgresMode == "neon" && config.NeonDSN != "" {
-		return BuildDSNDatabaseConnection(secrets["neonDsn"]), nil
-	}
-	connection := BuildDatabaseConnection(config)
-	password := pulumi.StringInput(secrets["postgresPassword"])
-	if config.PostgresMode == "neon" {
-		password = secrets["neonPassword"]
-	}
-	return DatabaseConnectionInputs{
-		Host:     pulumi.String(connection.Host),
-		Port:     pulumi.Int(connection.Port),
-		User:     pulumi.String(connection.User),
-		Password: password,
-		DBName:   pulumi.String(connection.DBName),
-		SSLMode:  connection.SSLMode,
-	}, nil
+	encoded, err := json.Marshal(modes)
+	if err != nil { return "", err }
+	return string(encoded), nil
 }
 
-func redisInputs(ctx *pulumi.Context, config DeploymentConfig, secrets map[string]pulumi.StringOutput) (RedisConnectionInputs, error) {
-	if config.RedisMode == "upstash" && config.UpstashResourceMode == "create" {
-		return CreateUpstashConnection(ctx, config, secrets["upstashApiKey"])
-	}
-	connection := BuildRedisConnection(config)
-	password := pulumi.StringInput(secrets["redisPassword"])
-	if config.RedisMode == "upstash" {
-		password = secrets["upstashPassword"]
-	}
-	return RedisConnectionInputs{
-		Host:      pulumi.String(connection.Host),
-		Port:      pulumi.Int(connection.Port),
-		Username:  pulumi.String(connection.Username),
-		Password:  password,
-		DB:        pulumi.Int(connection.DB),
-		EnableTLS: pulumi.Bool(connection.EnableTLS),
-	}, nil
+func hostDesiredStateDigest(host HostSpec, layouts []SiteLayout) (string, error) {
+	sites := make([]hostDesiredSite, 0, len(layouts))
+	for _, layout := range layouts { sites = append(sites, hostDesiredSite{ID: layout.SiteID, Spec: host.Sites[layout.SiteID], Layout: layout}) }
+	encoded, err := json.Marshal(hostDesiredState{Edge: host.Edge, Sites: sites})
+	if err != nil { return "", err }
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
-type RedisConnectionInputs struct {
-	Host      pulumi.StringInput
-	Port      pulumi.IntInput
-	Username  pulumi.StringInput
-	Password  pulumi.StringInput
-	DB        pulumi.IntInput
-	EnableTLS pulumi.BoolInput
+func edgeChecksum() (string, error) {
+	return checksumFiles(edgeChecksumPaths)
 }
 
-func buildRuntimePayload(config DeploymentConfig, database DatabaseConnectionInputs, redis RedisConnectionInputs, secrets map[string]pulumi.StringOutput) pulumi.StringOutput {
-	postgresPassword := pulumi.StringInput(secrets["postgresPassword"])
-	if config.PostgresMode == "neon" {
-		if config.NeonResourceMode == "create" || config.NeonDSN != "" {
-			postgresPassword = database.Password
-		} else {
-			postgresPassword = secrets["neonPassword"]
-		}
-	}
-	redisPassword := pulumi.StringInput(secrets["redisPassword"])
-	if config.RedisMode == "upstash" {
-		if config.UpstashResourceMode == "create" {
-			redisPassword = redis.Password
-		} else {
-			redisPassword = secrets["upstashPassword"]
-		}
-	}
-
-	values := pulumi.All(
-		database.Host, database.Port, database.User, database.Password, database.DBName, database.DBName,
-		redis.Host, redis.Port, redis.Username, redis.Password, redis.DB, redis.EnableTLS,
-		postgresPassword, redisPassword, secrets["cloudflareApiToken"], secrets["adminPassword"], secrets["jwtSecret"], secrets["totpEncryptionKey"],
-	).ApplyT(func(values []interface{}) string {
-		payload := map[string]interface{}{
-			"DATABASE_HOST":            values[0],
-			"DATABASE_PORT":            values[1],
-			"DATABASE_USER":            values[2],
-			"DATABASE_PASSWORD":        values[3],
-			"POSTGRES_PASSWORD":        postgresProfilePassword(config, values[12]),
-			"POSTGRES_USER":            values[2],
-			"POSTGRES_DB":              values[4],
-			"DATABASE_DBNAME":          values[5],
-			"DATABASE_SSLMODE":         database.SSLMode,
-			"REDIS_HOST":               values[6],
-			"REDIS_PORT":               values[7],
-			"REDIS_USERNAME":           values[8],
-			"REDIS_PASSWORD":           values[13],
-			"REDIS_DB":                 values[10],
-			"REDIS_ENABLE_TLS":         values[11],
-			"POSTGRES_MODE":            config.PostgresMode,
-			"REDIS_MODE":               config.RedisMode,
-			"TRAEFIK_IMAGE":            config.TraefikImage,
-			"SLOT":                     "blue",
-			"SLOT_DATA_DIR":            "blue",
-			"BLUE_CONTAINER_NAME":      "sub2api-blue",
-			"GREEN_CONTAINER_NAME":     "sub2api-green",
-			"POSTGRES_CONTAINER_NAME":  "sub2api-postgres",
-			"REDIS_CONTAINER_NAME":     "sub2api-redis",
-			"AUTO_SETUP":               "true",
-			"DOMAIN":                   config.Domain,
-			"CLOUDFLARE_DNS_API_TOKEN": values[14],
-			"ACME_EMAIL":               config.ACMEEmail,
-			"ORIGIN_IP":                config.OriginIP,
-			"APP_PROBE_PATH":           config.AppProbePath,
-			"DRAIN_SECONDS":            config.DrainSeconds,
-			"ADMIN_EMAIL":              config.AdminEmail,
-			"ADMIN_PASSWORD":           values[15],
-			"JWT_SECRET":               values[16],
-			"TOTP_ENCRYPTION_KEY":      values[17],
-		}
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			panic(err)
-		}
-		return string(encoded)
-	}).(pulumi.StringOutput)
-	return pulumi.ToSecret(values).(pulumi.StringOutput)
+func siteChecksum() (string, error) {
+	return checksumFiles(siteChecksumPaths)
 }
 
-func postgresProfilePassword(config DeploymentConfig, password interface{}) interface{} {
-	if config.PostgresMode != "docker" {
-		return "postgres-profile-disabled"
-	}
-	return password
+func hostChecksum() (string, error) {
+	return checksumFiles(hostChecksumPaths)
 }
 
-func deploymentChecksum() (string, error) {
-	files := []string{"Pulumi.yaml"}
-	for _, directory := range []string{"compose", "scripts", "traefik"} {
-		if _, err := os.Stat(directory); os.IsNotExist(err) {
-			continue
-		}
-		if err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() {
-				files = append(files, path)
-			}
-			return nil
-		}); err != nil {
-			return "", err
-		}
-	}
-	sort.Strings(files)
-	hash := sha256.New()
-	for _, path := range files {
-		contents, err := os.ReadFile(path)
-		if err != nil {
-			return "", err
-		}
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00", path, contents)
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
+var edgeChecksumPaths = []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "scripts/render-edge-config.ts", "scripts/render-runtime-env.ts", "traefik/traefik.yml", "traefik/dynamic/sing-box.yml"}
+var siteChecksumPaths = []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/read-runtime-env.cjs", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "scripts/probe-origin.sh", "scripts/probe-origin-strict.sh", "scripts/render-site-route.ts", "scripts/render-runtime-env.ts", "scripts/deployment-mode.ts", "scripts/write-deploy-state.ts", "scripts/write-bootstrap-marker.ts", "src/deployment-preflight.ts", "traefik/dynamic/site.yml"}
+var hostChecksumPaths = []string{"scripts/host-preflight.ts", "scripts/finalize-host-state.sh", "scripts/write-host-state.ts"}
 
-func readDeploymentPreflight(postgresMode, redisMode string) error {
-	statePath := filepath.Join("runtime", "deploy-state.json")
-	markerPath := filepath.Join("runtime", "bootstrap.marker")
-	_, stateErr := os.Stat(statePath)
-	_, markerErr := os.Stat(markerPath)
-	hasState := stateErr == nil
-	hasMarker := markerErr == nil
-	if !hasState && !hasMarker {
-		return nil
-	}
-	if hasMarker && !hasState {
-		return fmt.Errorf("bootstrap marker exists but deploy-state is missing; restore/adopt state before running pulumi up")
-	}
-	contents, err := os.ReadFile(statePath)
-	if err != nil {
-		return err
-	}
-	var state struct {
-		PostgresMode string `json:"postgresMode"`
-		RedisMode    string `json:"redisMode"`
-	}
-	if err := json.Unmarshal(contents, &state); err != nil {
-		return err
-	}
-	if state.PostgresMode == "" || state.RedisMode == "" {
-		return fmt.Errorf("deployment state has no persisted postgresMode/redisMode; migration required: verify the existing data placement, then run npx --no-install tsx scripts/deployment-mode.ts adopt runtime/deploy-state.json %s %s", postgresMode, redisMode)
-	}
-	if state.PostgresMode != "" && state.PostgresMode != postgresMode {
-		return fmt.Errorf("postgresMode change from %s to %s requires migration; ordinary pulumi up does not migrate PostgreSQL data", state.PostgresMode, postgresMode)
-	}
-	if state.RedisMode != "" && state.RedisMode != redisMode {
-		return fmt.Errorf("redisMode change from %s to %s requires migration; ordinary pulumi up does not migrate Redis data", state.RedisMode, redisMode)
-	}
-	return nil
+func checksumFiles(candidates []string) (string, error) {
+	files := make([]string, 0, len(candidates))
+	for _, path := range candidates { if _, err := os.Stat(path); err == nil { files = append(files, path) } else if !os.IsNotExist(err) { return "", err } }
+	sort.Strings(files); hash := sha256.New(); for _, path := range files { contents, err := os.ReadFile(path); if err != nil { return "", err }; _, _ = fmt.Fprintf(hash, "%s\x00%s\x00", path, contents) }; return hex.EncodeToString(hash.Sum(nil)), nil
 }

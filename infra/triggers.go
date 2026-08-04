@@ -1,45 +1,29 @@
 package main
 
-import (
-	"fmt"
-	"strconv"
-)
-
-type InfraTriggerInput struct {
-	ResourceNamespace string
-	Domain            string
-	OriginIP          string
-	PostgresMode      string
-	RedisMode         string
-	TraefikImage      string
-	ACMEEmail         string
-	AppProbePath      string
-	DrainSeconds      int
-	ComposeChecksum   string
-	ResourceModes     string
+type EdgeTriggerInput struct {
+	TraefikImage  string
+	ACMEEmail     string
+	SingBoxConfig string
+	EdgeChecksum  string
 }
 
-func BuildInfraTriggers(input InfraTriggerInput) []string {
-	return []string{
-		"infra-reconcile-v1",
-		input.ResourceNamespace,
-		input.Domain,
-		input.OriginIP,
-		input.PostgresMode,
-		input.RedisMode,
-		input.TraefikImage,
-		input.ACMEEmail,
-		input.AppProbePath,
-		strconv.Itoa(input.DrainSeconds),
-		input.ComposeChecksum,
-		input.ResourceModes,
-	}
+func BuildEdgeTriggers(input EdgeTriggerInput) []string {
+	return []string{"edge-reconcile-v1", input.TraefikImage, input.ACMEEmail, input.SingBoxConfig, input.EdgeChecksum}
 }
 
-func BuildReleaseTriggers(sub2APIImage string) []string {
-	return []string{sub2APIImage}
+type SiteTriggerInput struct {
+	SiteID         string
+	Domain         string
+	RuntimeRoot    string
+	ComposeProject string
+	RoutePath      string
+	SiteChecksum   string
 }
 
-func BuildResourceModes(config DeploymentConfig) string {
-	return fmt.Sprintf(`{"postgresResourceMode":%q,"redisResourceMode":%q}`, config.NeonResourceMode, config.UpstashResourceMode)
+func BuildSiteReconcileTriggers(input SiteTriggerInput) []string {
+	return []string{"site-reconcile-v1", input.SiteID, input.Domain, input.RuntimeRoot, input.ComposeProject, input.RoutePath, input.SiteChecksum}
+}
+
+func BuildSiteReleaseTriggers(siteID, image string) []string {
+	return []string{"site-release-v1", siteID, image}
 }

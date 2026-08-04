@@ -1,4 +1,4 @@
-import { chmodSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DeployState } from "./slot-state.js";
 
@@ -12,10 +12,9 @@ export function writeDeployStateAtomically(path: string, state: DeployState): vo
   if (state.activeSlot !== "blue" && state.activeSlot !== "green") {
     throw new Error("deployment state activeSlot is invalid");
   }
-  for (const slot of [state.previousSlot]) {
-    if (slot !== undefined && slot !== "blue" && slot !== "green") {
-      throw new Error("deployment state previousSlot is invalid");
-    }
+  const previousSlot = state.previousSlot;
+  if (previousSlot !== undefined && previousSlot !== "blue" && previousSlot !== "green") {
+    throw new Error("deployment state previousSlot is invalid");
   }
   if (state.postgresMode !== undefined && state.postgresMode !== "docker" && state.postgresMode !== "neon") {
     throw new Error("deployment state postgresMode is invalid");
@@ -24,6 +23,7 @@ export function writeDeployStateAtomically(path: string, state: DeployState): vo
     throw new Error("deployment state redisMode is invalid");
   }
   const directory = dirname(path);
+  mkdirSync(directory, { recursive: true });
   const temporary = join(directory, `.deploy-state.${process.pid}.tmp`);
   try {
     writeFileSync(temporary, `${JSON.stringify(state)}\n`, { mode: 0o600 });

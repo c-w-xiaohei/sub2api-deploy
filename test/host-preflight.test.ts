@@ -1,0 +1,191 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { checkHostPreflight, parseHostState, readHostState, type ExpectedSiteModes, type HostState } from "../scripts/host-preflight.js";
+import { writeHostStateAtomically } from "../scripts/write-host-state.js";
+
+function tempStatePath(): string {
+  return join(mkdtempSync(join(tmpdir(), "sub2api-host-state-")), "host-state.json");
+}
+
+describe("host preflight", () => {
+  it("permits the first deployment when host state is missing", () => {
+    expect(checkHostPreflight(["code2"], undefined)).toEqual(["code2"]);
+  });
+
+  it("permits the first deployment when host state records no Sites", () => {
+    const state: HostState = { version: 1, sites: [] };
+    expect(checkHostPreflight(["code2", "code3"], state)).toEqual(["code2", "code3"]);
+  });
+
+  it("permits retaining existing Sites and adding new Sites", () => {
+    const state: HostState = { version: 1, sites: ["code2"] };
+    expect(checkHostPreflight(["code3", "code2"], state)).toEqual(["code2", "code3"]);
+  });
+
+  it("rejects removing a recorded Site with a retirement-required message", () => {
+    const state: HostState = { version: 1, sites: ["code2", "code3"] };
+    expect(() => checkHostPreflight(["code3"], state)).toThrow(/no longer configured: code2/);
+    expect(() => checkHostPreflight(["code3"], state)).toThrow(/retirement/);
+  });
+
+  it("rejects renaming a recorded Site as an unretired removal", () => {
+    const state: HostState = { version: 1, sites: ["code2"] };
+    expect(() => checkHostPreflight(["code4"], state)).toThrow(/no longer configured: code2/);
+  });
+
+  it("rejects duplicate requested Site IDs", () => {
+    expect(() => checkHostPreflight(["code2", "code2"], undefined)).toThrow(/duplicate Site ID "code2"/);
+  });
+
+  it("rejects invalid or empty requested Site IDs", () => {
+    expect(() => checkHostPreflight(["Code2"], undefined)).toThrow(/invalid Site ID/);
+    expect(() => checkHostPreflight(["edge"], undefined)).toThrow(/reserved for the shared Edge/);
+    expect(() => checkHostPreflight([], undefined)).toThrow(/at least one configured Site ID/);
+    expect(() => checkHostPreflight(["code2,"], undefined)).toThrow(/invalid Site ID/);
+  });
+
+  it("fails closed on malformed host state", () => {
+    expect(() => parseHostState("{not json")).toThrow(/not valid JSON/);
+    expect(() => parseHostState('{"version":2,"sites":[]}')).toThrow(/unsupported/);
+    expect(() => parseHostState('{"version":1,"sites":"code2"}')).toThrow(/sites must be an array/);
+    expect(() => parseHostState('{"version":1,"sites":[1]}')).toThrow(/only Site ID strings/);
+    expect(() => parseHostState('{"version":1,"sites":["code2","code2"]}')).toThrow(/duplicate Site ID/);
+    expect(() => parseHostState('{"version":1,"sites":["Code2"]}')).toThrow(/invalid Site ID/);
+    expect(() => parseHostState("[]")).toThrow(/expected a JSON object/);
+  });
+
+  it("rejects host state carrying credentials or unsupported fields", () => {
+    expect(() => parseHostState('{"version":1,"sites":["code2"],"databaseDsn":"postgres://secret"}'))
+      .toThrow(/credential or unsupported field/);
+  });
+
+  it("strictly parses only the internal non-secret legacy code2 mapping", () => {
+    expect(parseHostState('{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":false}}'))
+      .toMatchObject({ legacyCode2: { runtimeRoot: "runtime", composeProject: "sub2api" } });
+    expect(() => parseHostState('{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","token":"secret"}}')).toThrow(/credential or unsupported/);
+    expect(() => parseHostState('{"version":1,"sites":["code3"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":false}}')).toThrow(/code2/);
+  });
+
+  it("fails closed when a recorded normal Site has no deploy state", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path)).toThrow(/deploy state is missing/);
+  });
+
+  it("checks recorded normal Site data modes before provider side effects", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    const deployState = join(root, "runtime", "sites", "code2", "deploy-state.json");
+    mkdirSync(dirname(deployState), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    writeFileSync(deployState, '{"activeSlot":"blue","activeImage":"image@sha256:old","postgresMode":"docker","redisMode":"upstash"}');
+    const expected: ExpectedSiteModes = { code2: { postgresMode: "docker", redisMode: "upstash" } };
+    expect(checkHostPreflight(["code2"], readHostState(path), path, false, expected)).toEqual(["code2"]);
+    expect(() => checkHostPreflight(
+      ["code2"], readHostState(path), path, false,
+      { code2: { postgresMode: "neon", redisMode: "upstash" } },
+    )).toThrow(/postgresMode change from docker to neon requires migration/);
+  });
+
+  it("fails closed on missing, malformed, or unknown recorded deployment modes", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    const deployState = join(root, "runtime", "sites", "code2", "deploy-state.json");
+    mkdirSync(dirname(deployState), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    const expected: ExpectedSiteModes = { code2: { postgresMode: "docker", redisMode: "docker" } };
+    writeFileSync(deployState, '{"activeSlot":"blue"}');
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path, false, expected)).toThrow(/no persisted postgresMode\/redisMode/);
+    writeFileSync(deployState, "{not json");
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path, false, expected)).toThrow(/deploy state is not valid JSON/);
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path, false, {})).toThrow(/expected Site modes do not match configured Sites/);
+  });
+
+  it("permits a new unrecorded Site without deploy state while checking recorded Sites", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    const deployState = join(root, "runtime", "sites", "code2", "deploy-state.json");
+    mkdirSync(dirname(deployState), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    writeFileSync(deployState, '{"postgresMode":"neon","redisMode":"upstash"}');
+    expect(checkHostPreflight(
+      ["code2", "code3"], readHostState(path), path, false,
+      { code2: { postgresMode: "neon", redisMode: "upstash" }, code3: { postgresMode: "docker", redisMode: "docker" } },
+    )).toEqual(["code2", "code3"]);
+  });
+
+  it("keeps pending legacy preview behind its explicit gate without requiring adopted modes", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(join(dirname(path), "deploy-state.json"), '{"activeSlot":"blue"}');
+    const state = parseHostState('{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":false}}');
+    const expected: ExpectedSiteModes = { code2: { postgresMode: "neon", redisMode: "upstash" } };
+    expect(() => checkHostPreflight(["code2"], state, path, false, expected)).toThrow(/ordinary Pulumi operations are blocked/);
+    expect(checkHostPreflight(["code2"], state, path, true, expected)).toEqual(["code2"]);
+  });
+
+  it("requires exact-one code2 when detecting an unadopted legacy runtime", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(join(dirname(path), "deploy-state.json"), "{}");
+    expect(() => checkHostPreflight([], undefined, path)).toThrow(/at least one/);
+    expect(() => checkHostPreflight(["code2", "code3"], undefined, path)).toThrow(/exactly one configured Site ID: code2/);
+    expect(() => checkHostPreflight(["code3"], undefined, path)).toThrow(/code2/);
+    expect(() => checkHostPreflight(["code2"], undefined, path)).toThrow(/explicitly approved/);
+  });
+
+  it("does not mistake normal code2/code3 deploy state for a flat legacy layout", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(join(root, "runtime", "sites", "code2"), { recursive: true });
+    mkdirSync(join(root, "runtime", "sites", "code3"), { recursive: true });
+    writeFileSync(join(root, "runtime", "sites", "code2", "deploy-state.json"), "{}");
+    writeFileSync(join(root, "runtime", "sites", "code3", "deploy-state.json"), "{}");
+    expect(checkHostPreflight(["code2", "code3"], undefined, path)).toEqual(["code2", "code3"]);
+  });
+
+  it("treats a missing host state file as empty and a corrupt file as malformed", () => {
+    expect(readHostState(tempStatePath())).toBeUndefined();
+    const path = tempStatePath();
+    writeFileSync(path, "garbage", "utf8");
+    expect(() => readHostState(path)).toThrow(/not valid JSON/);
+  });
+});
+
+describe("host state write", () => {
+  it("writes host state atomically with mode 0600 and no temp residue", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "sub2api-host-write-")), "runtime", "host-state.json");
+    writeHostStateAtomically(path, ["code3", "code2"]);
+    const persisted = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    expect(persisted).toEqual({ version: 1, sites: ["code2", "code3"] });
+    expect(Object.keys(persisted)).toEqual(["version", "sites"]);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dirname(path))).toEqual(["host-state.json"]);
+  });
+
+  it("round-trips through the strict parser without secrets", () => {
+    const path = tempStatePath();
+    writeHostStateAtomically(path, ["code2", "code3"]);
+    expect(readHostState(path)).toEqual({ version: 1, sites: ["code2", "code3"] });
+  });
+
+  it("rejects writing duplicate or empty Site IDs", () => {
+    const path = tempStatePath();
+    expect(() => writeHostStateAtomically(path, ["code2", "code2"])).toThrow(/duplicate Site ID/);
+    expect(() => writeHostStateAtomically(path, [])).toThrow(/at least one Site ID/);
+  });
+
+  it("runs the check CLI against missing host state", () => {
+    expect(() => execFileSync("npx", ["--no-install", "tsx", "scripts/host-preflight.ts", "check", "code2,code3", tempStatePath()], {
+      encoding: "utf8",
+      stdio: "pipe",
+    })).not.toThrow();
+  });
+});

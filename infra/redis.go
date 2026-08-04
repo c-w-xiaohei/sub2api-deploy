@@ -2,56 +2,25 @@ package main
 
 import (
 	"strings"
-
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/upstash/pulumi-upstash/sdk/go/upstash"
 )
 
-type RedisConnection struct {
-	Host      string
-	Port      int
-	Username  string
-	Password  string
-	DB        int
-	EnableTLS bool
-}
+type RedisConnection struct { Host string; Port int; Username string; Password string; DB int; EnableTLS bool }
+type RedisConnectionInputs struct { Host pulumi.StringInput; Port pulumi.IntInput; Username pulumi.StringInput; Password pulumi.StringInput; DB pulumi.IntInput; EnableTLS pulumi.BoolInput }
+func ManagedUpstashDatabaseName(namespace, explicitName string) string { if strings.TrimSpace(explicitName) != "" { return strings.TrimSpace(explicitName) }; return namespace + "-redis" }
 
-func ManagedUpstashDatabaseName(namespace, explicitName string) string {
-	if strings.TrimSpace(explicitName) != "" {
-		return strings.TrimSpace(explicitName)
+func siteRedisInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, layout SiteLayout, spec SiteSpec, secrets SiteSecrets) (RedisConnectionInputs, error) {
+	siteID := layout.SiteID
+	if spec.Redis.Mode == "docker" { return RedisConnectionInputs{Host: pulumi.String("redis"), Port: pulumi.Int(6379), Username: pulumi.String(""), Password: pulumi.ToSecret(pulumi.String(secrets.Redis.Password)).(pulumi.StringOutput), DB: pulumi.Int(0), EnableTLS: pulumi.Bool(false)}, nil }
+	if spec.Redis.ResourceMode == "create" {
+		providerOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, "upstash")), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Version("0.5.0")}; if len(legacyCode2Aliases(layout, "legacy")) != 0 { providerOptions = append(providerOptions, pulumi.IgnoreChanges([]string{"email"})) }
+		provider, err := upstash.NewProvider(ctx, "site-"+siteID+"-upstash", &upstash.ProviderArgs{ApiKey: pulumi.ToSecret(pulumi.String(secrets.Redis.APIKey)).(pulumi.StringOutput)}, providerOptions...); if err != nil { return RedisConnectionInputs{}, err }
+		// Retirement must explicitly unprotect this persistent database first.
+		database, err := upstash.NewRedisDatabase(ctx, "site-"+siteID+"-upstash-redis", &upstash.RedisDatabaseArgs{DatabaseName: pulumi.String(ManagedUpstashDatabaseName(spec.ResourcePrefix, "")), Region: pulumi.String(spec.Redis.Region), Tls: pulumi.BoolPtr(true)}, pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, spec.ResourcePrefix+"-upstash-redis")), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Version("0.5.0"), pulumi.Protect(true), pulumi.RetainOnDelete(true)); if err != nil { return RedisConnectionInputs{}, err }
+		return RedisConnectionInputs{Host: database.Endpoint, Port: database.Port, Username: pulumi.String("default"), Password: pulumi.ToSecret(database.Password).(pulumi.StringOutput), DB: pulumi.Int(0), EnableTLS: pulumi.Bool(true)}, nil
 	}
-	return namespace + "-redis"
-}
-
-func BuildRedisConnection(config DeploymentConfig) RedisConnection {
-	if config.RedisMode == "docker" {
-		return RedisConnection{Host: "redis", Port: 6379, Username: config.RedisUsername, Password: config.RedisPassword, DB: 0, EnableTLS: false}
-	}
-	return RedisConnection{Host: config.UpstashHost, Port: config.UpstashPort, Username: config.UpstashUsername, Password: config.UpstashPassword, DB: 0, EnableTLS: true}
-}
-
-func CreateUpstashConnection(ctx *pulumi.Context, config DeploymentConfig, apiKey pulumi.StringInput) (RedisConnectionInputs, error) {
-	provider, err := upstash.NewProvider(ctx, "upstash", &upstash.ProviderArgs{
-		ApiKey: apiKey.ToStringPtrOutput(),
-		Email:  pulumi.StringPtr(config.UpstashEmail),
-	}, pulumi.Version("0.5.0"))
-	if err != nil {
-		return RedisConnectionInputs{}, err
-	}
-	database, err := upstash.NewRedisDatabase(ctx, config.ResourceNamespace+"-upstash-redis", &upstash.RedisDatabaseArgs{
-		DatabaseName: pulumi.String(ManagedUpstashDatabaseName(config.ResourceNamespace, config.UpstashDatabaseName)),
-		Region:       pulumi.String(config.UpstashRegion),
-		Tls:          pulumi.BoolPtr(true),
-	}, pulumi.Provider(provider), pulumi.Version("0.5.0"))
-	if err != nil {
-		return RedisConnectionInputs{}, err
-	}
-	return RedisConnectionInputs{
-		Host:      database.Endpoint,
-		Port:      database.Port,
-		Username:  pulumi.String("default"),
-		Password:  pulumi.ToSecret(database.Password).(pulumi.StringOutput),
-		DB:        pulumi.Int(0),
-		EnableTLS: pulumi.Bool(true),
-	}, nil
+	endpoint, err := normalizeUpstashEndpoint(spec.Redis.Endpoint)
+	if err != nil { return RedisConnectionInputs{}, err }
+	return RedisConnectionInputs{Host: pulumi.String(endpoint), Port: pulumi.Int(6379), Username: pulumi.String("default"), Password: pulumi.ToSecret(pulumi.String(secrets.Redis.Password)).(pulumi.StringOutput), DB: pulumi.Int(0), EnableTLS: pulumi.Bool(true)}, nil
 }
