@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileS
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { checkHostPreflight, parseHostState, readHostState, type HostState } from "../scripts/host-preflight.js";
+import { checkHostPreflight, parseHostState, readHostState, type ExpectedSiteModes, type HostState } from "../scripts/host-preflight.js";
 import { writeHostStateAtomically } from "../scripts/write-host-state.js";
 
 function tempStatePath(): string {
@@ -42,6 +42,7 @@ describe("host preflight", () => {
 
   it("rejects invalid or empty requested Site IDs", () => {
     expect(() => checkHostPreflight(["Code2"], undefined)).toThrow(/invalid Site ID/);
+    expect(() => checkHostPreflight(["edge"], undefined)).toThrow(/reserved for the shared Edge/);
     expect(() => checkHostPreflight([], undefined)).toThrow(/at least one configured Site ID/);
     expect(() => checkHostPreflight(["code2,"], undefined)).toThrow(/invalid Site ID/);
   });
@@ -74,6 +75,59 @@ describe("host preflight", () => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, '{"version":1,"sites":["code2"]}');
     expect(() => checkHostPreflight(["code2"], readHostState(path), path)).toThrow(/deploy state is missing/);
+  });
+
+  it("checks recorded normal Site data modes before provider side effects", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    const deployState = join(root, "runtime", "sites", "code2", "deploy-state.json");
+    mkdirSync(dirname(deployState), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    writeFileSync(deployState, '{"activeSlot":"blue","activeImage":"image@sha256:old","postgresMode":"docker","redisMode":"upstash"}');
+    const expected: ExpectedSiteModes = { code2: { postgresMode: "docker", redisMode: "upstash" } };
+    expect(checkHostPreflight(["code2"], readHostState(path), path, false, expected)).toEqual(["code2"]);
+    expect(() => checkHostPreflight(
+      ["code2"], readHostState(path), path, false,
+      { code2: { postgresMode: "neon", redisMode: "upstash" } },
+    )).toThrow(/postgresMode change from docker to neon requires migration/);
+  });
+
+  it("fails closed on missing, malformed, or unknown recorded deployment modes", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    const deployState = join(root, "runtime", "sites", "code2", "deploy-state.json");
+    mkdirSync(dirname(deployState), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    const expected: ExpectedSiteModes = { code2: { postgresMode: "docker", redisMode: "docker" } };
+    writeFileSync(deployState, '{"activeSlot":"blue"}');
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path, false, expected)).toThrow(/no persisted postgresMode\/redisMode/);
+    writeFileSync(deployState, "{not json");
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path, false, expected)).toThrow(/deploy state is not valid JSON/);
+    expect(() => checkHostPreflight(["code2"], readHostState(path), path, false, {})).toThrow(/expected Site modes do not match configured Sites/);
+  });
+
+  it("permits a new unrecorded Site without deploy state while checking recorded Sites", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    const deployState = join(root, "runtime", "sites", "code2", "deploy-state.json");
+    mkdirSync(dirname(deployState), { recursive: true });
+    writeFileSync(path, '{"version":1,"sites":["code2"]}');
+    writeFileSync(deployState, '{"postgresMode":"neon","redisMode":"upstash"}');
+    expect(checkHostPreflight(
+      ["code2", "code3"], readHostState(path), path, false,
+      { code2: { postgresMode: "neon", redisMode: "upstash" }, code3: { postgresMode: "docker", redisMode: "docker" } },
+    )).toEqual(["code2", "code3"]);
+  });
+
+  it("keeps pending legacy preview behind its explicit gate without requiring adopted modes", () => {
+    const root = mkdtempSync(join(tmpdir(), "sub2api-host-state-"));
+    const path = join(root, "runtime", "host-state.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(join(dirname(path), "deploy-state.json"), '{"activeSlot":"blue"}');
+    const state = parseHostState('{"version":1,"sites":["code2"],"legacyCode2":{"runtimeRoot":"runtime","composeProject":"sub2api","routeLayout":"flat","handoverComplete":false}}');
+    const expected: ExpectedSiteModes = { code2: { postgresMode: "neon", redisMode: "upstash" } };
+    expect(() => checkHostPreflight(["code2"], state, path, false, expected)).toThrow(/ordinary Pulumi operations are blocked/);
+    expect(checkHostPreflight(["code2"], state, path, true, expected)).toEqual(["code2"]);
   });
 
   it("requires exact-one code2 when detecting an unadopted legacy runtime", () => {

@@ -1,8 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { assertDeploymentModes, type PersistedDeploymentModes } from "./deployment-mode.js";
 
 export const HOST_STATE_VERSION = 1;
 export const SITE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+
+export type ExpectedSiteModes = Record<string, Required<PersistedDeploymentModes>>;
 
 export interface HostState {
   version: typeof HOST_STATE_VERSION;
@@ -24,6 +27,9 @@ export function parseSiteIds(siteIds: string[]): string[] {
   for (const id of siteIds) {
     if (!SITE_ID_PATTERN.test(id)) {
       throw new Error(`invalid Site ID "${id}"; expected ${SITE_ID_PATTERN}`);
+    }
+    if (id === "edge") {
+      throw new Error('Site ID "edge" is reserved for the shared Edge');
     }
     if (seen.has(id)) {
       throw new Error(`duplicate Site ID "${id}"`);
@@ -87,11 +93,58 @@ function deployStatePath(hostStatePath: string, siteID: string, legacy: boolean)
   return legacy ? join(runtime, "deploy-state.json") : join(runtime, "sites", siteID, "deploy-state.json");
 }
 
-export function checkHostPreflight(configuredSiteIds: string[], state: HostState | undefined, hostStatePath?: string, allowPendingPreview = false): string[] {
+function validateExpectedSiteModes(configuredSiteIds: string[], expected: ExpectedSiteModes): void {
+  const expectedSiteIds = parseSiteIds(Object.keys(expected));
+  const missing = configuredSiteIds.filter((siteID) => !expectedSiteIds.includes(siteID));
+  const unknown = expectedSiteIds.filter((siteID) => !configuredSiteIds.includes(siteID));
+  if (missing.length > 0 || unknown.length > 0) {
+    throw new Error(`expected Site modes do not match configured Sites; missing: ${missing.join(", ") || "none"}; unknown: ${unknown.join(", ") || "none"}`);
+  }
+  for (const [siteID, modes] of Object.entries(expected)) {
+    if (typeof modes !== "object" || modes === null
+      || (modes.postgresMode !== "docker" && modes.postgresMode !== "neon")
+      || (modes.redisMode !== "docker" && modes.redisMode !== "upstash")
+      || Object.keys(modes).some((key) => key !== "postgresMode" && key !== "redisMode")) {
+      throw new Error(`Site ${siteID} has invalid expected data modes`);
+    }
+  }
+}
+
+function readPersistedDeploymentModes(path: string, siteID: string): PersistedDeploymentModes {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Site ${siteID} deploy state is not valid JSON; inspect and repair it before proceeding`);
+    }
+    throw error;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Site ${siteID} deploy state is malformed: expected a JSON object`);
+  }
+  return parsed as PersistedDeploymentModes;
+}
+
+export function parseExpectedSiteModes(json: string): ExpectedSiteModes {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new Error("expected Site modes are not valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("expected Site modes must be a JSON object");
+  }
+  return parsed as ExpectedSiteModes;
+}
+
+export function checkHostPreflight(configuredSiteIds: string[], state: HostState | undefined, hostStatePath?: string, allowPendingPreview = false, expectedSiteModes?: ExpectedSiteModes): string[] {
   const configured = parseSiteIds(configuredSiteIds);
   if (configured.length === 0) {
     throw new Error("host preflight requires at least one configured Site ID");
   }
+  if (expectedSiteModes) validateExpectedSiteModes(configured, expectedSiteModes);
   if (state) {
     const missing = state.sites.filter((id) => !configured.includes(id));
     if (missing.length > 0) {
@@ -104,8 +157,14 @@ export function checkHostPreflight(configuredSiteIds: string[], state: HostState
     if (hostStatePath) {
       for (const siteID of state.sites) {
         const isLegacy = state.legacyCode2 !== undefined && siteID === "code2";
-        if (!existsSync(deployStatePath(hostStatePath, siteID, isLegacy))) {
+        const statePath = deployStatePath(hostStatePath, siteID, isLegacy);
+        if (!existsSync(statePath)) {
           throw new Error(`host registry records Site ${siteID} but its deploy state is missing; restore it or use the explicit retirement workflow`);
+        }
+        if (!isLegacy && expectedSiteModes) {
+          const expected = expectedSiteModes[siteID];
+          if (!expected) throw new Error(`host registry records Site ${siteID} but it has no expected data modes`);
+          assertDeploymentModes(readPersistedDeploymentModes(statePath, siteID), expected.postgresMode, expected.redisMode, statePath);
         }
       }
     }
@@ -139,7 +198,7 @@ export function readHostState(path: string): HostState | undefined {
 }
 
 if (process.argv[2] === "check") {
-  const [, , , siteIds, path, pendingPreview] = process.argv;
+  const [, , , siteIds, path, pendingPreview, expectedModes] = process.argv;
   if (!siteIds || !path) throw new Error("usage: host-preflight.ts check CONFIGURED_SITE_IDS HOST_STATE_PATH");
-  checkHostPreflight(parseSiteIdList(siteIds), readHostState(path), path, pendingPreview === "true");
+  checkHostPreflight(parseSiteIdList(siteIds), readHostState(path), path, pendingPreview === "true", expectedModes ? parseExpectedSiteModes(expectedModes) : undefined);
 }

@@ -17,6 +17,7 @@ type HostGraphExports struct { Sites pulumi.MapOutput; HostStateID pulumi.IDOutp
 
 type hostDesiredSite struct { ID string; Spec SiteSpec; Layout SiteLayout }
 type hostDesiredState struct { Edge EdgeSpec; Sites []hostDesiredSite }
+type expectedSiteMode struct { PostgresMode string `json:"postgresMode"`; RedisMode string `json:"redisMode"` }
 
 func deploymentProgram(ctx *pulumi.Context) error {
 	programConfig, err := loadProgramConfig(ctx); if err != nil { return err }
@@ -37,10 +38,13 @@ func deployHostGraph(ctx *pulumi.Context, host HostSpec, layouts []SiteLayout, s
 	hostStatePath := "runtime/host-state.json"
 	desiredState, err := hostDesiredStateDigest(host, layouts)
 	if err != nil { return HostGraphExports{}, err }
-	preflight, err := newHostCommand(ctx, "host-preflight", "npx --no-install tsx scripts/host-preflight.ts check \"$CONFIGURED_SITE_IDS\" \"$HOST_STATE_PATH\" \"$ALLOW_PENDING_LEGACY_PREVIEW\"", pulumi.StringMap{
+	expectedModes, err := expectedSiteModesJSON(host, layouts)
+	if err != nil { return HostGraphExports{}, err }
+	preflight, err := newHostCommand(ctx, "host-preflight", "npx --no-install tsx scripts/host-preflight.ts check \"$CONFIGURED_SITE_IDS\" \"$HOST_STATE_PATH\" \"$ALLOW_PENDING_LEGACY_PREVIEW\" \"$EXPECTED_SITE_MODES\"", pulumi.StringMap{
 		"CONFIGURED_SITE_IDS": pulumi.String(configuredSiteIDs), "HOST_STATE_PATH": pulumi.String(hostStatePath),
 		"ALLOW_PENDING_LEGACY_PREVIEW": pulumi.String(fmt.Sprintf("%t", ctx.DryRun() && os.Getenv("ALLOW_PENDING_LEGACY_PREVIEW") == "1")),
-	}, []string{"host-preflight-v1", configuredSiteIDs, hostStatePath, desiredState, edgeChecksum, siteChecksum, hostChecksum})
+		"EXPECTED_SITE_MODES": pulumi.String(expectedModes),
+	}, []string{"host-preflight-v2", configuredSiteIDs, hostStatePath, expectedModes, desiredState, edgeChecksum, siteChecksum, hostChecksum})
 	if err != nil { return HostGraphExports{}, err }
 	legacyCode2 := len(adoptedCode2) == 1 && adoptedCode2[0]
 	edge, err := DeployEdge(ctx, host.Edge, secrets.Edge, edgeChecksum, preflight, legacyCode2); if err != nil { return HostGraphExports{}, err }
@@ -61,6 +65,17 @@ func deployHostGraph(ctx *pulumi.Context, host HostSpec, layouts []SiteLayout, s
 	}, []string{"host-finalize-state-v1", configuredSiteIDs, hostStatePath, statePaths, hostChecksum}, preflight, barrier)
 	if err != nil { return HostGraphExports{}, err }
 	return HostGraphExports{Sites: outputs.ToMapOutput(), HostStateID: finalize.ID()}, nil
+}
+
+func expectedSiteModesJSON(host HostSpec, layouts []SiteLayout) (string, error) {
+	modes := make(map[string]expectedSiteMode, len(layouts))
+	for _, layout := range layouts {
+		site := host.Sites[layout.SiteID]
+		modes[layout.SiteID] = expectedSiteMode{PostgresMode: site.Database.Mode, RedisMode: site.Redis.Mode}
+	}
+	encoded, err := json.Marshal(modes)
+	if err != nil { return "", err }
+	return string(encoded), nil
 }
 
 func hostDesiredStateDigest(host HostSpec, layouts []SiteLayout) (string, error) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strconv"
@@ -76,13 +77,31 @@ type RedisSecrets struct {
 	Password string `json:"password"`
 }
 
+func normalizeDNSHostname(value string, requireDot bool) (string, error) {
+	if value == "" || strings.TrimSpace(value) != value || len(value) > 253 || strings.HasSuffix(value, ".") {
+		return "", fmt.Errorf("must be a valid DNS hostname")
+	}
+	normalized := strings.ToLower(value)
+	if requireDot && !strings.Contains(normalized, ".") {
+		return "", fmt.Errorf("must be a valid DNS hostname")
+	}
+	for _, label := range strings.Split(normalized, ".") {
+		if len(label) == 0 || len(label) > 63 || !dnsLabelPattern.MatchString(label) {
+			return "", fmt.Errorf("must be a valid DNS hostname")
+		}
+	}
+	return normalized, nil
+}
+
 func validateSingBoxTarget(target string) error {
-	host, portText, found := strings.Cut(target, ":")
-	if !found || host == "" || portText == "" {
+	host, portText, err := net.SplitHostPort(target)
+	if err != nil || host == "" || portText == "" || !decimalPortPattern.MatchString(portText) {
 		return fmt.Errorf("edge.singBox.target must be host:port, got %q", target)
 	}
-	if strings.ContainsAny(host, " \t") {
-		return fmt.Errorf("edge.singBox.target must be host:port, got %q", target)
+	if net.ParseIP(host) == nil {
+		if _, err := normalizeDNSHostname(host, false); err != nil {
+			return fmt.Errorf("edge.singBox.target must be host:port, got %q", target)
+		}
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
@@ -124,6 +143,9 @@ func ValidateHostSpec(spec HostSpec) (HostSpec, []SiteLayout, error) {
 	for _, siteID := range siteIDs {
 		if !resourceNamespacePattern.MatchString(siteID) {
 			return HostSpec{}, nil, fmt.Errorf("site %q must contain only lowercase letters, numbers, and hyphens and be 1-32 characters", siteID)
+		}
+		if siteID == "edge" {
+			return HostSpec{}, nil, fmt.Errorf("site ID %q is reserved for the shared Edge", siteID)
 		}
 		site, err := validateSiteSpec(siteID, spec.Sites[siteID])
 		if err != nil {
@@ -171,6 +193,11 @@ func validateEdge(edge EdgeSpec) (EdgeSpec, error) {
 	if err := validateSingBoxTarget(edge.SingBox.Target); err != nil {
 		return EdgeSpec{}, err
 	}
+	serverName, err := normalizeDNSHostname(edge.SingBox.ServerName, true)
+	if err != nil {
+		return EdgeSpec{}, fmt.Errorf("edge.singBox.serverName %w", err)
+	}
+	edge.SingBox.ServerName = serverName
 	return edge, nil
 }
 
@@ -191,6 +218,10 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 	}
 	if !immutableImagePattern.MatchString(site.Image) {
 		return SiteSpec{}, fmt.Errorf("%s must contain an immutable @sha256 digest with 64 lowercase hexadecimal characters", name("image"))
+	}
+	domain, err := normalizeDNSHostname(site.Domain, true)
+	if err != nil {
+		return SiteSpec{}, fmt.Errorf("%s %w", name("domain"), err)
 	}
 	if !strings.HasPrefix(site.AppProbePath, "/") {
 		return SiteSpec{}, fmt.Errorf("%s must be an absolute path", name("appProbePath"))
@@ -226,9 +257,12 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 		return SiteSpec{}, fmt.Errorf("%s must contain only lowercase letters, numbers, and hyphens and be 1-32 characters", name("resourcePrefix"))
 	}
 	drainSeconds := defaultInt(site.DrainSeconds, 10)
+	if drainSeconds < 0 {
+		return SiteSpec{}, fmt.Errorf("%s must be zero or greater", name("drainSeconds"))
+	}
 
 	return SiteSpec{
-		Domain:         site.Domain,
+		Domain:         domain,
 		Image:          site.Image,
 		AdminEmail:     site.AdminEmail,
 		AppProbePath:   site.AppProbePath,
@@ -296,6 +330,8 @@ func validateSiteSecrets(siteID string, site SiteSpec, secrets SiteSecrets) erro
 }
 
 var immutableImagePattern = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+var decimalPortPattern = regexp.MustCompile(`^[0-9]+$`)
 
 // normalizeUpstashEndpoint accepts only the hostname endpoint returned by
 // Upstash. Ports, schemes, and paths are not configuration inputs here.

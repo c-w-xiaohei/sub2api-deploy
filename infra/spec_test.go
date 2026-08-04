@@ -134,6 +134,32 @@ func TestValidateHostSpecPreservesExplicitZeroDrainSeconds(t *testing.T) {
 	}
 }
 
+func TestValidateHostSpecNormalizesDomainsAndSNI(t *testing.T) {
+	spec := validHostSpec()
+	code2 := spec.Sites["code2"]
+	code2.Domain = "Code2.ContextID.CN"
+	spec.Sites["code2"] = code2
+	spec.Edge.SingBox.ServerName = "WWW.Cloudflare.COM"
+	resolved, _, err := ValidateHostSpec(spec)
+	if err != nil {
+		t.Fatalf("ValidateHostSpec() error = %v", err)
+	}
+	if got := resolved.Sites["code2"].Domain; got != "code2.contextid.cn" {
+		t.Fatalf("normalized domain = %q, want code2.contextid.cn", got)
+	}
+	if got := resolved.Edge.SingBox.ServerName; got != "www.cloudflare.com" {
+		t.Fatalf("normalized sing-box server name = %q, want www.cloudflare.com", got)
+	}
+}
+
+func TestValidateHostSpecAcceptsIPSingBoxTarget(t *testing.T) {
+	spec := validHostSpec()
+	spec.Edge.SingBox.Target = "203.0.113.10:8443"
+	if _, _, err := ValidateHostSpec(spec); err != nil {
+		t.Fatalf("ValidateHostSpec() error = %v", err)
+	}
+}
+
 func TestValidateHostSpecRejections(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -150,6 +176,33 @@ func TestValidateHostSpecRejections(t *testing.T) {
 			message: "must not share domain",
 		},
 		{
+			name: "duplicate domain after normalization",
+			mutate: func(spec *HostSpec) {
+				code3 := spec.Sites["code3"]
+				code3.Domain = "CODE2.CONTEXTID.CN"
+				spec.Sites["code3"] = code3
+			},
+			message: "must not share domain",
+		},
+		{
+			name: "malformed domain",
+			mutate: func(spec *HostSpec) {
+				code2 := spec.Sites["code2"]
+				code2.Domain = "https://code2.contextid.cn/path"
+				spec.Sites["code2"] = code2
+			},
+			message: "domain must be a valid DNS hostname",
+		},
+		{
+			name: "one-label domain",
+			mutate: func(spec *HostSpec) {
+				code2 := spec.Sites["code2"]
+				code2.Domain = "code2"
+				spec.Sites["code2"] = code2
+			},
+			message: "domain must be a valid DNS hostname",
+		},
+		{
 			name: "invalid site id",
 			mutate: func(spec *HostSpec) {
 				spec.Sites["Code2"] = spec.Sites["code2"]
@@ -158,6 +211,16 @@ func TestValidateHostSpecRejections(t *testing.T) {
 				delete(spec.SiteSecrets, "code2")
 			},
 			message: "must contain only lowercase letters, numbers, and hyphens",
+		},
+		{
+			name: "reserved edge site id",
+			mutate: func(spec *HostSpec) {
+				spec.Sites["edge"] = spec.Sites["code2"]
+				delete(spec.Sites, "code2")
+				spec.SiteSecrets["edge"] = spec.SiteSecrets["code2"]
+				delete(spec.SiteSecrets, "code2")
+			},
+			message: `site ID "edge" is reserved for the shared Edge`,
 		},
 		{
 			name: "invalid probe health",
@@ -244,6 +307,43 @@ func TestValidateHostSpecRejections(t *testing.T) {
 				spec.Edge.SingBox.Target = "host.docker.internal"
 			},
 			message: "edge.singBox.target must be host:port",
+		},
+		{
+			name: "yaml-unsafe sing-box target",
+			mutate: func(spec *HostSpec) {
+				spec.Edge.SingBox.Target = `host"name:8443`
+			},
+			message: "edge.singBox.target must be host:port",
+		},
+		{
+			name: "sing-box target with path",
+			mutate: func(spec *HostSpec) {
+				spec.Edge.SingBox.Target = "host.docker.internal/path:8443"
+			},
+			message: "edge.singBox.target must be host:port",
+		},
+		{
+			name: "invalid sing-box server name",
+			mutate: func(spec *HostSpec) {
+				spec.Edge.SingBox.ServerName = `www.cloudflare.com" # unsafe`
+			},
+			message: "edge.singBox.serverName must be a valid DNS hostname",
+		},
+		{
+			name: "one-label sing-box server name",
+			mutate: func(spec *HostSpec) {
+				spec.Edge.SingBox.ServerName = "localhost"
+			},
+			message: "edge.singBox.serverName must be a valid DNS hostname",
+		},
+		{
+			name: "negative drain seconds",
+			mutate: func(spec *HostSpec) {
+				code2 := spec.Sites["code2"]
+				code2.DrainSeconds = drainSecondsPointer(-1)
+				spec.Sites["code2"] = code2
+			},
+			message: "drainSeconds must be zero or greater",
 		},
 		{
 			name: "missing edge cloudflare token",

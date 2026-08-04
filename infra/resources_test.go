@@ -54,6 +54,15 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 	}
 	preflight := requireResource(t, resources, "host-preflight")
 	if preflight.RegisterRPC == nil || !strings.Contains(preflight.RegisterRPC.GetParent(), "pulumi:pulumi:Stack") { t.Fatalf("host preflight must be Stack-owned: %+v", preflight.RegisterRPC) }
+	preflightEnvironment := preflight.Inputs["environment"].ObjectValue()
+	expectedModes := preflightEnvironment["EXPECTED_SITE_MODES"]
+	if expectedModes.IsSecret() { t.Fatal("expected Site modes must remain non-secret derived host data") }
+	if got := expectedModes.StringValue(); got != `{"code2":{"postgresMode":"neon","redisMode":"upstash"},"code3":{"postgresMode":"neon","redisMode":"upstash"}}` {
+		t.Fatalf("EXPECTED_SITE_MODES = %q", got)
+	}
+	if !strings.Contains(preflight.Inputs["create"].StringValue(), `"$EXPECTED_SITE_MODES"`) {
+		t.Fatal("Stack-level host preflight command does not consume expected Site modes")
+	}
 	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
 		assertDependsOn(t, requireResource(t, resources, name), preflight.Name, "must not run before host preflight")
 	}
