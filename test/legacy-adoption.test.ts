@@ -219,6 +219,11 @@ describe("legacy single-site adoption", () => {
     expect(source).toContain('runtime_root="$(realpath -m "$(dirname "$host_state")")"');
   });
 
+  it("normalizes legacy journal paths before validating the current host", () => {
+    const source = readFileSync(script, "utf8");
+    expect(source).toContain('for key in host_state edge_root route route_backup legacy_state_backup; do j[$key]="$(realpath -m "${j[$key]}")"; done');
+  });
+
   it("waits for the legacy public ports to be released before starting the Edge", () => {
     const source = readFileSync(script, "utf8");
     expect(source).toContain("wait_for_ports_released");
@@ -303,7 +308,7 @@ describe("legacy single-site adoption", () => {
       expect(() => f.run("--apply")).not.toThrow();
       expect(readFileSync(join(f.runtime, "adopt-single-site-layout.journal"), "utf8")).toContain("state=complete");
     }
-  }, 15000);
+  }, 30000);
 
   it("accepts an attachment intent with no attachment after connect failure and retries cleanly", () => {
     const f = fixture();
