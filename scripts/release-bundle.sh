@@ -180,8 +180,7 @@ check_sing_box_template() {
       else if ($0 == "          - address: \"${SING_BOX_TARGET}\"") address = 1
     }
     END {
-      if (router != 1 || service != 1 || !rule || !entry_points || !websecure
-        || !router_service || !tls || !passthrough || !load_balancer || !servers || !address) exit 1
+      if (router != 1 || service != 1 || !rule || !entry_points || !websecure || !router_service || !tls || !passthrough || !load_balancer || !servers || !address) exit 1
     }
   ' "$1" || die 'sing-box router/service template relationship is invalid'
 }
@@ -215,8 +214,7 @@ check_site_route_template() {
       else if ($0 == "          - url: \"http://${ACTIVE_EDGE_ALIAS}:8080\"") address = 1
     }
     END {
-      if (router != 1 || service != 1 || !rule || !entry_points || !websecure || !tls
-        || !cert_resolver || !router_service || !load_balancer || !servers || !address) exit 1
+      if (router != 1 || service != 1 || !rule || !entry_points || !websecure || !tls || !cert_resolver || !router_service || !load_balancer || !servers || !address) exit 1
     }
   ' "$1" || die 'Site router/service template relationship is invalid'
 }
