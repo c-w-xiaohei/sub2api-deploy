@@ -117,9 +117,8 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 			assertDependsOn(t, item, preflight.Name, "selected provider must not run before host preflight")
 		}
 		neon := requireSiteProvider(t, mocks.resources, siteID, "neon")
-		if neon.RegisterRPC.GetVersion() != "0.0.1-alpha.1" {
-			t.Fatalf("%s Neon provider version = %q", siteID, neon.RegisterRPC.GetVersion())
-		}
+		if siteID == "code2" && neon.RegisterRPC.GetVersion() != "" { t.Fatalf("legacy code2 Neon provider version = %q", neon.RegisterRPC.GetVersion()) }
+		if siteID == "code3" && neon.RegisterRPC.GetVersion() != "0.0.1-alpha.1" { t.Fatalf("new code3 Neon provider version = %q", neon.RegisterRPC.GetVersion()) }
 	}
 	if countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord") != 2 {
 		t.Fatalf("DNS record count = %d, want 2", countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord"))
@@ -202,8 +201,6 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 	legacy := legacyCode2Layout(DeriveSiteLayout("code2", "contextid-us"))
 	if len(legacyCode2Aliases(legacy, "neon")) != 1 { t.Fatal("legacy code2 must retain its root-level provider alias") }
 	if len(legacyCode2Aliases(DeriveSiteLayout("code3", "code3"), "neon")) != 0 { t.Fatal("new Sites must not receive legacy provider aliases") }
-	if got := legacyNeonProviderIgnoreChanges(legacy); !reflect.DeepEqual(got, []string{"api_key", "version"}) { t.Fatalf("legacy Neon ignored fields = %#v", got) }
-	if got := legacyNeonProviderIgnoreChanges(DeriveSiteLayout("code3", "code3")); got != nil { t.Fatalf("new Site Neon ignored fields = %#v", got) }
 }
 
 func TestCleanCode2DoesNotReceiveLegacyAliases(t *testing.T) {

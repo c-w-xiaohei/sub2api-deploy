@@ -23,9 +23,10 @@ func (neonProjectArgs) ElementType() reflect.Type { return reflect.TypeOf((*neon
 func registerNeonProject(ctx *pulumi.Context, name string, args *neonProjectArgs, opts ...pulumi.ResourceOption) (*neonProject, error) { var project neonProject; if err := ctx.RegisterResource("neon:provider:Project", name, args, &project, opts...); err != nil { return nil, err }; return &project, nil }
 func ManagedNeonProjectName(namespace string) string { return namespace + "-postgres" }
 
-func legacyNeonProviderIgnoreChanges(layout SiteLayout) []string {
-	if len(legacyCode2Aliases(layout, "legacy")) != 0 { return []string{"api_key", "version"} }
-	return nil
+func legacyNeonProvider(ctx *pulumi.Context, siteID string, apiKey pulumi.StringInput, opts ...pulumi.ResourceOption) (*neon.Provider, error) {
+	var provider neon.Provider
+	if err := ctx.RegisterResource("pulumi:providers:neon", "site-"+siteID+"-neon", &neon.ProviderArgs{Api_key: apiKey}, &provider, opts...); err != nil { return nil, err }
+	return &provider, nil
 }
 
 func ParsePostgresDSN(dsn string) (DatabaseConnection, error) {
@@ -47,9 +48,13 @@ func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, la
 	siteID := layout.SiteID
 	if spec.Database.Mode == "docker" { return DatabaseConnectionInputs{Host: pulumi.String("postgres"), Port: pulumi.Int(5432), User: pulumi.String("sub2api"), Password: pulumi.ToSecret(pulumi.String(secrets.Database.Password)).(pulumi.StringOutput), DBName: pulumi.String("sub2api"), SSLMode: "disable"}, nil }
 	if spec.Database.ResourceMode == "create" {
-		providerOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, "neon")), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Version("0.0.1-alpha.1")}
-		if ignored := legacyNeonProviderIgnoreChanges(layout); len(ignored) != 0 { providerOptions = append(providerOptions, pulumi.IgnoreChanges(ignored)) }
-		provider, err := neon.NewProvider(ctx, "site-"+siteID+"-neon", &neon.ProviderArgs{Api_key: pulumi.ToSecret(pulumi.String(secrets.Database.APIToken)).(pulumi.StringOutput)}, providerOptions...); if err != nil { return DatabaseConnectionInputs{}, err }
+		providerOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, "neon")), pulumi.DependsOn([]pulumi.Resource{preflight})}
+		apiKey := pulumi.ToSecret(pulumi.String(secrets.Database.APIToken)).(pulumi.StringOutput)
+		legacy := len(legacyCode2Aliases(layout, "legacy")) != 0
+		var provider *neon.Provider
+		var err error
+		if legacy { provider, err = legacyNeonProvider(ctx, siteID, apiKey, providerOptions...) } else { provider, err = neon.NewProvider(ctx, "site-"+siteID+"-neon", &neon.ProviderArgs{Api_key: apiKey}, append(providerOptions, pulumi.Version("0.0.1-alpha.1"))...) }
+		if err != nil { return DatabaseConnectionInputs{}, err }
 		// Retirement must explicitly unprotect this persistent project first.
 		projectOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, spec.ResourcePrefix+"-neon-project")), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Version("0.0.1-alpha.1"), pulumi.Protect(true), pulumi.RetainOnDelete(true)}; if len(legacyCode2Aliases(layout, "legacy")) != 0 { projectOptions = append(projectOptions, pulumi.IgnoreChanges([]string{"org_id"})) }
 		project, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtr(ManagedNeonProjectName(spec.ResourcePrefix))}, projectOptions...); if err != nil { return DatabaseConnectionInputs{}, err }
