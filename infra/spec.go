@@ -46,6 +46,7 @@ type SiteSpec struct {
 type DatabaseSpec struct {
 	Mode         string          `json:"mode"`
 	ResourceMode string          `json:"resourceMode"`
+	Region       string          `json:"region"`
 	Compute      NeonComputeSpec `json:"compute"`
 }
 
@@ -252,7 +253,9 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 		return SiteSpec{}, err
 	}
 	var compute NeonComputeSpec
+	region := ""
 	if databaseMode == "neon" {
+		region = defaultString(site.Database.Region, "aws-us-east-1")
 		compute = NeonComputeSpec{
 			MinCU:                 floatPtr(defaultFloat(site.Database.Compute.MinCU, 0.25)),
 			MaxCU:                 floatPtr(defaultFloat(site.Database.Compute.MaxCU, 0.25)),
@@ -297,6 +300,7 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 		Database: DatabaseSpec{
 			Mode:         databaseMode,
 			ResourceMode: databaseResourceMode,
+			Region:       region,
 			Compute:      compute,
 		},
 		Redis: RedisSpec{

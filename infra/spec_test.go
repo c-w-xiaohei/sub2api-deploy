@@ -78,6 +78,9 @@ func TestValidateHostSpecValidCode2Code3(t *testing.T) {
 	if code2.Redis.Region != "us-east-1" {
 		t.Fatalf("code2 redis region = %q, want default us-east-1", code2.Redis.Region)
 	}
+	if code2.Database.Region != "aws-us-east-1" {
+		t.Fatalf("code2 Neon region = %q, want default aws-us-east-1", code2.Database.Region)
+	}
 	code3 := resolved.Sites["code3"]
 	if code3.ResourcePrefix != "code3" {
 		t.Fatalf("code3 resourcePrefix = %q, want default code3", code3.ResourcePrefix)
@@ -134,6 +137,25 @@ func TestStructuredConfigShapesDecodeIntoHostSpec(t *testing.T) {
 	}
 	if edge.OriginIP != "203.0.113.10" || sites["code2"].Redis.Endpoint != "cache.code2.upstash.io" {
 		t.Fatalf("decoded config = %+v %+v", edge, sites["code2"])
+	}
+}
+
+func TestDockerDatabaseDoesNotResolveNeonRegion(t *testing.T) {
+	spec := validHostSpec()
+	code2 := spec.Sites["code2"]
+	code2.Database.Mode = "docker"
+	code2.Database.Region = "aws-eu-central-1"
+	spec.Sites["code2"] = code2
+	code2Secrets := spec.SiteSecrets["code2"]
+	code2Secrets.Database = DatabaseSecrets{Password: "code2-postgres-secret"}
+	spec.SiteSecrets["code2"] = code2Secrets
+
+	resolved, _, err := ValidateHostSpec(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved.Sites["code2"].Database.Region; got != "" {
+		t.Fatalf("Docker database region = %q, want empty", got)
 	}
 }
 

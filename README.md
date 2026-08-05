@@ -98,10 +98,17 @@ that Site's `app.env`; they are not part of `runtime.env` or public Stack data.
 
 The `edge` object contains `originIp`, `cloudflareZoneId`, `acmeEmail`,
 `traefikImage`, and `singBox.serverName`/`target`. A Site may contain
-`database.mode` (`docker` or `neon`), `database.resourceMode`, `redis.mode`
-(`docker` or `upstash`), `redis.resourceMode`, and the ordinary connection
-fields required by the selected external mode. Do not configure generated
-runtime, project, network, route, slot, or alias values.
+`database.mode` (`docker` or `neon`), `database.resourceMode`, and for managed
+Neon `database.region` and the `database.compute` fields. Neon defaults are
+`aws-us-east-1`, `minCU=0.25`, `maxCU=0.25`, and
+`suspendTimeoutSeconds=300`; explicit values override them. Managed Neon
+validates the endpoint API `region_id` after provider project creation and
+fails closed on mismatch, without mutating existing projects. The current
+native provider cannot select a region during creation; a provider/API schema
+upgrade is required for that. Redis uses `redis.mode` (`docker` or `upstash`),
+`redis.resourceMode`, and the ordinary connection fields required by the
+selected external mode. Do not configure generated runtime, project, network,
+route, slot, or alias values.
 
 Do not put credentials, tokens, DSNs, or passwords in YAML. Set the encrypted
 secret objects as JSON supplied by a protected shell environment or secure

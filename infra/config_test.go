@@ -36,6 +36,9 @@ func TestNeonComputeDefaultsAndValidation(t *testing.T) {
 	if *compute.MinCU != 0.25 || *compute.MaxCU != 0.25 || *compute.SuspendTimeoutSeconds != 300 {
 		t.Fatalf("Neon compute defaults = %#v", compute)
 	}
+	if got := resolved.Sites["code2"].Database.Region; got != "aws-us-east-1" {
+		t.Fatalf("Neon region default = %q, want aws-us-east-1", got)
+	}
 
 	invalid := validHostSpec()
 	zero := 0.0
@@ -44,6 +47,54 @@ func TestNeonComputeDefaultsAndValidation(t *testing.T) {
 	invalid.Sites["code2"] = code2
 	if _, _, err := ValidateHostSpec(invalid); err == nil {
 		t.Fatal("zero Neon autoscaling minimum was accepted")
+	}
+}
+
+func TestNeonComputeAndRegionPreserveExplicitValues(t *testing.T) {
+	spec := validHostSpec()
+	minCU, maxCU, timeout := 0.5, 2.0, 900
+	code2 := spec.Sites["code2"]
+	code2.Database.Compute = NeonComputeSpec{MinCU: &minCU, MaxCU: &maxCU, SuspendTimeoutSeconds: &timeout}
+	code2.Database.Region = "aws-eu-central-1"
+	spec.Sites["code2"] = code2
+
+	resolved, _, err := ValidateHostSpec(spec)
+	if err != nil {
+		t.Fatalf("ValidateHostSpec() error = %v", err)
+	}
+	compute := resolved.Sites["code2"].Database.Compute
+	if *compute.MinCU != minCU || *compute.MaxCU != maxCU || *compute.SuspendTimeoutSeconds != timeout {
+		t.Fatalf("Neon compute overrides = %#v", compute)
+	}
+	if got := resolved.Sites["code2"].Database.Region; got != "aws-eu-central-1" {
+		t.Fatalf("Neon region = %q, want aws-eu-central-1", got)
+	}
+}
+
+func TestNeonRegionChangesHostDesiredState(t *testing.T) {
+	base := validHostSpec()
+	resolvedBase, layouts, err := ValidateHostSpec(base)
+	if err != nil {
+		t.Fatalf("ValidateHostSpec() error = %v", err)
+	}
+	changed := base
+	code2 := changed.Sites["code2"]
+	code2.Database.Region = "aws-eu-central-1"
+	changed.Sites["code2"] = code2
+	resolvedChanged, _, err := ValidateHostSpec(changed)
+	if err != nil {
+		t.Fatalf("ValidateHostSpec() changed error = %v", err)
+	}
+	baseDigest, err := hostDesiredStateDigest(resolvedBase, layouts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedDigest, err := hostDesiredStateDigest(resolvedChanged, layouts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseDigest == changedDigest {
+		t.Fatal("Neon region change did not affect host desired state")
 	}
 }
 

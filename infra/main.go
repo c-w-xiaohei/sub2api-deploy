@@ -42,6 +42,7 @@ type hostDesiredSiteSpec struct {
 type hostDesiredDatabase struct {
 	Mode         string `json:"mode"`
 	ResourceMode string `json:"resourceMode"`
+	Region       string `json:"region"`
 }
 type hostDesiredState struct {
 	Edge  EdgeSpec
@@ -168,7 +169,7 @@ func hostDesiredStateDigest(host HostSpec, layouts []SiteLayout) (string, error)
 				Domain: spec.Domain, Image: spec.Image, AdminEmail: spec.AdminEmail,
 				AppProbePath: spec.AppProbePath, DrainSeconds: spec.DrainSeconds,
 				ResourcePrefix: spec.ResourcePrefix,
-				Database:       hostDesiredDatabase{Mode: spec.Database.Mode, ResourceMode: spec.Database.ResourceMode},
+				Database:       hostDesiredDatabase{Mode: spec.Database.Mode, ResourceMode: spec.Database.ResourceMode, Region: spec.Database.Region},
 				Redis:          spec.Redis,
 			},
 			Layout: layout,
@@ -196,7 +197,7 @@ func hostChecksum() (string, error) {
 
 var edgeChecksumPaths = []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "scripts/render-edge-config.ts", "scripts/render-runtime-env.ts", "traefik/traefik.yml", "traefik/dynamic/sing-box.yml"}
 var siteChecksumPaths = []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/read-runtime-env.cjs", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "scripts/probe-origin.sh", "scripts/probe-origin-strict.sh", "scripts/render-site-route.ts", "scripts/render-runtime-env.ts", "scripts/verify-legacy-app-env.ts", "scripts/deployment-mode.ts", "scripts/write-deploy-state.ts", "scripts/write-bootstrap-marker.ts", "src/deployment-preflight.ts", "traefik/dynamic/site.yml"}
-var neonEndpointChecksumPaths = []string{"scripts/node-env.sh", "scripts/reconcile-neon-endpoint.ts"}
+var neonEndpointChecksumPaths = []string{"scripts/node-env.sh", "scripts/reconcile-neon-endpoint.ts", "scripts/validate-neon-region.ts"}
 var hostChecksumPaths = []string{"scripts/host-preflight.ts", "scripts/finalize-host-state.sh", "scripts/write-host-state.cjs"}
 
 func checksumFiles(candidates []string) (string, error) {

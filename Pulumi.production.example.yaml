@@ -24,9 +24,12 @@ config:
       database:
         mode: docker
         resourceMode: existing
-        # For managed Neon (mode: neon, resourceMode: create) the default
-        # endpoint is reconciled to compute.minCU=0.25, compute.maxCU=0.25, and
-        # compute.suspendTimeoutSeconds=300 (scale-to-zero after 5 minutes).
+        # For managed Neon (mode: neon, resourceMode: create), set region and
+        # compute explicitly when needed. The release bundle validates the
+        # created project's endpoint region; the current provider cannot select
+        # region during creation. Defaults are region=aws-us-east-1,
+        # compute.minCU=0.25, compute.maxCU=0.25, and
+        # compute.suspendTimeoutSeconds=300.
       redis:
         mode: docker
         resourceMode: existing

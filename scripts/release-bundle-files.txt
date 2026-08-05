@@ -42,6 +42,7 @@ scripts/probe-origin-strict.sh
 scripts/read-runtime-env.cjs
 scripts/reconcile-edge.sh
 scripts/reconcile-neon-endpoint.ts
+scripts/validate-neon-region.ts
 scripts/reconcile-site.sh
 scripts/render-edge-config.ts
 scripts/render-runtime-env.ts

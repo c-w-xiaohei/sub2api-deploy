@@ -136,7 +136,7 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 	for _, path := range neonEndpointChecksumPaths {
 		endpointPaths[path] = true
 	}
-	for _, required := range []string{"scripts/node-env.sh", "scripts/reconcile-neon-endpoint.ts"} {
+	for _, required := range []string{"scripts/node-env.sh", "scripts/reconcile-neon-endpoint.ts", "scripts/validate-neon-region.ts"} {
 		if !endpointPaths[required] {
 			t.Fatalf("Neon endpoint checksum omits %q", required)
 		}

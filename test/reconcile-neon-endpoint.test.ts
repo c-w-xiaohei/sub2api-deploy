@@ -4,6 +4,10 @@ import {
   reconcileEndpointSettings,
   selectEndpoint,
 } from "../scripts/reconcile-neon-endpoint.js";
+import {
+  selectRegionEndpoint,
+  validateManagedNeonRegion,
+} from "../scripts/validate-neon-region.js";
 
 describe("Neon endpoint settings", () => {
   it("selects exactly the endpoint matching the project default host", () => {
@@ -109,5 +113,46 @@ describe("Neon endpoint settings", () => {
     );
 
     expect(methods).toEqual(["GET", "GET"]);
+  });
+});
+
+describe("managed Neon region validation", () => {
+  it("selects the one default endpoint with an authoritative region", () => {
+    expect(selectRegionEndpoint([
+      { id: "ep-a", host: "ep-a.neon.tech", region_id: "aws-us-east-1" },
+    ], "ep-a.neon.tech")).toEqual({
+      id: "ep-a",
+      host: "ep-a.neon.tech",
+      region_id: "aws-us-east-1",
+    });
+  });
+
+  it.each([
+    ["missing endpoint", [], "exactly one"],
+    ["ambiguous endpoint", [
+      { id: "ep-a", host: "ep-a.neon.tech", region_id: "aws-us-east-1" },
+      { id: "ep-b", host: "ep-a.neon.tech", region_id: "aws-us-east-1" },
+    ], "exactly one"],
+    ["missing region", [{ id: "ep-a", host: "ep-a.neon.tech" }], "region_id"],
+  ])("fails closed for %s", (_name, endpoints, message) => {
+    expect(() => selectRegionEndpoint(endpoints, "ep-a.neon.tech")).toThrow(message);
+  });
+
+  it("accepts a matching region and performs no mutation", async () => {
+    const methods: string[] = [];
+    await validateManagedNeonRegion("project-id", "ep-a.neon.tech", "aws-us-east-1", async (_path, init) => {
+      methods.push(init?.method ?? "GET");
+      return { endpoints: [{ id: "ep-a", host: "ep-a.neon.tech", region_id: "aws-us-east-1" }] };
+    });
+    expect(methods).toEqual(["GET"]);
+  });
+
+  it("rejects a mismatched region without attempting a mutation", async () => {
+    const methods: string[] = [];
+    await expect(validateManagedNeonRegion("project-id", "ep-a.neon.tech", "aws-us-west-2", async (_path, init) => {
+      methods.push(init?.method ?? "GET");
+      return { endpoints: [{ id: "ep-a", host: "ep-a.neon.tech", region_id: "aws-us-east-1" }] };
+    })).rejects.toThrow("region");
+    expect(methods).toEqual(["GET"]);
   });
 });

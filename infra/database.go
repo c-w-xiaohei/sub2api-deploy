@@ -146,11 +146,18 @@ func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, la
 		if legacy {
 			projectOptions = append(projectOptions, pulumi.IgnoreChanges([]string{"org_id"}))
 		}
+		// The current native provider schema has no project region input. Keep the
+		// configured region in the public IaC model until the provider exposes one;
+		// an unknown input would break previews and legacy adoption.
 		project, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtr(ManagedNeonProjectName(spec.ResourcePrefix))}, projectOptions...)
 		if err != nil {
 			return siteDatabaseResult{}, err
 		}
-		endpointSettings, err := reconcileNeonEndpointSettings(ctx, site, siteID, project, apiKey, spec.Database.Compute, preflight, endpointChecksum)
+		regionValidation, err := validateNeonRegion(ctx, site, siteID, project, apiKey, spec.Database.Region, preflight, endpointChecksum)
+		if err != nil {
+			return siteDatabaseResult{}, err
+		}
+		endpointSettings, err := reconcileNeonEndpointSettings(ctx, site, siteID, project, apiKey, spec.Database.Region, spec.Database.Compute, preflight, regionValidation, endpointChecksum)
 		if err != nil {
 			return siteDatabaseResult{}, err
 		}

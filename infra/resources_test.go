@@ -83,7 +83,7 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 	if !strings.Contains(preflight.Inputs["create"].StringValue(), `"$EXPECTED_SITE_MODES"`) {
 		t.Fatal("Stack-level host preflight command does not consume expected Site modes")
 	}
-	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-neon-endpoint-settings", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-neon-endpoint-settings", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
+	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-neon-region", "site-code2-neon-endpoint-settings", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-neon-region", "site-code3-neon-endpoint-settings", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
 		assertDependsOn(t, requireResource(t, resources, name), preflight.Name, "must not run before host preflight")
 	}
 	finalize := requireResource(t, resources, "host-finalize-state")
@@ -118,7 +118,9 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 			assertDependsOn(t, item, preflight.Name, "selected provider must not run before host preflight")
 		}
 		neon := requireSiteProvider(t, mocks.resources, siteID, "neon")
-		if neon.RegisterRPC.GetVersion() != "" { t.Fatalf("%s Neon provider version = %q, want omitted", siteID, neon.RegisterRPC.GetVersion()) }
+		if neon.RegisterRPC.GetVersion() != "" {
+			t.Fatalf("%s Neon provider version = %q, want omitted", siteID, neon.RegisterRPC.GetVersion())
+		}
 	}
 	if countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord") != 2 {
 		t.Fatalf("DNS record count = %d, want 2", countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord"))
@@ -151,6 +153,25 @@ func TestSiteAppEnvIsSecretAndSiteScoped(t *testing.T) {
 		}
 		if strings.Contains(environment["RUNTIME_JSON"].SecretValue().Element.StringValue(), "code2-app-secret") {
 			t.Fatal("app env leaked into runtime JSON")
+		}
+	}
+}
+
+func TestManagedNeonEndpointUsesConfiguredComputePolicy(t *testing.T) {
+	spec := validHostSpec()
+	minCU, maxCU, timeout := 0.5, 2.0, 900
+	code2 := spec.Sites["code2"]
+	code2.Database.Compute = NeonComputeSpec{MinCU: &minCU, MaxCU: &maxCU, SuspendTimeoutSeconds: &timeout}
+	spec.Sites["code2"] = code2
+	mocks := deployHostSpec(t, spec)
+	environment := requireResource(t, resourcesByName(mocks.resources), "site-code2-neon-endpoint-settings").Inputs["environment"].ObjectValue()
+	for key, want := range map[string]string{
+		"NEON_AUTOSCALING_MIN_CU":      "0.5",
+		"NEON_AUTOSCALING_MAX_CU":      "2",
+		"NEON_SUSPEND_TIMEOUT_SECONDS": "900",
+	} {
+		if got := environment[resource.PropertyKey(key)].StringValue(); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
 	}
 }
@@ -199,8 +220,12 @@ func TestHostGraphManagedDataIsProtectedAndSiteOwned(t *testing.T) {
 
 func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 	legacy := legacyCode2Layout(DeriveSiteLayout("code2", "contextid-us"))
-	if len(legacyCode2Aliases(legacy, "neon")) != 1 { t.Fatal("legacy code2 must retain its root-level provider alias") }
-	if len(legacyCode2Aliases(DeriveSiteLayout("code3", "code3"), "neon")) != 0 { t.Fatal("new Sites must not receive legacy provider aliases") }
+	if len(legacyCode2Aliases(legacy, "neon")) != 1 {
+		t.Fatal("legacy code2 must retain its root-level provider alias")
+	}
+	if len(legacyCode2Aliases(DeriveSiteLayout("code3", "code3"), "neon")) != 0 {
+		t.Fatal("new Sites must not receive legacy provider aliases")
+	}
 }
 
 func TestCleanCode2DoesNotReceiveLegacyAliases(t *testing.T) {
@@ -245,8 +270,15 @@ func TestSanitizedLegacyStackShapeMatchesAdoptedGraph(t *testing.T) {
 		}
 	}
 	var provider legacyFixtureResource
-	for _, resource := range fixture.Deployment.Resources { if resource.Type == "pulumi:providers:neon" && resource.Name == "neon" { provider = resource; break } }
-	if provider.URN == "" { t.Fatal("legacy fixture must preserve original Neon provider identity") }
+	for _, resource := range fixture.Deployment.Resources {
+		if resource.Type == "pulumi:providers:neon" && resource.Name == "neon" {
+			provider = resource
+			break
+		}
+	}
+	if provider.URN == "" {
+		t.Fatal("legacy fixture must preserve original Neon provider identity")
+	}
 }
 
 func providerIDFromFixture(t *testing.T, resources map[string]legacyFixtureResource, reference string) string {
@@ -483,6 +515,27 @@ func assertSiteCommands(t *testing.T, resources map[string]pulumi.MockResourceAr
 			}
 		}
 		if suffix == "reconcile" {
+			region := requireResource(t, resources, "site-"+siteID+"-neon-region")
+			if region.TypeToken != "command:local:Command" {
+				t.Fatalf("%s type = %q", region.Name, region.TypeToken)
+			}
+			regionEnvironment := region.Inputs["environment"].ObjectValue()
+			for _, key := range []string{"NEON_PROJECT_ID", "NEON_ENDPOINT_HOST", "NEON_REGION"} {
+				if _, ok := regionEnvironment[resource.PropertyKey(key)]; !ok {
+					t.Fatalf("%s missing %s", region.Name, key)
+				}
+			}
+			if !regionEnvironment["NEON_API_KEY"].IsSecret() {
+				t.Fatalf("%s Neon API key must remain a secret environment value", region.Name)
+			}
+			if got := regionEnvironment["NEON_REGION"].StringValue(); got != "aws-us-east-1" {
+				t.Fatalf("%s region = %q, want aws-us-east-1", region.Name, got)
+			}
+			assertDependsOn(t, region, "site-"+siteID+"-neon-project", "region validation must wait for the Neon project")
+			assertDependsOn(t, region, "host-preflight", "region validation must wait for host preflight")
+			if !containsTrigger(region, "aws-us-east-1") {
+				t.Fatalf("%s triggers omit configured region: %v", region.Name, commandTriggers(region))
+			}
 			endpoint := requireResource(t, resources, "site-"+siteID+"-neon-endpoint-settings")
 			if endpoint.TypeToken != "command:local:Command" {
 				t.Fatalf("%s type = %q", endpoint.Name, endpoint.TypeToken)
@@ -503,6 +556,7 @@ func assertSiteCommands(t *testing.T, resources map[string]pulumi.MockResourceAr
 				t.Fatalf("%s min CU = %q, want 0.25", endpoint.Name, got)
 			}
 			assertDependsOn(t, endpoint, "site-"+siteID+"-neon-project", "endpoint settings must wait for the Neon project")
+			assertDependsOn(t, endpoint, region.Name, "endpoint settings must wait for region validation")
 			assertDependsOn(t, command, endpoint.Name, "reconcile must wait for endpoint settings")
 		}
 		if suffix == "release" {
@@ -635,6 +689,15 @@ func siteChildren(items []pulumi.MockResourceArgs, siteID string) []pulumi.MockR
 }
 func commandTriggers(item pulumi.MockResourceArgs) []resource.PropertyValue {
 	return item.Inputs["triggers"].ArrayValue()
+}
+
+func containsTrigger(item pulumi.MockResourceArgs, want string) bool {
+	for _, trigger := range commandTriggers(item) {
+		if trigger.StringValue() == want {
+			return true
+		}
+	}
+	return false
 }
 
 func secretHostSpec(host HostSpec) SecretHostSpec {
