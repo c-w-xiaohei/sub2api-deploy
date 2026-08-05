@@ -102,13 +102,21 @@ The `edge` object contains `originIp`, `cloudflareZoneId`, `acmeEmail`,
 Neon `database.region` and the `database.compute` fields. Neon defaults are
 `aws-us-east-1`, `minCU=0.25`, `maxCU=0.25`, and
 `suspendTimeoutSeconds=300`; explicit values override them. Managed Neon
-validates the endpoint API `region_id` after provider project creation and
-fails closed on mismatch, without mutating existing projects. The current
-native provider cannot select a region during creation; a provider/API schema
-upgrade is required for that. Redis uses `redis.mode` (`docker` or `upstash`),
-`redis.resourceMode`, and the ordinary connection fields required by the
-selected external mode. Do not configure generated runtime, project, network,
+creates or finds the deterministic project through the local command API
+resource and sends Neon API `region_id` on creation. Existing projects with a
+mismatched region fail closed without a POST. Legacy code2 continues to use
+the retained native provider project and validates its region. Redis uses
+`redis.mode` (`docker` or `upstash`), `redis.resourceMode`, and the ordinary
+connection fields required by the selected external mode. Do not configure generated runtime, project, network,
 route, slot, or alias values.
+
+Managed Neon state contains only project ID, name, region, and the authoritative
+endpoint host. The API-backed command revalidates persisted IDs against Neon on
+every invocation and writes state atomically under a restrictive lock. Connection
+credentials are fetched separately through Neon’s `connection_uri` API as a
+secret command output; they are never written to project state or logged.
+Removing a managed Site has no delete workflow and intentionally leaves the
+protected Neon project orphaned; ordinary reconciliation never deletes it.
 
 Do not put credentials, tokens, DSNs, or passwords in YAML. Set the encrypted
 secret objects as JSON supplied by a protected shell environment or secure

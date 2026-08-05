@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
 
+	"github.com/pulumi/pulumi-command/sdk/go/command/local"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -41,6 +43,43 @@ type neonProjectArgs struct {
 type neonProjectArgsValue struct {
 	Name   *string `pulumi:"name"`
 	Org_id *string `pulumi:"org_id"`
+}
+
+type neonProjectOutputs struct {
+	pulumi.Resource
+	IDOutput            pulumi.IDOutput
+	ConnectionURI       pulumi.StringOutput
+	DefaultEndpointHost pulumi.StringOutput
+}
+
+func (project *neonProject) ProjectID() pulumi.IDOutput               { return project.ID() }
+func (project *neonProject) ConnectionURIOutput() pulumi.StringOutput { return project.Connection_uri }
+func (project *neonProject) EndpointHostOutput() pulumi.StringOutput {
+	return project.Default_endpoint_host
+}
+func (project neonProjectOutputs) ProjectID() pulumi.IDOutput { return project.IDOutput }
+func (project neonProjectOutputs) ConnectionURIOutput() pulumi.StringOutput {
+	return project.ConnectionURI
+}
+func (project neonProjectOutputs) EndpointHostOutput() pulumi.StringOutput {
+	return project.DefaultEndpointHost
+}
+
+func managedNeonProjectFromCommand(command *local.Command) neonProjectOutputs {
+	parse := func(stdout, field string) string {
+		if stdout == "" {
+			return ""
+		}
+		var state map[string]string
+		if err := json.Unmarshal([]byte(stdout), &state); err != nil {
+			panic(fmt.Sprintf("managed Neon project output is invalid: %v", err))
+		}
+		if state[field] == "" {
+			panic(fmt.Sprintf("managed Neon project output omitted %s", field))
+		}
+		return state[field]
+	}
+	return neonProjectOutputs{Resource: command, IDOutput: command.Stdout.ApplyT(func(stdout string) pulumi.ID { return pulumi.ID(parse(stdout, "id")) }).(pulumi.IDOutput), DefaultEndpointHost: command.Stdout.ApplyT(func(stdout string) string { return parse(stdout, "default_endpoint_host") }).(pulumi.StringOutput)}
 }
 
 // neonProvider is registered directly so the generated SDK's package default
@@ -134,34 +173,45 @@ func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, la
 		return siteDatabaseResult{Connection: DatabaseConnectionInputs{Host: pulumi.String("postgres"), Port: pulumi.Int(5432), User: pulumi.String("sub2api"), Password: pulumi.ToSecret(pulumi.String(secrets.Database.Password)).(pulumi.StringOutput), DBName: pulumi.String("sub2api"), SSLMode: "disable"}}, nil
 	}
 	if spec.Database.ResourceMode == "create" {
-		providerOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, "neon")), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.PluginDownloadURL("https://github.com/kislerdm/pulumi-neon/releases/download/v${VERSION}")}
 		apiKey := pulumi.ToSecret(pulumi.String(secrets.Database.APIToken)).(pulumi.StringOutput)
 		legacy := len(legacyCode2Aliases(layout, "legacy")) != 0
-		provider, err := registerNeonProvider(ctx, "site-"+siteID+"-neon", &neonProviderArgs{Api_key: apiKey}, providerOptions...)
-		if err != nil {
-			return siteDatabaseResult{}, err
-		}
-		// Retirement must explicitly unprotect this persistent project first.
-		projectOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, spec.ResourcePrefix+"-neon-project")), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Protect(true), pulumi.RetainOnDelete(true)}
+		var project neonProjectLike
+		var regionValidation pulumi.Resource
+		var connectionURI pulumi.StringOutput
 		if legacy {
-			projectOptions = append(projectOptions, pulumi.IgnoreChanges([]string{"org_id"}))
-		}
-		// The current native provider schema has no project region input. Keep the
-		// configured region in the public IaC model until the provider exposes one;
-		// an unknown input would break previews and legacy adoption.
-		project, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtr(ManagedNeonProjectName(spec.ResourcePrefix))}, projectOptions...)
-		if err != nil {
-			return siteDatabaseResult{}, err
-		}
-		regionValidation, err := validateNeonRegion(ctx, site, siteID, project, apiKey, spec.Database.Region, preflight, endpointChecksum)
-		if err != nil {
-			return siteDatabaseResult{}, err
+			providerOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, "neon")), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.PluginDownloadURL("https://github.com/kislerdm/pulumi-neon/releases/download/v${VERSION}")}
+			provider, err := registerNeonProvider(ctx, "site-"+siteID+"-neon", &neonProviderArgs{Api_key: apiKey}, providerOptions...)
+			if err != nil {
+				return siteDatabaseResult{}, err
+			}
+			projectOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, spec.ResourcePrefix+"-neon-project")), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Protect(true), pulumi.RetainOnDelete(true), pulumi.IgnoreChanges([]string{"org_id"})}
+			nativeProject, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtrInput(pulumi.String(ManagedNeonProjectName(spec.ResourcePrefix)))}, projectOptions...)
+			if err != nil {
+				return siteDatabaseResult{}, err
+			}
+			project = nativeProject
+			connectionURI = nativeProject.ConnectionURIOutput()
+			regionValidation, err = validateNeonRegion(ctx, site, siteID, nativeProject, apiKey, spec.Database.Region, preflight, endpointChecksum)
+			if err != nil {
+				return siteDatabaseResult{}, err
+			}
+		} else {
+			command, err := newCommand(ctx, "site-"+siteID+"-neon-project", "bash scripts/node-env.sh npx --no-install tsx scripts/create-neon-project.ts", pulumi.StringMap{"NEON_API_KEY": apiKey, "NEON_PROJECT_NAME": pulumi.String(ManagedNeonProjectName(spec.ResourcePrefix)), "NEON_REGION": pulumi.String(spec.Database.Region), "NEON_PROJECT_STATE_FILE": pulumi.String(layout.RuntimeRoot + "/neon-project.json")}, []string{"neon-project-v1", siteID, endpointChecksum, spec.Database.Region, ManagedNeonProjectName(spec.ResourcePrefix)}, site, preflight)
+			if err != nil {
+				return siteDatabaseResult{}, err
+			}
+			project = managedNeonProjectFromCommand(command)
+			connectionCommand, err := newCommand(ctx, "site-"+siteID+"-neon-connection", "bash scripts/node-env.sh npx --no-install tsx scripts/fetch-neon-connection.ts", pulumi.StringMap{"NEON_API_KEY": apiKey, "NEON_PROJECT_ID": project.ProjectID()}, []string{"neon-connection-v1", siteID, endpointChecksum}, site, preflight, command)
+			if err != nil {
+				return siteDatabaseResult{}, err
+			}
+			connectionURI = connectionCommand.Stdout.ApplyT(func(stdout string) string { return strings.TrimSpace(stdout) }).(pulumi.StringOutput)
 		}
 		endpointSettings, err := reconcileNeonEndpointSettings(ctx, site, siteID, project, apiKey, spec.Database.Region, spec.Database.Compute, preflight, regionValidation, endpointChecksum)
 		if err != nil {
 			return siteDatabaseResult{}, err
 		}
-		return siteDatabaseResult{Connection: BuildDSNDatabaseConnection(pulumi.ToSecret(project.Connection_uri).(pulumi.StringOutput)), EndpointSettings: endpointSettings}, nil
+		return siteDatabaseResult{Connection: BuildDSNDatabaseConnection(pulumi.ToSecret(connectionURI).(pulumi.StringOutput)), EndpointSettings: endpointSettings}, nil
 	}
 	return siteDatabaseResult{Connection: BuildDSNDatabaseConnection(pulumi.ToSecret(pulumi.String(secrets.Database.DSN)).(pulumi.StringOutput))}, nil
 }

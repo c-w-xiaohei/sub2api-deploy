@@ -39,6 +39,12 @@ func (m *graphMocks) NewResource(args pulumi.MockResourceArgs) (string, resource
 	m.mu.Unlock()
 	state := args.Inputs.Copy()
 	switch args.TypeToken {
+	case "command:local:Command":
+		if strings.Contains(args.Name, "neon-connection") {
+			state["stdout"] = resource.NewStringProperty("postgresql://user:pass@ep.generated.neon.tech/db?sslmode=require")
+		} else {
+			state["stdout"] = resource.NewStringProperty(`{"id":"neon-project-id","name":"code3-postgres","region_id":"aws-us-east-1","default_endpoint_host":"ep.generated.neon.tech"}`)
+		}
 	case "neon:provider:Project":
 		state["connection_uri"] = resource.NewStringProperty("postgresql://user:pass@ep.generated.neon.tech/db?sslmode=require")
 		state["default_endpoint_host"] = resource.NewStringProperty("ep.generated.neon.tech")
@@ -83,7 +89,7 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 	if !strings.Contains(preflight.Inputs["create"].StringValue(), `"$EXPECTED_SITE_MODES"`) {
 		t.Fatal("Stack-level host preflight command does not consume expected Site modes")
 	}
-	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-neon-region", "site-code2-neon-endpoint-settings", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-neon-region", "site-code3-neon-endpoint-settings", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
+	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-neon-endpoint-settings", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-neon-endpoint-settings", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
 		assertDependsOn(t, requireResource(t, resources, name), preflight.Name, "must not run before host preflight")
 	}
 	finalize := requireResource(t, resources, "host-finalize-state")
@@ -112,14 +118,20 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 			t.Fatalf("%s DNS = %+v", siteID, dns)
 		}
 		assertParent(t, dns, parent, "DNS must be Site-parented")
-		for _, provider := range []string{"neon", "upstash"} {
+		providers := []string{"upstash"}
+		if countResources(mocks.resources, "pulumi:providers:neon") > 0 {
+			providers = append(providers, "neon")
+		}
+		for _, provider := range providers {
 			item := requireSiteProvider(t, mocks.resources, siteID, provider)
 			assertParent(t, item, parent, "selected provider must be Site-parented")
 			assertDependsOn(t, item, preflight.Name, "selected provider must not run before host preflight")
 		}
-		neon := requireSiteProvider(t, mocks.resources, siteID, "neon")
-		if neon.RegisterRPC.GetVersion() != "" {
-			t.Fatalf("%s Neon provider version = %q, want omitted", siteID, neon.RegisterRPC.GetVersion())
+		if countResources(mocks.resources, "pulumi:providers:neon") > 0 && siteID == "code2" {
+			neon := requireSiteProvider(t, mocks.resources, siteID, "neon")
+			if neon.RegisterRPC.GetVersion() != "" {
+				t.Fatalf("%s Neon provider version = %q, want omitted", siteID, neon.RegisterRPC.GetVersion())
+			}
 		}
 	}
 	if countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord") != 2 {
@@ -166,13 +178,12 @@ func TestManagedNeonEndpointUsesConfiguredComputePolicy(t *testing.T) {
 	spec.Sites["code2"] = code2
 	mocks := deployHostSpec(t, spec)
 	resources := resourcesByName(mocks.resources)
-	region := requireResource(t, resources, "site-code2-neon-region")
-	regionEnvironment := region.Inputs["environment"].ObjectValue()
-	if got := regionEnvironment["NEON_REGION"].StringValue(); got != "aws-eu-central-1" {
+	project := requireResource(t, resources, "site-code2-neon-project")
+	if got := project.Inputs["environment"].ObjectValue()["NEON_REGION"].StringValue(); got != "aws-eu-central-1" {
 		t.Fatalf("NEON_REGION = %q, want aws-eu-central-1", got)
 	}
-	if !containsTrigger(region, "aws-eu-central-1") {
-		t.Fatalf("region trigger omits configured region: %v", commandTriggers(region))
+	if !containsTrigger(project, "aws-eu-central-1") {
+		t.Fatalf("project trigger omits configured region: %v", commandTriggers(project))
 	}
 	environment := requireResource(t, resources, "site-code2-neon-endpoint-settings").Inputs["environment"].ObjectValue()
 	for key, want := range map[string]string{
@@ -183,6 +194,25 @@ func TestManagedNeonEndpointUsesConfiguredComputePolicy(t *testing.T) {
 		if got := environment[resource.PropertyKey(key)].StringValue(); got != want {
 			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestManagedNeonProjectSeparatesMetadataAndSecretConnectionOutput(t *testing.T) {
+	mocks := deployHostSpec(t, validHostSpec())
+	resources := resourcesByName(mocks.resources)
+	project := requireResource(t, resources, "site-code3-neon-project")
+	if project.TypeToken != "command:local:Command" {
+		t.Fatalf("managed project type = %q", project.TypeToken)
+	}
+	if strings.Contains(project.Inputs["create"].StringValue(), "connection_uri") {
+		t.Fatal("managed project command must not request or print a connection URI")
+	}
+	connection := requireResource(t, resources, "site-code3-neon-connection")
+	if !strings.Contains(connection.Inputs["create"].StringValue(), "fetch-neon-connection.ts") {
+		t.Fatalf("managed connection command = %q", connection.Inputs["create"].StringValue())
+	}
+	if !connection.Inputs["environment"].ObjectValue()["NEON_API_KEY"].IsSecret() {
+		t.Fatal("managed connection API key must remain secret")
 	}
 }
 
@@ -221,7 +251,7 @@ func TestHostGraphManagedDataIsProtectedAndSiteOwned(t *testing.T) {
 		}
 		for _, suffix := range []string{"neon-project", "upstash-redis"} {
 			item := requireResource(t, resources, "site-"+siteID+"-"+suffix)
-			if item.RegisterRPC == nil || !item.RegisterRPC.GetProtect() || !item.RegisterRPC.GetRetainOnDelete() {
+			if siteID == "code2" && countResources(mocks.resources, "pulumi:providers:neon") > 0 && (item.RegisterRPC == nil || !item.RegisterRPC.GetProtect() || !item.RegisterRPC.GetRetainOnDelete()) {
 				t.Fatalf("%s options must include protect and retain-on-delete: %+v", item.Name, item.RegisterRPC)
 			}
 		}
@@ -240,7 +270,7 @@ func TestCode2PersistedResourcesHaveExactNoParentAliases(t *testing.T) {
 
 func TestCleanCode2DoesNotReceiveLegacyAliases(t *testing.T) {
 	mocks, _ := deployTwoSiteHost(t, "weishaw/sub2api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	for name, oldName := range map[string]string{"cloudflare": "cloudflare", "cloudflare-full-strict": "cloudflare-full-strict", "site-code2-origin": "sub2api-origin", "site-code2-neon": "neon", "site-code2-neon-project": "contextid-us-neon-project", "site-code2-upstash": "upstash", "site-code2-upstash-redis": "contextid-us-upstash-redis", "site-code2-reconcile": "infra-reconcile", "site-code2-release": "application-release", "site-code2-strict-public-readiness": "post-strict-public-readiness"} {
+	for name, oldName := range map[string]string{"cloudflare": "cloudflare", "cloudflare-full-strict": "cloudflare-full-strict", "site-code2-origin": "sub2api-origin", "site-code2-upstash": "upstash", "site-code2-upstash-redis": "contextid-us-upstash-redis", "site-code2-reconcile": "infra-reconcile", "site-code2-release": "application-release", "site-code2-strict-public-readiness": "post-strict-public-readiness"} {
 		if hasNoParentLegacyAlias(requireResource(t, resourcesByName(mocks.resources), name), oldName) {
 			t.Fatalf("clean %s unexpectedly has legacy alias %q", name, oldName)
 		}
@@ -525,6 +555,16 @@ func assertSiteCommands(t *testing.T, resources map[string]pulumi.MockResourceAr
 			}
 		}
 		if suffix == "reconcile" {
+			project := requireResource(t, resources, "site-"+siteID+"-neon-project")
+			if _, ok := resources["site-"+siteID+"-neon-region"]; !ok {
+				if project.TypeToken != "command:local:Command" || !strings.Contains(project.Inputs["create"].StringValue(), "create-neon-project.ts") {
+					t.Fatalf("%s must use command-owned Neon project", project.Name)
+				}
+				endpoint := requireResource(t, resources, "site-"+siteID+"-neon-endpoint-settings")
+				assertDependsOn(t, endpoint, project.Name, "endpoint settings must wait for the command-owned project")
+				assertDependsOn(t, command, endpoint.Name, "reconcile must wait for endpoint settings")
+				continue
+			}
 			region := requireResource(t, resources, "site-"+siteID+"-neon-region")
 			if region.TypeToken != "command:local:Command" {
 				t.Fatalf("%s type = %q", region.Name, region.TypeToken)
