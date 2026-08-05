@@ -255,8 +255,8 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 	if databaseMode == "neon" {
 		compute = NeonComputeSpec{
 			MinCU:                 floatPtr(defaultFloat(site.Database.Compute.MinCU, 0.25)),
-			MaxCU:                 floatPtr(defaultFloat(site.Database.Compute.MaxCU, 1)),
-			SuspendTimeoutSeconds: intPtr(defaultInt(site.Database.Compute.SuspendTimeoutSeconds, 180)),
+			MaxCU:                 floatPtr(defaultFloat(site.Database.Compute.MaxCU, 0.25)),
+			SuspendTimeoutSeconds: intPtr(defaultInt(site.Database.Compute.SuspendTimeoutSeconds, 300)),
 		}
 		if *compute.MinCU < 0.25 || *compute.MinCU > 16 {
 			return SiteSpec{}, fmt.Errorf("%s.compute.minCU must be between 0.25 and 16", name("database"))

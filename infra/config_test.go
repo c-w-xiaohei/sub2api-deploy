@@ -33,7 +33,7 @@ func TestNeonComputeDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("ValidateHostSpec() error = %v", err)
 	}
 	compute := resolved.Sites["code2"].Database.Compute
-	if *compute.MinCU != 0.25 || *compute.MaxCU != 1 || *compute.SuspendTimeoutSeconds != 180 {
+	if *compute.MinCU != 0.25 || *compute.MaxCU != 0.25 || *compute.SuspendTimeoutSeconds != 300 {
 		t.Fatalf("Neon compute defaults = %#v", compute)
 	}
 

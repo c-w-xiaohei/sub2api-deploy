@@ -21,16 +21,16 @@ describe("Neon endpoint settings", () => {
     ], "ep-a.neon.tech")).toThrow("exactly one");
   });
 
-  it("builds the requested 0.25-1 CU and three-minute policy", () => {
-    expect(desiredEndpointSettings(0.25, 1, 180)).toEqual({
+  it("builds the requested 0.25 CU and five-minute policy", () => {
+    expect(desiredEndpointSettings(0.25, 0.25, 300)).toEqual({
       autoscaling_limit_min_cu: 0.25,
-      autoscaling_limit_max_cu: 1,
-      suspend_timeout_seconds: 180,
+      autoscaling_limit_max_cu: 0.25,
+      suspend_timeout_seconds: 300,
     });
   });
 
   it("retries transient GET failures after PATCH before declaring convergence", async () => {
-    const settings = desiredEndpointSettings(0.25, 1, 180);
+    const settings = desiredEndpointSettings(0.25, 0.25, 300);
     const requests: Array<{ path: string; method: string }> = [];
     const sleeps: number[] = [];
     let verificationAttempts = 0;
@@ -61,7 +61,7 @@ describe("Neon endpoint settings", () => {
   });
 
   it("retries a transient PATCH precondition failure", async () => {
-    const settings = desiredEndpointSettings(0.25, 1, 180);
+    const settings = desiredEndpointSettings(0.25, 0.25, 300);
     const methods: string[] = [];
     const sleeps: number[] = [];
     let patches = 0;
@@ -92,7 +92,7 @@ describe("Neon endpoint settings", () => {
   });
 
   it("does not PATCH an endpoint that already has the requested settings", async () => {
-    const settings = desiredEndpointSettings(0.25, 1, 180);
+    const settings = desiredEndpointSettings(0.25, 0.25, 300);
     const methods: string[] = [];
     await reconcileEndpointSettings(
       "project-id",
