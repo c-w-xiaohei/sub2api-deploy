@@ -24,8 +24,24 @@ type HostGraphExports struct {
 
 type hostDesiredSite struct {
 	ID     string
-	Spec   SiteSpec
+	Spec   hostDesiredSiteSpec
 	Layout SiteLayout
+}
+
+type hostDesiredSiteSpec struct {
+	Domain         string              `json:"domain"`
+	Image          string              `json:"image"`
+	AdminEmail     string              `json:"adminEmail"`
+	AppProbePath   string              `json:"appProbePath"`
+	DrainSeconds   *int                `json:"drainSeconds"`
+	ResourcePrefix string              `json:"resourcePrefix"`
+	Database       hostDesiredDatabase `json:"database"`
+	Redis          RedisSpec           `json:"redis"`
+}
+
+type hostDesiredDatabase struct {
+	Mode         string `json:"mode"`
+	ResourceMode string `json:"resourceMode"`
 }
 type hostDesiredState struct {
 	Edge  EdgeSpec
@@ -146,10 +162,17 @@ func hostDesiredStateDigest(host HostSpec, layouts []SiteLayout) (string, error)
 	sites := make([]hostDesiredSite, 0, len(layouts))
 	for _, layout := range layouts {
 		spec := host.Sites[layout.SiteID]
-		// Neon endpoint settings have their own command checksum and triggers;
-		// changing them must not replace the host topology preflight command.
-		spec.Database.Compute = NeonComputeSpec{}
-		sites = append(sites, hostDesiredSite{ID: layout.SiteID, Spec: spec, Layout: layout})
+		sites = append(sites, hostDesiredSite{
+			ID: layout.SiteID,
+			Spec: hostDesiredSiteSpec{
+				Domain: spec.Domain, Image: spec.Image, AdminEmail: spec.AdminEmail,
+				AppProbePath: spec.AppProbePath, DrainSeconds: spec.DrainSeconds,
+				ResourcePrefix: spec.ResourcePrefix,
+				Database:       hostDesiredDatabase{Mode: spec.Database.Mode, ResourceMode: spec.Database.ResourceMode},
+				Redis:          spec.Redis,
+			},
+			Layout: layout,
+		})
 	}
 	encoded, err := json.Marshal(hostDesiredState{Edge: host.Edge, Sites: sites})
 	if err != nil {

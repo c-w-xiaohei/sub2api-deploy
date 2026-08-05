@@ -121,9 +121,11 @@ func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, la
 			return siteDatabaseResult{}, err
 		}
 		// Retirement must explicitly unprotect this persistent project first.
-		projectOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, spec.ResourcePrefix+"-neon-project")), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Version("0.0.1-alpha.1"), pulumi.Protect(true), pulumi.RetainOnDelete(true)}
-		if len(legacyCode2Aliases(layout, "legacy")) != 0 {
+		projectOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, spec.ResourcePrefix+"-neon-project")), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Protect(true), pulumi.RetainOnDelete(true)}
+		if legacy {
 			projectOptions = append(projectOptions, pulumi.IgnoreChanges([]string{"org_id"}))
+		} else {
+			projectOptions = append(projectOptions, pulumi.Version("0.0.1-alpha.1"))
 		}
 		project, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtr(ManagedNeonProjectName(spec.ResourcePrefix))}, projectOptions...)
 		if err != nil {
