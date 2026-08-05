@@ -42,7 +42,6 @@ type hostDesiredSiteSpec struct {
 type hostDesiredDatabase struct {
 	Mode         string `json:"mode"`
 	ResourceMode string `json:"resourceMode"`
-	Region       string `json:"region"`
 }
 type hostDesiredState struct {
 	Edge  EdgeSpec
@@ -169,7 +168,7 @@ func hostDesiredStateDigest(host HostSpec, layouts []SiteLayout) (string, error)
 				Domain: spec.Domain, Image: spec.Image, AdminEmail: spec.AdminEmail,
 				AppProbePath: spec.AppProbePath, DrainSeconds: spec.DrainSeconds,
 				ResourcePrefix: spec.ResourcePrefix,
-				Database:       hostDesiredDatabase{Mode: spec.Database.Mode, ResourceMode: spec.Database.ResourceMode, Region: spec.Database.Region},
+				Database:       hostDesiredDatabase{Mode: spec.Database.Mode, ResourceMode: spec.Database.ResourceMode},
 				Redis:          spec.Redis,
 			},
 			Layout: layout,

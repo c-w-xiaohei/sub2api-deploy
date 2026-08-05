@@ -162,9 +162,19 @@ func TestManagedNeonEndpointUsesConfiguredComputePolicy(t *testing.T) {
 	minCU, maxCU, timeout := 0.5, 2.0, 900
 	code2 := spec.Sites["code2"]
 	code2.Database.Compute = NeonComputeSpec{MinCU: &minCU, MaxCU: &maxCU, SuspendTimeoutSeconds: &timeout}
+	code2.Database.Region = "aws-eu-central-1"
 	spec.Sites["code2"] = code2
 	mocks := deployHostSpec(t, spec)
-	environment := requireResource(t, resourcesByName(mocks.resources), "site-code2-neon-endpoint-settings").Inputs["environment"].ObjectValue()
+	resources := resourcesByName(mocks.resources)
+	region := requireResource(t, resources, "site-code2-neon-region")
+	regionEnvironment := region.Inputs["environment"].ObjectValue()
+	if got := regionEnvironment["NEON_REGION"].StringValue(); got != "aws-eu-central-1" {
+		t.Fatalf("NEON_REGION = %q, want aws-eu-central-1", got)
+	}
+	if !containsTrigger(region, "aws-eu-central-1") {
+		t.Fatalf("region trigger omits configured region: %v", commandTriggers(region))
+	}
+	environment := requireResource(t, resources, "site-code2-neon-endpoint-settings").Inputs["environment"].ObjectValue()
 	for key, want := range map[string]string{
 		"NEON_AUTOSCALING_MIN_CU":      "0.5",
 		"NEON_AUTOSCALING_MAX_CU":      "2",

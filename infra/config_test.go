@@ -71,33 +71,6 @@ func TestNeonComputeAndRegionPreserveExplicitValues(t *testing.T) {
 	}
 }
 
-func TestNeonRegionChangesHostDesiredState(t *testing.T) {
-	base := validHostSpec()
-	resolvedBase, layouts, err := ValidateHostSpec(base)
-	if err != nil {
-		t.Fatalf("ValidateHostSpec() error = %v", err)
-	}
-	changed := base
-	code2 := changed.Sites["code2"]
-	code2.Database.Region = "aws-eu-central-1"
-	changed.Sites["code2"] = code2
-	resolvedChanged, _, err := ValidateHostSpec(changed)
-	if err != nil {
-		t.Fatalf("ValidateHostSpec() changed error = %v", err)
-	}
-	baseDigest, err := hostDesiredStateDigest(resolvedBase, layouts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changedDigest, err := hostDesiredStateDigest(resolvedChanged, layouts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if baseDigest == changedDigest {
-		t.Fatal("Neon region change did not affect host desired state")
-	}
-}
-
 func TestResolveHostConfigDecodesOnlyStructuredObjects(t *testing.T) {
 	var edge EdgeSpec
 	var sites map[string]SiteSpec
