@@ -42,7 +42,8 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
     },
   });
   if (!response.ok) {
-    throw Object.assign(new Error(`Neon API request failed: HTTP ${response.status}`), { status: response.status });
+    const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 512);
+    throw Object.assign(new Error(`Neon API request failed: HTTP ${response.status}${detail ? `: ${detail}` : ""}`), { status: response.status });
   }
   return response.status === 204 ? null : response.json();
 }
