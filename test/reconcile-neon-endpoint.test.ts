@@ -60,6 +60,37 @@ describe("Neon endpoint settings", () => {
     expect(sleeps).toEqual([2000, 2000]);
   });
 
+  it("retries a transient PATCH precondition failure", async () => {
+    const settings = desiredEndpointSettings(0.25, 1, 180);
+    const methods: string[] = [];
+    const sleeps: number[] = [];
+    let patches = 0;
+    let reads = 0;
+    await reconcileEndpointSettings(
+      "project-id",
+      "endpoint.neon.tech",
+      settings,
+      async (path, init) => {
+        methods.push(init?.method ?? "GET");
+        if (path === "/projects/project-id/endpoints") {
+          return { endpoints: [{ id: "endpoint-id", host: "endpoint.neon.tech" }] };
+        }
+        if (init?.method === "PATCH") {
+          patches += 1;
+          if (patches === 1) throw Object.assign(new Error("endpoint busy"), { status: 412 });
+          return {};
+        }
+        reads += 1;
+        if (reads === 1) return { endpoint: { ...settings, autoscaling_limit_max_cu: 2 } };
+        return { endpoint: settings };
+      },
+      async (milliseconds) => { sleeps.push(milliseconds); },
+    );
+
+    expect(methods).toEqual(["GET", "GET", "PATCH", "PATCH", "GET"]);
+    expect(sleeps).toEqual([2000]);
+  });
+
   it("does not PATCH an endpoint that already has the requested settings", async () => {
     const settings = desiredEndpointSettings(0.25, 1, 180);
     const methods: string[] = [];

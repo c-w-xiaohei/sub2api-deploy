@@ -63,10 +63,24 @@ export async function reconcileEndpointSettings(
   const current = await requestEndpoint(endpointPath) as { endpoint?: EndpointState };
   if (endpointSettingsMismatch(current.endpoint ?? {}, settings) === null) return;
 
-  await requestEndpoint(endpointPath, {
-    method: "PATCH",
-    body: JSON.stringify({ endpoint: settings }),
-  });
+  let patchError: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await requestEndpoint(endpointPath, {
+        method: "PATCH",
+        body: JSON.stringify({ endpoint: settings }),
+      });
+      patchError = undefined;
+      break;
+    } catch (error) {
+      patchError = error;
+      const status = (error as { status?: unknown }).status;
+      const transient = status === 408 || status === 412 || status === 429 || (typeof status === "number" && status >= 500 && status <= 599);
+      if (!transient || attempt === 4) throw error;
+      await sleep(2000);
+    }
+  }
+  if (patchError) throw patchError;
 
   let lastMismatch = "verification did not return the requested settings";
   for (let attempt = 0; attempt < 5; attempt++) {
