@@ -145,7 +145,11 @@ func expectedSiteModesJSON(host HostSpec, layouts []SiteLayout) (string, error) 
 func hostDesiredStateDigest(host HostSpec, layouts []SiteLayout) (string, error) {
 	sites := make([]hostDesiredSite, 0, len(layouts))
 	for _, layout := range layouts {
-		sites = append(sites, hostDesiredSite{ID: layout.SiteID, Spec: host.Sites[layout.SiteID], Layout: layout})
+		spec := host.Sites[layout.SiteID]
+		// Neon endpoint settings have their own command checksum and triggers;
+		// changing them must not replace the host topology preflight command.
+		spec.Database.Compute = NeonComputeSpec{}
+		sites = append(sites, hostDesiredSite{ID: layout.SiteID, Spec: spec, Layout: layout})
 	}
 	encoded, err := json.Marshal(hostDesiredState{Edge: host.Edge, Sites: sites})
 	if err != nil {
