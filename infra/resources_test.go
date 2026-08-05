@@ -118,7 +118,7 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 			assertDependsOn(t, item, preflight.Name, "selected provider must not run before host preflight")
 		}
 		neon := requireSiteProvider(t, mocks.resources, siteID, "neon")
-		if neon.RegisterRPC.GetVersion() != "0.0.1-alpha.1" { t.Fatalf("%s Neon provider version = %q", siteID, neon.RegisterRPC.GetVersion()) }
+		if neon.RegisterRPC.GetVersion() != "" { t.Fatalf("%s Neon provider version = %q, want omitted", siteID, neon.RegisterRPC.GetVersion()) }
 	}
 	if countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord") != 2 {
 		t.Fatalf("DNS record count = %d, want 2", countResources(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord"))

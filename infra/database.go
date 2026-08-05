@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	neon "github.com/kislerdm/pulumi-sdk-neon"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -42,6 +41,31 @@ type neonProjectArgs struct {
 type neonProjectArgsValue struct {
 	Name   *string `pulumi:"name"`
 	Org_id *string `pulumi:"org_id"`
+}
+
+// neonProvider is registered directly so the generated SDK's package default
+// does not add a provider version to the persisted legacy resource shape.
+type neonProvider struct {
+	pulumi.ProviderResourceState
+	Api_key pulumi.StringOutput `pulumi:"api_key"`
+}
+type neonProviderArgs struct {
+	Api_key pulumi.StringInput `pulumi:"api_key"`
+}
+type neonProviderArgsValue struct {
+	Api_key string `pulumi:"api_key"`
+}
+
+func (neonProviderArgs) ElementType() reflect.Type {
+	return reflect.TypeOf((*neonProviderArgsValue)(nil)).Elem()
+}
+
+func registerNeonProvider(ctx *pulumi.Context, name string, args *neonProviderArgs, opts ...pulumi.ResourceOption) (*neonProvider, error) {
+	var provider neonProvider
+	if err := ctx.RegisterResource("pulumi:providers:neon", name, args, &provider, opts...); err != nil {
+		return nil, err
+	}
+	return &provider, nil
 }
 
 func (neonProjectArgs) ElementType() reflect.Type {
@@ -110,13 +134,10 @@ func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, la
 		return siteDatabaseResult{Connection: DatabaseConnectionInputs{Host: pulumi.String("postgres"), Port: pulumi.Int(5432), User: pulumi.String("sub2api"), Password: pulumi.ToSecret(pulumi.String(secrets.Database.Password)).(pulumi.StringOutput), DBName: pulumi.String("sub2api"), SSLMode: "disable"}}, nil
 	}
 	if spec.Database.ResourceMode == "create" {
-		providerOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, "neon")), pulumi.DependsOn([]pulumi.Resource{preflight})}
+		providerOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, "neon")), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.PluginDownloadURL("https://github.com/kislerdm/pulumi-neon/releases/download/v${VERSION}")}
 		apiKey := pulumi.ToSecret(pulumi.String(secrets.Database.APIToken)).(pulumi.StringOutput)
 		legacy := len(legacyCode2Aliases(layout, "legacy")) != 0
-		if !legacy {
-			providerOptions = append(providerOptions, pulumi.Version("0.0.1-alpha.1"))
-		}
-		provider, err := neon.NewProvider(ctx, "site-"+siteID+"-neon", &neon.ProviderArgs{Api_key: apiKey}, providerOptions...)
+		provider, err := registerNeonProvider(ctx, "site-"+siteID+"-neon", &neonProviderArgs{Api_key: apiKey}, providerOptions...)
 		if err != nil {
 			return siteDatabaseResult{}, err
 		}
@@ -124,8 +145,6 @@ func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, la
 		projectOptions := []pulumi.ResourceOption{pulumi.Parent(site), pulumi.Aliases(legacyCode2Aliases(layout, spec.ResourcePrefix+"-neon-project")), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{preflight}), pulumi.Protect(true), pulumi.RetainOnDelete(true)}
 		if legacy {
 			projectOptions = append(projectOptions, pulumi.IgnoreChanges([]string{"org_id"}))
-		} else {
-			projectOptions = append(projectOptions, pulumi.Version("0.0.1-alpha.1"))
 		}
 		project, err := registerNeonProject(ctx, "site-"+siteID+"-neon-project", &neonProjectArgs{Name: pulumi.StringPtr(ManagedNeonProjectName(spec.ResourcePrefix))}, projectOptions...)
 		if err != nil {
