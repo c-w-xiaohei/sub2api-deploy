@@ -41,6 +41,7 @@ func (m *graphMocks) NewResource(args pulumi.MockResourceArgs) (string, resource
 	switch args.TypeToken {
 	case "neon:provider:Project":
 		state["connection_uri"] = resource.NewStringProperty("postgresql://user:pass@ep.generated.neon.tech/db?sslmode=require")
+		state["default_endpoint_host"] = resource.NewStringProperty("ep.generated.neon.tech")
 	case "upstash:index/redisDatabase:RedisDatabase":
 		state["endpoint"] = resource.NewStringProperty("redis.generated.upstash.io")
 		state["port"] = resource.NewNumberProperty(6379)
@@ -82,7 +83,7 @@ func TestHostGraphOwnsEdgeAndIsolatedSites(t *testing.T) {
 	if !strings.Contains(preflight.Inputs["create"].StringValue(), `"$EXPECTED_SITE_MODES"`) {
 		t.Fatal("Stack-level host preflight command does not consume expected Site modes")
 	}
-	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
+	for _, name := range []string{"cloudflare", "cloudflare-full-strict", "edge-reconcile", "site-code2-origin", "site-code2-neon-project", "site-code2-neon-endpoint-settings", "site-code2-upstash-redis", "site-code3-origin", "site-code3-neon-project", "site-code3-neon-endpoint-settings", "site-code3-upstash-redis", "site-code2-reconcile", "site-code2-release", "site-code2-strict-public-readiness", "site-code2-rollback-preparation", "site-code3-reconcile", "site-code3-release", "site-code3-strict-public-readiness", "site-code3-rollback-preparation", "host-finalize-state"} {
 		assertDependsOn(t, requireResource(t, resources, name), preflight.Name, "must not run before host preflight")
 	}
 	finalize := requireResource(t, resources, "host-finalize-state")
@@ -321,7 +322,7 @@ func TestHostGraphExportsPublicSiteStatusOnly(t *testing.T) {
 	mocks := &graphMocks{}
 	var exported map[string]interface{}
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		exports, err := deployHostGraph(ctx, spec, layouts, secretHostSpec(spec), "edge-v1", "site-v1", "host-v1")
+		exports, err := deployHostGraph(ctx, spec, layouts, secretHostSpec(spec), "edge-v1", "site-v1", "endpoint-v1", "host-v1")
 		if err != nil {
 			return err
 		}
@@ -366,7 +367,7 @@ func TestExistingUpstashEndpointIsInOnlyItsSiteRuntime(t *testing.T) {
 	}
 	mocks := &graphMocks{}
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "host-v1")
+		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "endpoint-v1", "host-v1")
 		return err
 	}, pulumi.WithMocks("sub2api-vps-deploy", "test", mocks))
 	if err != nil {
@@ -392,7 +393,7 @@ func TestDockerPostgresRuntimeIncludesLocalServiceInputs(t *testing.T) {
 	}
 	mocks := &graphMocks{}
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "host-v1")
+		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "endpoint-v1", "host-v1")
 		return err
 	}, pulumi.WithMocks("sub2api-vps-deploy", "test", mocks))
 	if err != nil {
@@ -410,6 +411,24 @@ func TestDockerPostgresRuntimeIncludesLocalServiceInputs(t *testing.T) {
 	}
 }
 
+func TestExistingNeonDSNDoesNotCreateEndpointManager(t *testing.T) {
+	spec := validHostSpec()
+	code2 := spec.Sites["code2"]
+	code2.Database = DatabaseSpec{Mode: "neon", ResourceMode: "existing"}
+	spec.Sites["code2"] = code2
+	code2Secrets := spec.SiteSecrets["code2"]
+	code2Secrets.Database = DatabaseSecrets{DSN: "postgresql://sub2api:code2-secret@ep.code2.neon.tech/sub2api?sslmode=require"}
+	spec.SiteSecrets["code2"] = code2Secrets
+	mocks := deployHostSpec(t, spec)
+	resources := resourcesByName(mocks.resources)
+	if _, ok := resources["site-code2-neon-endpoint-settings"]; ok {
+		t.Fatal("existing Neon DSN unexpectedly created endpoint settings manager")
+	}
+	if _, ok := resources["site-code3-neon-endpoint-settings"]; !ok {
+		t.Fatal("managed Neon site lost endpoint settings manager")
+	}
+}
+
 func deployTwoSiteHost(t *testing.T, code2Image string) (*graphMocks, HostGraphExports) {
 	t.Helper()
 	spec := validHostSpec()
@@ -424,7 +443,7 @@ func deployTwoSiteHost(t *testing.T, code2Image string) (*graphMocks, HostGraphE
 	var exports HostGraphExports
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
 		var err error
-		exports, err = deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "host-v1")
+		exports, err = deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "endpoint-v1", "host-v1")
 		return err
 	}, pulumi.WithMocks("sub2api-vps-deploy", "test", mocks))
 	if err != nil {
@@ -441,7 +460,7 @@ func deployHostSpec(t *testing.T, spec HostSpec) *graphMocks {
 	}
 	mocks := &graphMocks{}
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "host-v1")
+		_, err := deployHostGraph(ctx, resolved, layouts, secretHostSpec(resolved), "edge-v1", "site-v1", "endpoint-v1", "host-v1")
 		return err
 	}, pulumi.WithMocks("sub2api-vps-deploy", "test", mocks))
 	if err != nil {
@@ -462,6 +481,29 @@ func assertSiteCommands(t *testing.T, resources map[string]pulumi.MockResourceAr
 			if _, ok := environment[resource.PropertyKey(key)]; !ok {
 				t.Fatalf("%s missing %s", command.Name, key)
 			}
+		}
+		if suffix == "reconcile" {
+			endpoint := requireResource(t, resources, "site-"+siteID+"-neon-endpoint-settings")
+			if endpoint.TypeToken != "command:local:Command" {
+				t.Fatalf("%s type = %q", endpoint.Name, endpoint.TypeToken)
+			}
+			if !strings.HasPrefix(endpoint.Inputs["create"].StringValue(), "bash scripts/node-env.sh ") {
+				t.Fatalf("%s does not resolve the release-bundle Node runtime at execution time", endpoint.Name)
+			}
+			endpointEnvironment := endpoint.Inputs["environment"].ObjectValue()
+			for _, key := range []string{"NEON_PROJECT_ID", "NEON_ENDPOINT_HOST", "NEON_AUTOSCALING_MIN_CU", "NEON_AUTOSCALING_MAX_CU", "NEON_SUSPEND_TIMEOUT_SECONDS"} {
+				if _, ok := endpointEnvironment[resource.PropertyKey(key)]; !ok {
+					t.Fatalf("%s missing %s", endpoint.Name, key)
+				}
+			}
+			if !endpointEnvironment["NEON_API_KEY"].IsSecret() {
+				t.Fatalf("%s Neon API key must remain a secret environment value", endpoint.Name)
+			}
+			if got := endpointEnvironment["NEON_AUTOSCALING_MIN_CU"].StringValue(); got != "0.25" {
+				t.Fatalf("%s min CU = %q, want 0.25", endpoint.Name, got)
+			}
+			assertDependsOn(t, endpoint, "site-"+siteID+"-neon-project", "endpoint settings must wait for the Neon project")
+			assertDependsOn(t, command, endpoint.Name, "reconcile must wait for endpoint settings")
 		}
 		if suffix == "release" {
 			if _, ok := environment["SUB2API_IMAGE"]; !ok {

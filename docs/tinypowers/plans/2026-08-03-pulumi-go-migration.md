@@ -16,7 +16,7 @@
 ## Requirements and Scope
 - Change `Pulumi.yaml` from `runtime: nodejs` to Go with `main: ./infra` or a documented prebuilt binary path.
 - Add a Go Pulumi program covering config validation, Cloudflare DNS/SSL resources, optional Neon Project, optional Upstash Redis database, three local commands, outputs, and all existing runtime payload fields.
-- Preserve `src/deployment-preflight.ts` because `scripts/infra-reconcile.sh` invokes it directly.
+- Preserve `src/deployment-preflight.ts` because `scripts/reconcile-site.sh` and `scripts/bootstrap-site.sh` invoke it directly.
 - Preserve runtime Vitest tests; migrate Pulumi-host pure behavior tests to Go tests.
 - Pin Cloudflare `v6.18.0`, Command `v1.2.1`, Upstash `v0.5.0`, and Neon alpha SDK commit `601a1132b2200425bad604f1c8bd434f24e9178d`.
 

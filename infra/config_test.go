@@ -26,6 +26,27 @@ func TestDefaultIntPreservesExplicitZero(t *testing.T) {
 	}
 }
 
+func TestNeonComputeDefaultsAndValidation(t *testing.T) {
+	spec := validHostSpec()
+	resolved, _, err := ValidateHostSpec(spec)
+	if err != nil {
+		t.Fatalf("ValidateHostSpec() error = %v", err)
+	}
+	compute := resolved.Sites["code2"].Database.Compute
+	if *compute.MinCU != 0.25 || *compute.MaxCU != 1 || *compute.SuspendTimeoutSeconds != 180 {
+		t.Fatalf("Neon compute defaults = %#v", compute)
+	}
+
+	invalid := validHostSpec()
+	zero := 0.0
+	code2 := invalid.Sites["code2"]
+	code2.Database.Compute.MinCU = &zero
+	invalid.Sites["code2"] = code2
+	if _, _, err := ValidateHostSpec(invalid); err == nil {
+		t.Fatal("zero Neon autoscaling minimum was accepted")
+	}
+}
+
 func TestResolveHostConfigDecodesOnlyStructuredObjects(t *testing.T) {
 	var edge EdgeSpec
 	var sites map[string]SiteSpec

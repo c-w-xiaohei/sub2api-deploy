@@ -44,8 +44,15 @@ type SiteSpec struct {
 }
 
 type DatabaseSpec struct {
-	Mode         string `json:"mode"`
-	ResourceMode string `json:"resourceMode"`
+	Mode         string          `json:"mode"`
+	ResourceMode string          `json:"resourceMode"`
+	Compute      NeonComputeSpec `json:"compute"`
+}
+
+type NeonComputeSpec struct {
+	MinCU                 *float64 `json:"minCU"`
+	MaxCU                 *float64 `json:"maxCU"`
+	SuspendTimeoutSeconds *int     `json:"suspendTimeoutSeconds"`
 }
 
 type RedisSpec struct {
@@ -244,6 +251,23 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 	if err != nil {
 		return SiteSpec{}, err
 	}
+	var compute NeonComputeSpec
+	if databaseMode == "neon" {
+		compute = NeonComputeSpec{
+			MinCU:                 floatPtr(defaultFloat(site.Database.Compute.MinCU, 0.25)),
+			MaxCU:                 floatPtr(defaultFloat(site.Database.Compute.MaxCU, 1)),
+			SuspendTimeoutSeconds: intPtr(defaultInt(site.Database.Compute.SuspendTimeoutSeconds, 180)),
+		}
+		if *compute.MinCU < 0.25 || *compute.MinCU > 16 {
+			return SiteSpec{}, fmt.Errorf("%s.compute.minCU must be between 0.25 and 16", name("database"))
+		}
+		if *compute.MaxCU < *compute.MinCU || *compute.MaxCU > 16 {
+			return SiteSpec{}, fmt.Errorf("%s.compute.maxCU must be between minCU and 16", name("database"))
+		}
+		if *compute.SuspendTimeoutSeconds < 60 || *compute.SuspendTimeoutSeconds > 604800 {
+			return SiteSpec{}, fmt.Errorf("%s.compute.suspendTimeoutSeconds must be between 60 and 604800", name("database"))
+		}
+	}
 	redisResourceMode, err := resourceMode(defaultString(site.Redis.ResourceMode, "existing"), name("redis.resourceMode"))
 	if err != nil {
 		return SiteSpec{}, err
@@ -273,6 +297,7 @@ func validateSiteSpec(siteID string, site SiteSpec) (SiteSpec, error) {
 		Database: DatabaseSpec{
 			Mode:         databaseMode,
 			ResourceMode: databaseResourceMode,
+			Compute:      compute,
 		},
 		Redis: RedisSpec{
 			Mode:         redisMode,

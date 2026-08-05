@@ -68,7 +68,7 @@ func postgresRuntimePassword(spec SiteSpec, secrets SiteSecrets, databasePasswor
 	return databasePassword
 }
 
-func DeploySite(ctx *pulumi.Context, siteID string, spec SiteSpec, secrets SiteSecrets, appEnv pulumi.StringOutput, layout SiteLayout, edge *Edge, preflight, previousBarrier pulumi.Resource, checksum, configuredSiteIDs string) (*Site, error) {
+func DeploySite(ctx *pulumi.Context, siteID string, spec SiteSpec, secrets SiteSecrets, appEnv pulumi.StringOutput, layout SiteLayout, edge *Edge, preflight, previousBarrier pulumi.Resource, checksum, endpointChecksum, configuredSiteIDs string) (*Site, error) {
 	site := &Site{}
 	if err := ctx.RegisterComponentResource("sub2api:host:Site", "site-"+siteID, site); err != nil {
 		return nil, err
@@ -77,10 +77,11 @@ func DeploySite(ctx *pulumi.Context, siteID string, spec SiteSpec, secrets SiteS
 	if err != nil {
 		return nil, err
 	}
-	database, err := siteDatabaseInputs(ctx, site, preflight, layout, spec, secrets)
+	databaseResult, err := siteDatabaseInputs(ctx, site, preflight, layout, spec, secrets, endpointChecksum)
 	if err != nil {
 		return nil, err
 	}
+	database := databaseResult.Connection
 	redis, err := siteRedisInputs(ctx, site, preflight, layout, spec, secrets)
 	if err != nil {
 		return nil, err
@@ -90,6 +91,9 @@ func DeploySite(ctx *pulumi.Context, siteID string, spec SiteSpec, secrets SiteS
 	dependencies := []pulumi.Resource{dns, edge.Reconcile, preflight}
 	if previousBarrier != nil {
 		dependencies = append(dependencies, previousBarrier)
+	}
+	if databaseResult.EndpointSettings != nil {
+		dependencies = append(dependencies, databaseResult.EndpointSettings)
 	}
 	environment := siteEnvironment(siteID, spec, layout, runtime, appEnv, configuredSiteIDs, edge.Spec.OriginIP)
 	if secrets.AppEnv != nil {

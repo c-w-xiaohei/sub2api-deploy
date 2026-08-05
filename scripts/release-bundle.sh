@@ -86,7 +86,7 @@ verify_archive_shape() {
     [[ "$member" == "$top" ]] && continue
     relative="${member#"$top/"}"
     case "$relative" in
-      active.yml|*/active.yml|scripts/compose-common.sh|scripts/deploy-compose.sh|scripts/infra-reconcile.sh|scripts/render-route.ts|compose/override.yml)
+      active.yml|*/active.yml|compose/override.yml)
         die "stale single-Site path is shipped: $relative"
         ;;
     esac

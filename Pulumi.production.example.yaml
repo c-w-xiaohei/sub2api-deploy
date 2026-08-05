@@ -24,6 +24,9 @@ config:
       database:
         mode: docker
         resourceMode: existing
+        # For managed Neon (mode: neon, resourceMode: create) the default
+        # endpoint is reconciled to compute.minCU=0.25, compute.maxCU=1, and
+        # compute.suspendTimeoutSeconds=180 (scale-to-zero after 3 minutes).
       redis:
         mode: docker
         resourceMode: existing

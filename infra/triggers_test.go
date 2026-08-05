@@ -131,6 +131,20 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 	hostPaths := map[string]bool{}
 	for _, path := range hostChecksumPaths {
 		hostPaths[path] = true
+	}
+	endpointPaths := map[string]bool{}
+	for _, path := range neonEndpointChecksumPaths {
+		endpointPaths[path] = true
+	}
+	for _, required := range []string{"scripts/node-env.sh", "scripts/reconcile-neon-endpoint.ts"} {
+		if !endpointPaths[required] {
+			t.Fatalf("Neon endpoint checksum omits %q", required)
+		}
+		if edgePaths[required] || sitePaths[required] || hostPaths[required] {
+			t.Fatalf("Neon endpoint-only path %q is owned by another checksum", required)
+		}
+	}
+	for _, path := range hostChecksumPaths {
 		if edgePaths[path] || sitePaths[path] {
 			t.Fatalf("host checksum path %q overlaps Edge or Site", path)
 		}

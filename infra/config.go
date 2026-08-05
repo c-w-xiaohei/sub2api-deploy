@@ -64,6 +64,17 @@ func defaultInt(value *int, fallback int) int {
 	return *value
 }
 
+func defaultFloat(value *float64, fallback float64) float64 {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func floatPtr(value float64) *float64 { return &value }
+
+func intPtr(value int) *int { return &value }
+
 func loadProgramConfig(ctx *pulumi.Context) (ProgramConfig, error) {
 	pulumiConfig := config.New(ctx, "")
 	var edge EdgeSpec
