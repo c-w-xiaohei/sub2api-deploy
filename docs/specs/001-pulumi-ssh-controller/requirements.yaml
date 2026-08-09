@@ -1,0 +1,460 @@
+version: 1
+topic: 001-pulumi-ssh-controller
+status: ready-for-implementation
+generated_cases_are_test_ids: true
+coverage_policy:
+  priorities_required: [P0, P1]
+  allow_skips: false
+  require_runtime_evidence: true
+  serverless_provider_behavior_is_excluded: true
+
+requirements:
+  - id: TECH-CONFIG-STRICT
+    priority: P0
+    source: tech-spec.md#5-public-config-contract
+    requirement: Reject mixed, ambiguous, duplicate, oversized, or invalid configuration before registering resources.
+    tests: [CFG-EC-01, CFG-EC-02, CFG-EC-03, CFG-EC-04, CFG-EC-05, CFG-EC-06, CFG-LIMIT-*]
+    layers: [L0]
+    negative_oracle: resource_count=0 and ssh_call_count=0
+    evidence: config-contract.json
+    serverless_excluded: true
+
+  - id: TECH-CONFIG-IDENTITY
+    priority: P0
+    source: tech-spec.md#7-per-host-projection
+    requirement: Environment, server ID, and SSH alias use the frozen DNS-label grammar and sshAlias equals serverId.
+    tests: [CFG-ID-*, SSH-ALIAS-*]
+    layers: [L0, L3]
+    negative_oracle: exec_cmd_count=0
+    evidence: identity-cases.json
+    serverless_excluded: true
+
+  - id: TECH-CONTRACT-LIMITS
+    priority: P1
+    source: tech-spec.md#5-public-config-contract
+    requirement: Every frozen config, RPC, journal, approval, evidence, bundle, and operations-store limit is tested at limit minus one, limit, and limit plus one using independent literals.
+    tests: [CONTRACT-LIMIT-*]
+    layers: [L0, L1, L2]
+    negative_oracle: over_limit_side_effect_count=0
+    evidence: contract-limits.json
+    serverless_excluded: true
+
+  - id: TECH-CANONICAL-IDENTITY
+    priority: P0
+    source: tech-spec.md#7-per-host-projection
+    requirement: Canonical encoding, desired revisions, PostgreSQL identity, and Redis identity are collision-safe and exclude low-entropy secrets.
+    tests: [CANONICAL-*, CONNECTION-ID-*]
+    layers: [L0]
+    negative_oracle: canonical_collision_count=0 and low_entropy_secret_hash_count=0
+    evidence: canonical-identity.json
+    serverless_excluded: true
+
+  - id: TECH-PROJECTION-ONE-HOST
+    priority: P0
+    source: tech-spec.md#6-environment-stack-resource-graph
+    requirement: Register exactly one Host resource per declared server and no command.local controller path.
+    tests: [PRJ-EC-01, PRJ-EC-03, PRJ-EC-04, PRJ-EC-07, GRAPH-HOST-001]
+    layers: [L0, L7]
+    negative_oracle: duplicate_host_urns=0 and command_local_count=0
+    evidence: resource-graph.json
+    serverless_excluded: true
+
+  - id: TECH-PROJECTION-SECRET-SCOPE
+    priority: P0
+    source: tech-spec.md#7-per-host-projection
+    requirement: Remote, control, bootstrap, app, data, and proxy secrets stay within their declared consumers.
+    tests: [SEC-SCOPE-*, PRJ-BOOTSTRAP-*]
+    layers: [L0, L3, L7]
+    negative_oracle: cross_host_secret_matches=0 and cross_app_secret_matches=0
+    evidence: secret-scope.json
+    serverless_excluded: true
+
+  - id: TECH-PROJECTION-PURE-DESIRED
+    priority: P0
+    source: tech-spec.md#7-per-host-projection
+    requirement: HostDesired contains only config and deterministic Stack projection; installation, owner epoch, existing status, NeedsSetup, and AutoSetup are observed/provider runtime facts.
+    tests: [PRJ-DESIRED-PURITY-*, PVD-STATE-FIELD-*]
+    layers: [L0, L3, L7]
+    negative_oracle: program_ssh_calls=0 and remote_fact_desired_fields=0
+    evidence: desired-purity.json
+    serverless_excluded: true
+
+  - id: TECH-PROJECTION-DAG
+    priority: P0
+    source: tech-spec.md#6-environment-stack-resource-graph
+    requirement: Leader and data dependencies are stable, cycles fail before registration, and leader failure prevents follower calls.
+    tests: [PRJ-EC-08, PRJ-EC-13, PRJ-EC-14, PRJ-EC-16, PRJ-COMB-005, PRJ-COMB-006]
+    layers: [L0, L7]
+    negative_oracle: follower_transport_calls=0
+    evidence: projection-dag.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-PURE-CHECK-DIFF
+    priority: P0
+    source: tech-spec.md#91-check
+    requirement: Check and Diff preserve unknown and secret properties and perform no SSH, agent, runtime, or cloud calls.
+    tests: [PVD-DIFF-001, PVD-DIFF-009, PVD-PROPERTY-*]
+    layers: [L3]
+    negative_oracle: transport_call_count=0
+    evidence: provider-purity.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-NO-REPLACE
+    priority: P0
+    source: tech-spec.md#92-diff
+    requirement: Normal Host input changes are in-place and identity changes fail validation instead of replacement.
+    tests: [PVD-DIFF-002, PVD-DIFF-003, PVD-DIFF-004, PVD-DIFF-007, PVD-URN-*]
+    layers: [L3, L7]
+    negative_oracle: replaces=[] and create_before_delete_count=0
+    evidence: provider-diff.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-CREATE-ADOPTION
+    priority: P0
+    source: tech-spec.md#93-create
+    requirement: Create only accepts empty or bootstrap-only Hosts; existing runtime requires explicit import or adoption and tombstones block Create.
+    tests: [PVD-CREATE-*]
+    layers: [L3, L4]
+    negative_oracle: unauthorized_runtime_action_count=0
+    evidence: provider-create.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-READ-ABSENCE
+    priority: P0
+    source: tech-spec.md#94-read
+    requirement: Only an owned completed retire tombstone confirms absence; all other missing, corrupt, unreachable, or incompatible observations preserve the resource ID.
+    tests: [PVD-READ-001, PVD-READ-002, PVD-READ-003, PVD-READ-004, PVD-READ-005, PVD-READ-006, PVD-READ-007, PVD-READ-008, PVD-READ-009, PVD-READ-010, PVD-READ-011]
+    layers: [L3, L5]
+    negative_oracle: mutating_transport_calls=0
+    evidence: provider-read.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-REGISTRY-READ
+    priority: P0
+    source: tech-spec.md#94-read
+    requirement: Read observes owned ProxyRegistry state without mutation and recomputes publication readiness and registry drift.
+    tests: [PVD-REGISTRY-READ-*]
+    layers: [L3]
+    negative_oracle: registry_write_count=0
+    evidence: registry-read.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-REGISTRY-LIFECYCLE
+    priority: P0
+    source: tech-spec.md#92-diff
+    requirement: Registry disabled uses a no-call sentinel; desired/applied or observed/committed revision differences trigger in-place repair; publication readiness is local-ready and registry-ready.
+    tests: [PVD-DIFF-004A, PVD-DIFF-010, PVD-DIFF-011, PVD-DIFF-012, PVD-REGISTRY-READ-*, PVD-IMPORT-REGISTRY-*]
+    layers: [L3, L7]
+    negative_oracle: agent_apply_count=0 for control-only changes and registry_call_count=0 when disabled
+    evidence: registry-lifecycle.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-DRIFT-DOMAINS
+    priority: P0
+    source: tech-spec.md#92-diff
+    requirement: Managed config drift repairs in place while transient health and volatile observations never create a write diff.
+    tests: [PVD-DIFF-005, PVD-DIFF-006, PVD-DIFF-008, PVD-COMB-012]
+    layers: [L3]
+    negative_oracle: health_only_agent_write_count=0
+    evidence: drift-domains.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-IMPORT-READONLY
+    priority: P0
+    source: tech-spec.md#97-import
+    requirement: Program-first Import preserves nested secret inputs, reconstructs distinct revision domains, and performs only read operations.
+    tests: [PVD-IMPORT-MATCH, PVD-IMPORT-DESIRED-DIFF, PVD-IMPORT-BASELINE-UNKNOWN, PVD-IMPORT-SECRET]
+    layers: [L3, L7]
+    negative_oracle: apply_retire_recover_registry_write_count=0
+    evidence: pulumi-import.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-RESTART-RECOVERY
+    priority: P0
+    source: tech-spec.md#95-update
+    requirement: Provider and Pulumi process loss before any response does not allocate a second operation or repeat an external effect.
+    tests: [PVD-RESTART-001, PVD-RESTART-002, PVD-RESTART-003]
+    layers: [L4]
+    negative_oracle: journal_count=1 and non_idempotent_action_count=1
+    evidence: provider-restart.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-DELETE-GATE
+    priority: P0
+    source: tech-spec.md#96-delete
+    requirement: Invalid retirement attempts perform zero Provider mutations and raw Pulumi deletion is blocked by protect before any delete call.
+    tests: [PVD-DELETE-*, PULUMI-PROTECT-RAW-*]
+    layers: [L3, L7]
+    negative_oracle: upstream_delete_count=0 and host_delete_count=0 and ssh_call_count=0
+    evidence: retire-gate.json
+    serverless_excluded: true
+
+  - id: TECH-PROVIDER-RETIRE-PLAN
+    priority: P0
+    source: tech-spec.md#96-delete
+    requirement: Retirement executes the exact saved plan, orders publication then registry then Host, and reprotects every surviving URN.
+    tests: [RETIRE-PLAN-*, RETIRE-REPROTECT-*]
+    layers: [L7]
+    negative_oracle: unapproved_urn_mutations=0
+    evidence: retire-plan.json
+    serverless_excluded: true
+
+  - id: TECH-SSH-FINAL-SAFETY
+    priority: P0
+    source: tech-spec.md#10-system-openssh-transport
+    requirement: Every direct Provider SSH execution enforces strict host keys, disables forwarding, local commands, multiplexing, updates, and environment forwarding.
+    tests: [SSH-SAFE-*, SSH-CONN-003, SSH-CONN-004, SSH-CONN-008]
+    layers: [L3, L5]
+    negative_oracle: agent_rpc_count=0 for rejected config and known_hosts_digest_unchanged=true
+    evidence: openssh-safety.json
+    serverless_excluded: true
+
+  - id: TECH-SSH-MINIMUM-ENV
+    priority: P0
+    source: tech-spec.md#10-system-openssh-transport
+    requirement: SSH inherits only the explicit environment allowlist and only a validated SSH_AUTH_SOCK.
+    tests: [SSH-ENV-*, SEC-CANARY-SSH]
+    layers: [L2, L5]
+    negative_oracle: forbidden_env_canary_matches=0
+    evidence: ssh-environment.json
+    serverless_excluded: true
+
+  - id: TECH-SSH-FRAMING-DEADLINE
+    priority: P0
+    source: tech-spec.md#10-system-openssh-transport
+    requirement: RPC uses bounded single-frame JSON, whole-operation deadlines, process-group cancellation, and unknown-result classification after any possible write.
+    tests: [SSH-FRAME-*, SSH-TRANSPORT-CUT-*, SSH-CONN-006]
+    layers: [L2, L5]
+    negative_oracle: residual_processes=0 and duplicate_operation_count=0
+    evidence: ssh-framing.json
+    serverless_excluded: true
+
+  - id: TECH-PERMISSION-MODEL
+    priority: P0
+    source: tech-spec.md#10-system-openssh-transport
+    requirement: Bootstrap, sudoers, dedicated UID/GID, Docker access, root helper commands, paths, ownership, and modes match the frozen matrix.
+    tests: [SSH-CONN-009, SSH-CONN-010, SSH-CONN-011, SSH-CONN-012, PERM-MULTIUID-*]
+    layers: [L2, L5, L7]
+    negative_oracle: runtime_action_count=0 on any permission mismatch
+    evidence: permissions.json
+    serverless_excluded: true
+
+  - id: TECH-BUNDLE-CONTENT-ADDRESS
+    priority: P0
+    source: tech-spec.md#11-bootstrap-and-bundle
+    requirement: Bundle upload is operation-independent, content-addressed, bounded, verified, atomic, and safe to repeat before Apply.
+    tests: [BUNDLE-STAGE-*, BUNDLE-UPGRADE-*]
+    layers: [L2, L4]
+    negative_oracle: runtime_mutation_count=0 during StageBundle
+    evidence: bundle-stage.json
+    serverless_excluded: true
+
+  - id: TECH-RPC-FINGERPRINT
+    priority: P0
+    source: tech-spec.md#12-host-rpc-v1
+    requirement: First begin omits the Agent fingerprint; Agent computes an authoritative domain-separated HMAC and assigns the random operation ID under lock.
+    tests: [RPC-BEGIN-*, PVD-RESTART-001]
+    layers: [L1, L2, L4]
+    negative_oracle: provider_generated_fingerprint_count=0 and duplicate_operation_count=0
+    evidence: rpc-identity.json
+    serverless_excluded: true
+
+  - id: TECH-RPC-COMPATIBILITY
+    priority: P1
+    source: tech-spec.md#12-host-rpc-v1
+    requirement: Protocol min/max is 1, bundle format is 1, strict decoding is used, and incompatible versions fail before mutation.
+    tests: [RPC-VERSION-*, RPC-JSON-*]
+    layers: [L1, L2]
+    negative_oracle: runtime_mutation_count=0
+    evidence: rpc-compatibility.json
+    serverless_excluded: true
+
+  - id: TECH-APPROVAL-DURABLE
+    priority: P0
+    source: tech-spec.md#15-connection-identity-and-approval
+    requirement: Ed25519 approvals are durably bound once to a new operation before side effects and remain resumable only by that operation.
+    tests: [APPROVAL-*, PVD-RESTART-002]
+    layers: [L1, L3, L4]
+    negative_oracle: unauthorized_effect_count=0 and duplicate_binding_count=0
+    evidence: approvals.json
+    serverless_excluded: true
+
+  - id: TECH-JOURNAL-DURABILITY
+    priority: P0
+    source: tech-spec.md#13-operation-journal
+    requirement: Every phase and external effect is persisted as intent, observe, act, verify, complete and recovers observe-before-act.
+    tests: [JRN-PHASE-*, JRN-F01, JRN-F02, JRN-F03, JRN-F04, JRN-F05, JRN-F06, JRN-F07]
+    layers: [L1, L6]
+    negative_oracle: non_idempotent_action_count_lte=1
+    evidence: journal-fault-matrix.json
+    serverless_excluded: true
+
+  - id: TECH-JOURNAL-SUCCESSOR
+    priority: P0
+    source: tech-spec.md#95-update
+    requirement: Current transition enforces the frozen successor table and preserves the predecessor chain across A to B to C.
+    tests: [JRN-TRANSITION-*]
+    layers: [L1, L4]
+    negative_oracle: parallel_current_transitions=0
+    evidence: transition-table.json
+    serverless_excluded: true
+
+  - id: TECH-JOURNAL-GC
+    priority: P1
+    source: tech-spec.md#13-operation-journal
+    requirement: Terminal retention is at least 90 days and latest 128, index capacity is 512, and nonterminal and retire evidence are never collected.
+    tests: [JRN-GC-*, JRN-INDEX-*]
+    layers: [L1]
+    negative_oracle: nonterminal_gc_count=0 and retire_gc_count=0
+    evidence: journal-gc.json
+    serverless_excluded: true
+
+  - id: TECH-INSPECT-READONLY
+    priority: P0
+    source: tech-spec.md#14-host-agent-reconcile
+    requirement: Inspect observes all owned state and drift classes without lock-based repair or any mutation.
+    tests: [AGENT-INSPECT-*]
+    layers: [L1, L6]
+    negative_oracle: filesystem_digest_unchanged=true and runtime_action_count=0
+    evidence: agent-inspect.json
+    serverless_excluded: true
+
+  - id: TECH-RUNTIME-BLUEGREEN
+    priority: P0
+    source: tech-spec.md#141-app-update
+    requirement: Blue-green update preserves active service, copies only nonsecret markers, switches route after health, and rolls back every failed boundary.
+    tests: [RUNTIME-SLOT-*, PVD-COMB-007]
+    layers: [L1, L6]
+    negative_oracle: duplicate_bootstrap_count=0 and data_sentinel_unchanged=true
+    evidence: runtime-bluegreen.json
+    serverless_excluded: true
+
+  - id: TECH-RUNTIME-EDGE-CONNECTOR
+    priority: P1
+    source: tech-spec.md#143-microsocks
+    requirement: Traefik, local proxy, firewall, and tunnel connector reconcile only explicitly owned local runtime and never call a serverless provider API.
+    tests: [RUNTIME-EDGE-*, RUNTIME-CONNECTOR-*, PROXY-LOCAL-*, PROXY-FIREWALL-*]
+    layers: [L1, L6]
+    negative_oracle: unowned_runtime_mutations=0 and serverless_provider_calls=0
+    evidence: runtime-edge-connector.json
+    serverless_excluded: true
+
+  - id: TECH-DATA-APPROVAL
+    priority: P0
+    source: tech-spec.md#142-data-services
+    requirement: Data mode or connection identity changes require a valid approval before render, Docker, route, or secret mutation.
+    tests: [DATA-LINK-*, APPROVAL-*]
+    layers: [L1, L3]
+    negative_oracle: preapproval_side_effect_count=0
+    evidence: data-link.json
+    serverless_excluded: true
+
+  - id: TECH-DATA-PRESERVE
+    priority: P0
+    source: tech-spec.md#18-retirement
+    requirement: Update, failure, recovery, and retirement never delete volumes, data roots, cloud data, or business tables.
+    tests: [DATA-PRESERVE-*, RETIRE-PRESERVE-*]
+    layers: [L1, L6, L7]
+    negative_oracle: forbidden_delete_count=0 and data_sentinel_unchanged=true
+    evidence: preserve-data.json
+    serverless_excluded: true
+
+  - id: TECH-SECRET-DOMAIN-SEPARATION
+    priority: P0
+    source: tech-spec.md#15-connection-identity-and-approval
+    requirement: Host master key derives separate keys for secret revision, request fingerprint, and approval binding and key anomalies fail closed.
+    tests: [SEC-HKDF-*, SEC-HMAC-RECOVERY-*]
+    layers: [L0, L1]
+    negative_oracle: secret_rewrite_count=0
+    evidence: secret-keys.json
+    serverless_excluded: true
+
+  - id: TECH-SECRET-NO-LEAK
+    priority: P0
+    source: tech-spec.md#19-observability-and-evidence
+    requirement: Secrets never enter forbidden state, logs, frames, argv, generic environments, errors, evidence, or Docker inspection output.
+    tests: [SEC-CANARY-*, SEC-MUTATION-*]
+    layers: [L0, L1, L2, L3, L4, L5, L6, L7]
+    negative_oracle: forbidden_canary_matches=0 and critical_mutation_score=100
+    evidence: secret-scan.json
+    serverless_excluded: true
+
+  - id: TECH-MIGRATION-SINGLE-WRITER
+    priority: P0
+    source: tech-spec.md#17-legacy-takeover-and-writer-freeze
+    requirement: A verified legacy bridge and the shared lock plus ownership epoch prevent old and new writers from interleaving effects.
+    tests: [MIG-OWN-001, MIG-OWN-002, MIG-OWN-003, MIG-OWN-004, MIG-OWN-005, MIG-OWN-006, PERM-MULTIUID-*]
+    layers: [L7]
+    negative_oracle: concurrent_side_effect_traces=0
+    evidence: migration-writer.json
+    serverless_excluded: true
+
+  - id: TECH-LEGACY-ADAPTER-READONLY
+    priority: P0
+    source: tech-spec.md#17-legacy-takeover-and-writer-freeze
+    requirement: Legacy projection and shadow inspection are read-only and the new and old layouts are never ordinary dual-write facts.
+    tests: [MIG-LEGACY-READ-*, MIG-OWN-*]
+    layers: [L1, L7]
+    negative_oracle: shadow_mutation_count=0 and dual_write_count=0
+    evidence: legacy-adapter.json
+    serverless_excluded: true
+
+  - id: TECH-CLI-SOPS-CONTROL
+    priority: P0
+    source: tech-spec.md#16-cli-contract
+    requirement: CLI fixes Pulumi argv, backend, working directory, minimal environment, SOPS handling, private approval files, exit propagation, and evidence redaction.
+    tests: [CLI-CONTRACT-*, SEC-CANARY-CLI]
+    layers: [L2, L7]
+    negative_oracle: plaintext_secret_matches=0 and swallowed_exit_count=0
+    evidence: cli-contract.json
+    serverless_excluded: true
+
+  - id: TECH-EFFECT-REGISTRY-COMPLETE
+    priority: P0
+    source: tech-spec.md#14-host-agent-reconcile
+    requirement: Every production mutation adapter and recoverable leaf substep maps bidirectionally to side-effects.yaml and an executed fault test.
+    tests: [MANIFEST-EFFECT-BIDIRECTIONAL, MANIFEST-EFFECT-PHASE, JRN-PHASE-*]
+    layers: [L0, L1]
+    negative_oracle: unmapped_production_effects=0 and orphan_manifest_effects=0
+    evidence: effect-registry.json
+    serverless_excluded: true
+
+  - id: TECH-STATE-IDENTITY-FIELDS
+    priority: P0
+    source: tech-spec.md#94-read
+    requirement: Installation, owner, epoch, local revision, registry revision, readiness, and secret revision fields each preserve no-op, input-diff, observed-drift, Import, and unknown semantics.
+    tests: [PVD-STATE-FIELD-*]
+    layers: [L3, L7]
+    negative_oracle: desired_remote_fact_reads=0 and state_secret_downgrades=0
+    evidence: state-fields.json
+    serverless_excluded: true
+
+  - id: TECH-RETIRE-TOMBSTONE
+    priority: P0
+    source: tech-spec.md#18-retirement
+    requirement: Retirement leaves immutable identity and preserved inventory evidence that blocks Create and allows response-loss recovery.
+    tests: [RETIRE-TOMBSTONE-*, RET-COMB-009]
+    layers: [L1, L3, L4, L7]
+    negative_oracle: post_retire_runtime_create_count=0
+    evidence: retire-tombstone.json
+    serverless_excluded: true
+
+  - id: TECH-RETIRE-SECRET-POLICY
+    priority: P1
+    source: tech-spec.md#18-retirement
+    requirement: Identity, ownership, master key, tombstone, and nonsecret evidence remain; generated credentials and managed container secret surfaces are removed.
+    tests: [RETIRE-SECRET-*]
+    layers: [L1, L6]
+    negative_oracle: retired_runtime_secret_matches=0
+    evidence: retire-secrets.json
+    serverless_excluded: true
+
+  - id: TECH-SERVERLESS-EXCLUDED
+    priority: P0
+    source: tech-spec.md#1-conclusion
+    requirement: Controller results do not claim Cloudflare, Neon, or Upstash CRUD, import, availability, quota, or public endpoint behavior was tested.
+    tests: [SCOPE-SERVERLESS-EXCLUDED]
+    layers: [L0]
+    negative_oracle: serverless_provider_test_count=0 and false_integration_claims=0
+    evidence: scope-report.json
+    serverless_excluded: true

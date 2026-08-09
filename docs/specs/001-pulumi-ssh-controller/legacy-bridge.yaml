@@ -1,0 +1,115 @@
+version: 1
+topic: 001-pulumi-ssh-controller
+status: ready-for-implementation
+lock:
+  path: /var/lock/sub2api-deploy/host.lock
+  inheritance_env: SUB2API_BRIDGE_LOCK_FD
+  token_env: SUB2API_BRIDGE_TOKEN
+  rule: The outermost entrypoint locks and records inode/epoch; nested scripts validate the inherited FD, token, inode, and epoch instead of locking again.
+attestation:
+  fields: [release_sha256, manifest_sha256, installed_by_old_owner, entrypoint_scan_digest]
+  takeover_requires_all_entries_verified: true
+
+entrypoints:
+  - path: scripts/reconcile-edge.sh
+    kind: top-level-or-nested
+    callers: [legacy-pulumi]
+    checkpoints: [edge-observed, edge-reconciled]
+    effect_ids: [FX-EDGE-RUNTIME]
+  - path: scripts/reconcile-site.sh
+    kind: top-level-or-nested
+    callers: [legacy-pulumi]
+    checkpoints: [app-observed, app-reconciled]
+    effect_ids: [FX-DATA-RECONCILE, FX-APP-SLOT-START, FX-APP-BOOTSTRAP, FX-ROUTE-SWITCH, FX-OLD-SLOT-STOP]
+  - path: scripts/bootstrap-site.sh
+    kind: top-level-or-nested
+    callers: [scripts/application-release.sh]
+    checkpoints: [bootstrap-intent, bootstrap-verified]
+    effect_ids: [FX-DATA-RECONCILE, FX-APP-SLOT-START, FX-APP-BOOTSTRAP, FX-ROUTE-SWITCH]
+  - path: scripts/application-release.sh
+    kind: top-level
+    callers: [legacy-pulumi]
+    checkpoints: [release-intent, release-complete]
+    effect_ids: [FX-INACTIVE-STOP, FX-MARKER-COPY, FX-APP-SLOT-START, FX-ROUTE-SWITCH, FX-OLD-SLOT-STOP]
+  - path: scripts/switch-slot.sh
+    kind: top-level-or-nested
+    callers: [scripts/application-release.sh]
+    checkpoints: [route-intent, route-verified]
+    effect_ids: [FX-ROUTE-SWITCH]
+  - path: scripts/rollback-slot.sh
+    kind: top-level-or-nested
+    callers: [legacy-pulumi]
+    checkpoints: [rollback-intent, rollback-verified]
+    effect_ids: [FX-ROUTE-SWITCH]
+  - path: scripts/finalize-host-state.sh
+    kind: top-level-or-nested
+    callers: [legacy-pulumi]
+    checkpoints: [state-intent, state-fsynced]
+    effect_ids: [FX-HOST-STATE-COMMIT]
+  - path: scripts/adopt-single-site-layout.sh
+    kind: top-level
+    callers: [legacy-pulumi]
+    checkpoints: [adoption-intent, adoption-verified]
+    effect_ids: [FX-OWNERSHIP-TAKEOVER, FX-RENDER-FILES]
+
+  - path: scripts/write-host-state.cjs
+    kind: nested-leaf-or-direct
+    callers: [scripts/finalize-host-state.sh, scripts/adopt-single-site-layout.sh]
+    checkpoints: [host-state-write-intent, host-state-fsynced]
+    effect_ids: [FX-HOST-STATE-COMMIT]
+  - path: scripts/write-host-state.ts
+    kind: nested-leaf-or-direct
+    callers: [legacy-tests-or-manual]
+    checkpoints: [host-state-write-intent, host-state-fsynced]
+    effect_ids: [FX-HOST-STATE-COMMIT]
+  - path: scripts/write-deploy-state.ts
+    kind: nested-leaf-or-direct
+    callers: [scripts/bootstrap-site.sh, scripts/switch-slot.sh, scripts/rollback-slot.sh, scripts/deployment-mode.ts]
+    checkpoints: [deploy-state-write-intent, deploy-state-fsynced]
+    effect_ids: [FX-HOST-STATE-COMMIT]
+  - path: scripts/write-bootstrap-marker.ts
+    kind: nested-leaf-or-direct
+    callers: [scripts/bootstrap-site.sh]
+    checkpoints: [bootstrap-marker-intent, bootstrap-marker-fsynced]
+    effect_ids: [FX-APP-BOOTSTRAP]
+  - path: scripts/render-site-route.ts
+    kind: nested-leaf-or-direct
+    callers: [scripts/reconcile-site.sh, scripts/bootstrap-site.sh, scripts/switch-slot.sh, scripts/rollback-slot.sh, scripts/adopt-single-site-layout.sh]
+    checkpoints: [route-render-intent, route-fsynced]
+    effect_ids: [FX-ROUTE-SWITCH]
+  - path: scripts/render-runtime-env.ts
+    kind: nested-leaf-or-direct
+    callers: [scripts/reconcile-edge.sh, scripts/reconcile-site.sh, scripts/bootstrap-site.sh, scripts/adopt-single-site-layout.sh]
+    checkpoints: [runtime-env-intent, runtime-env-fsynced]
+    effect_ids: [FX-SECRET-FILE-REPLACE, FX-RENDER-FILES]
+  - path: scripts/render-edge-config.ts
+    kind: nested-leaf-or-direct
+    callers: [scripts/reconcile-edge.sh, scripts/adopt-single-site-layout.sh]
+    checkpoints: [edge-config-intent, edge-config-fsynced]
+    effect_ids: [FX-RENDER-FILES]
+  - path: scripts/render-traefik-config.ts
+    kind: nested-leaf-or-direct
+    callers: [manual, scripts/render-edge-config.ts]
+    checkpoints: [traefik-config-write-intent, traefik-config-fsynced]
+    effect_ids: [FX-RENDER-FILES]
+  - path: scripts/site-compose-common.sh
+    kind: nested-library-or-direct
+    callers: [scripts/reconcile-site.sh, scripts/bootstrap-site.sh, scripts/application-release.sh, scripts/switch-slot.sh, scripts/rollback-slot.sh]
+    checkpoints: [compose-stop-intent, compose-stop-verified]
+    effect_ids: [FX-OLD-SLOT-STOP]
+  - path: scripts/deployment-mode.ts
+    kind: nested-leaf-or-direct
+    callers: [legacy-pulumi, manual]
+    checkpoints: [deployment-mode-intent, deployment-mode-fsynced]
+    effect_ids: [FX-HOST-STATE-COMMIT]
+
+discovery:
+  scan_rules:
+    - all executable files in scripts and release bundle
+    - all direct writers of host-state, deploy-state, route, Compose, Docker, nftables, or ownership files
+  unlisted_mutation_entrypoint_is_error: true
+  unlisted_direct_writer_count_must_equal: 0
+  direct_internal_invocation_acquires_lock: true
+  nested_invocation_requires_inherited_fd: true
+  reread_epoch_before_each_effect: true
+  close_fd_on_exit_and_signal: true
