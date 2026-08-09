@@ -1,0 +1,483 @@
+version: 1
+topic: 001-pulumi-ssh-controller
+status: ready-for-implementation
+contract: Every production mutation adapter exposes exactly one effect_id; CI counts each declared leaf substep as the recoverable side-effect unit. Effects without substeps are one leaf. Step instances operate on exactly one target object.
+scope:
+  included: externally observable runtime changes, authorization/ownership/control-ledger changes, bootstrap, bundle install, and Pulumi protection/plan operations
+  journal_rule: journal, pointer, and transition-index writes are generated durability checkpoints for every phase/effect and are covered by JRN-F01..F07 rather than duplicated as business effects
+  rollback_rule: rollback uses the original effect or leaf-substep ID with recovery=true and its own intent/observe/act/verify/complete checkpoint
+  future_work: rekey-host and re-adopt are not implemented in topic 001; all current CLI/RPC requests for them fail closed
+
+effects:
+  - id: FX-HOST-BOOTSTRAP
+    owner: cli-bootstrap
+    phase: bootstrap
+    operation: bootstrap-host
+    intent_record: local bootstrap ledger with environment, Host identity, issuer key ID, bundle SHA, and resolved SSH user
+    observe: inspect existing user/group, sudoers, directories, installation identity, and binary digest
+    act: create the dedicated account and fixed policy paths and install the verified initial binary
+    verify: UID/GID/mode/sudo allow-deny matrix and read-only version/inspect
+    idempotency_key: environment-host-installation-id-and-bundle-sha
+    recovery: matching installation resumes; partial or conflicting identity is recovery-required
+    substeps:
+      - id: FX-HOST-BOOTSTRAP-IDENTITY
+        phase: bootstrap-identity
+        act: create dedicated group/user and record UID/GID
+        checkpoint: identity-created
+        tests: [FX-HOST-BOOTSTRAP-IDENTITY-*]
+      - id: FX-HOST-BOOTSTRAP-DIRECTORIES
+        phase: bootstrap-directories
+        act: create and chown the frozen directory/mode matrix
+        checkpoint: directories-created
+        tests: [FX-HOST-BOOTSTRAP-DIRECTORIES-*]
+      - id: FX-HOST-BOOTSTRAP-POLICY
+        phase: bootstrap-policy
+        act: install issuer public key and exact sudoers policy
+        checkpoint: policy-installed
+        tests: [FX-HOST-BOOTSTRAP-POLICY-*]
+      - id: FX-HOST-BOOTSTRAP-INSTALLATION
+        phase: bootstrap-installation
+        act: atomically write immutable installation identity and master key
+        checkpoint: installation-created
+        tests: [FX-HOST-BOOTSTRAP-INSTALLATION-*]
+      - id: FX-HOST-BOOTSTRAP-BINARY
+        phase: bootstrap-binary
+        act: install and verify the initial Agent binary
+        checkpoint: binary-installed
+        tests: [FX-HOST-BOOTSTRAP-BINARY-*]
+    tests: [FX-HOST-BOOTSTRAP-*, PERM-MULTIUID-*]
+
+  - id: FX-APPROVAL-BIND
+    owner: agent
+    phase: validate
+    operation: approval consumption store bind
+    intent_record: verified subject hash, approvalId, issuer key ID, and candidate operation ID
+    observe: read durable consumption entry and current transition under the writer lock
+    act: atomically bind an unused approvalId to the new operation
+    verify: re-read unique binding before the first runtime effect
+    idempotency_key: issuer-key-id-and-approval-id
+    recovery: same operation resumes; any successor or other subject is rejected
+    tests: [FX-APPROVAL-BIND-*, APPROVAL-*, PVD-RESTART-002]
+
+  - id: FX-OWNERSHIP-TAKEOVER
+    owner: cli-and-root-helper
+    phase: migration
+    operation: takeover ownership epoch
+    intent_record: old owner, new owner, old epoch, bridge proof, and migration ledger ID
+    observe: acquire common lock and re-read ownership.json plus old writer status
+    act: atomically increment epoch and write the new owner
+    verify: all mutation entrypoints observe the new epoch and the old writer cannot act
+    idempotency_key: installation-id-and-target-owner-and-target-epoch
+    recovery: matching owner/epoch is complete; ambiguous bridge or writer state blocks takeover
+    tests: [FX-OWNERSHIP-*, MIG-OWN-*, PERM-MULTIUID-*]
+
+  - id: FX-RETIRE-LEASE-ACQUIRE
+    owner: cli-retire
+    phase: lease-acquired
+    operation: acquire environment control lease
+    intent_record: environment, stack ID, controller instance ID, backend version, and lease generation
+    observe: read lock, ledger, holder liveness metadata, and backend version
+    act: atomically create or renew the exclusive durable lease
+    verify: re-read holder/generation before every control mutation
+    idempotency_key: environment-stack-controller-instance-and-generation
+    recovery: same holder resumes; stale takeover requires explicit recovery and backend-version match
+    tests: [FX-RETIRE-LEASE-ACQUIRE-*, RETIRE-CONTROL-RESTART-*]
+
+  - id: FX-RETIRE-LEASE-RELEASE
+    owner: cli-retire
+    phase: complete
+    operation: release environment control lease
+    intent_record: completed transaction ID and current lease generation
+    observe: prove transaction terminal and all surviving URNs protected
+    act: atomically mark lease released without deleting transaction evidence
+    verify: read-back released generation and terminal ledger
+    idempotency_key: environment-transaction-and-lease-generation
+    recovery: already released is complete; nonterminal transaction cannot release
+    tests: [FX-RETIRE-LEASE-RELEASE-*, RETIRE-CONTROL-RESTART-*]
+
+  - id: FX-PULUMI-PROTECTION
+    owner: cli-retire
+    phase: provider-retire
+    operation: exact URN unprotect and finally reprotect
+    intent_record: control transaction ID, old checkpoint digest, retire approvalId, approved URN set, and prior protection state
+    observe: query exact URNs, backend version, and durable control binding
+    act: unprotect only the approved set; finally reprotect every surviving URN
+    verify: engine state matches the intended protection matrix
+    idempotency_key: control-transaction-id-checkpoint-digest-and-approved-urn-set
+    recovery: reprotect retry only; failure writes recovery-required control ledger
+    substeps:
+      - id: FX-PULUMI-UNPROTECT
+        phase: unprotected
+        act: unprotect only the approved URN allowlist
+        checkpoint: unprotected
+        tests: [FX-PULUMI-UNPROTECT-*]
+      - id: FX-PULUMI-REPROTECT
+        phase: surviving-urns-reprotected
+        act: reprotect and read back each surviving approved URN
+        checkpoint: reprotected
+        tests: [FX-PULUMI-REPROTECT-*]
+    tests: [FX-PULUMI-PROTECTION-*, RETIRE-PLAN-*, RETIRE-REPROTECT-*]
+
+  - id: FX-RETIRE-CONTROL-BIND
+    owner: cli-retire
+    phase: approval-bound-control
+    operation: bind retire approval in durable control ledger
+    intent_record: approvalId, Host, owner epoch, backend version, and checkpoint digest
+    observe: read environment lease, consumption store, checkpoint version, and prior transaction
+    act: atomically bind the approvalId to the retire transaction before unprotect
+    verify: re-read unique binding and active lease
+    idempotency_key: stack-host-owner-epoch-and-approval-id
+    recovery: same transaction resumes; reuse by any other transaction is rejected
+    tests: [FX-RETIRE-CONTROL-BIND-*, RETIRE-CONTROL-RESTART-*]
+
+  - id: FX-RETIRE-CHECKPOINT-EXPORT
+    owner: cli-retire
+    phase: checkpoint-exported
+    operation: encrypted Pulumi checkpoint export
+    intent_record: stack identity and backend version
+    observe: query backend version and existing encrypted export digest
+    act: export checkpoint to a 0600 temporary artifact
+    verify: parse metadata, scan handling policy, and persist only digest/version in ledger
+    idempotency_key: stack-id-and-backend-version
+    recovery: matching digest reuses export; changed backend version starts a successor transaction
+    tests: [FX-RETIRE-CHECKPOINT-*, RETIRE-CONTROL-RESTART-*]
+
+  - id: FX-RETIRE-PLAN-SAVE
+    owner: cli-retire
+    phase: successor-plan-saved
+    operation: pulumi preview --save-plan after unprotect
+    intent_record: checkpoint digest, predecessor plan digest, and URN/op/property allowlist
+    observe: confirm backend version and current protection state
+    act: create a 0600 saved plan and public JSON event stream
+    verify: every planned operation and changed property path is allowlisted; persist plan digest
+    idempotency_key: stack-checkpoint-digest-and-allowlist-digest
+    recovery: partial checkpoint invalidates old plan and creates a ledger-linked successor plan
+    tests: [FX-RETIRE-PLAN-*, RETIRE-PLAN-*]
+
+  - id: FX-RETIRE-PLAN-APPLY
+    owner: cli-retire
+    phase: publication-detached
+    operation: pulumi up --plan
+    intent_record: saved plan digest, generating checkpoint digest, and control approval binding
+    observe: verify backend version and plan/checkpoint binding immediately before execution
+    act: execute the exact saved plan
+    verify: refresh and classify publication detach, registry delete, and Host retirement checkpoints
+    idempotency_key: stack-plan-digest-and-control-transaction-id
+    recovery: never replay against a changed checkpoint; reprotect then generate a constrained successor plan
+    tests: [FX-RETIRE-PLAN-APPLY-*, RETIRE-PARTIAL-*]
+
+  - id: FX-BUNDLE-UPLOAD
+    owner: provider-transport
+    phase: pre-operation
+    operation: StageBundle
+    intent_record: local transfer trace keyed by bundle SHA and 32-hex dropbox basename
+    observe: lstat content-addressed final target and dropbox temp without following links
+    act: strict scp to the group dropbox then stage-bundle RPC atomically renames after verification
+    verify: re-read final regular-file size, SHA-256, arch, owner, group, and mode
+    idempotency_key: bundle-sha256
+    recovery: discard invalid temp; reuse matching final digest; conflict on mismatched content
+    tests: [BUNDLE-STAGE-*]
+
+  - id: FX-RELEASE-INSTALL
+    owner: agent-root-helper
+    phase: stage-bundle
+    operation: RuntimeSteps.StageRelease
+    intent_record: operation journal step with bundle SHA, arch, and target release
+    observe: inspect inbox digest, release directory, and binary protocol
+    act: install verified release and atomically switch binary symlink
+    verify: lstat ownership/mode/target and execute read-only version
+    idempotency_key: installation-id-and-bundle-sha
+    recovery: matching release is complete; partial or ambiguous install is recovery-required
+    tests: [FX-RELEASE-INSTALL-*, JRN-PHASE-STAGE-BUNDLE-*]
+
+  - id: FX-RENDER-FILES
+    owner: agent
+    phase: render
+    operation: RuntimeSteps.RenderNonSecretFiles
+    intent_record: canonical desired revision and staging root
+    observe: hash owned generated files and validate path containment
+    act: build staging tree and atomically replace owned generated files
+    verify: parse configs, check ownership/mode, and compare canonical hashes
+    idempotency_key: host-id-and-desired-revision
+    recovery: reuse verified staging tree or rebuild; never overwrite unowned path
+    tests: [FX-RENDER-FILES-*, JRN-PHASE-RENDER-*]
+
+  - id: FX-SECRET-FILE-REPLACE
+    owner: agent
+    phase: render
+    operation: RuntimeSteps.WriteSecretFiles
+    intent_record: opaque secret revision and destination identity only
+    observe: lstat regular file, mode, owner, and current opaque revision
+    act: write 0600 temporary file from request memory and atomically replace
+    verify: recompute domain-separated secret revision without logging content
+    idempotency_key: host-id-path-and-secret-revision
+    recovery: matching revision is complete; key or link anomaly is recovery-required
+    tests: [FX-SECRET-FILE-*, SEC-CANARY-*]
+
+  - id: FX-DATA-RECONCILE
+    owner: agent
+    phase: reconcile-data
+    operation: RuntimeSteps.ReconcileData (one DataServiceDesired per invocation)
+    intent_record: service identity, owned object names, desired image/config, and approval binding
+    observe: inspect owned container, volume, network, health, and data sentinel metadata
+    act: create/start/update owned PostgreSQL or Redis runtime without volume deletion
+    verify: ownership labels, connection identity, health, volume identity, and sentinel unchanged
+    idempotency_key: host-id-service-and-desired-revision
+    recovery: observe-before-act; collision or missing preserved volume is recovery-required
+    tests: [FX-DATA-*, DATA-PRESERVE-*, JRN-PHASE-RECONCILE-DATA-*]
+
+  - id: FX-EDGE-RUNTIME
+    owner: agent
+    phase: reconcile-app
+    operation: RuntimeSteps.ReconcileEdgeRuntime
+    intent_record: owned Traefik project, image, config revision, and network identity
+    observe: inspect owned container/network/config and local health
+    act: create/start/update only the owned edge runtime
+    verify: ownership labels, image/config revision, network, and local health
+    idempotency_key: host-id-and-edge-desired-revision
+    recovery: reuse matching runtime; unowned collision or ambiguous route state blocks action
+    tests: [FX-EDGE-RUNTIME-*, RUNTIME-EDGE-*]
+
+  - id: FX-INACTIVE-STOP
+    owner: agent
+    phase: reconcile-app
+    operation: RuntimeSteps.StopInactive
+    intent_record: app identity, inactive slot, and observed ownership
+    observe: inspect inactive container/image/labels and active route
+    act: stop only the owned inactive slot
+    verify: inactive stopped and active route/container unchanged
+    idempotency_key: host-id-app-and-inactive-slot
+    recovery: already stopped is complete; ownership mismatch fails closed
+    tests: [FX-INACTIVE-STOP-*, RUNTIME-SLOT-*]
+
+  - id: FX-MARKER-COPY
+    owner: agent
+    phase: reconcile-app
+    operation: RuntimeSteps.CopyActiveMarkers
+    intent_record: app, source slot, target slot, and nonsecret marker hashes
+    observe: lstat and hash active config.yaml and .installed; reject links and secret files
+    act: copy into staging and atomically install for inactive slot
+    verify: target hashes/modes match and active inode/hash is unchanged
+    idempotency_key: app-and-marker-hash-set
+    recovery: reuse verified target; discard invalid staging; never copy secret files
+    tests: [FX-MARKER-COPY-*, RUNTIME-MARKER-*]
+
+  - id: FX-APP-SLOT-START
+    owner: agent
+    phase: reconcile-app
+    operation: RuntimeSteps.StartAppSlot
+    intent_record: app, inactive slot, image digest, config revision, and ownership
+    observe: inspect container, labels, image, and health
+    act: create or start the owned inactive slot using env-file path
+    verify: labels/image/config and internal probe match desired
+    idempotency_key: host-id-app-slot-and-desired-revision
+    recovery: reuse matching healthy slot; replace only owned mismatched inactive slot
+    tests: [FX-APP-START-*, RUNTIME-SLOT-*]
+
+  - id: FX-APP-BOOTSTRAP
+    owner: agent
+    phase: reconcile-app
+    operation: RuntimeSteps.BootstrapSchema
+    intent_record: app, leader identity, NeedsSetup observation, and approval/secret revision
+    observe: read owned setup marker and application schema readiness
+    act: invoke one bootstrap or schema-migration action
+    verify: setup marker and schema readiness prove completion
+    idempotency_key: host-id-app-and-setup-generation
+    recovery: observe marker before re-act; ambiguous result is recovery-required
+    tests: [FX-APP-BOOTSTRAP-*, PRJ-COMB-001, PRJ-COMB-003]
+
+  - id: FX-ROUTE-SWITCH
+    owner: agent
+    phase: reconcile-app
+    operation: RuntimeSteps.SwitchRoute
+    intent_record: app, previous route revision, and target slot/revision
+    observe: read owned route and both slot health observations
+    act: atomically replace the owned Traefik route
+    verify: direct probe reaches target and route hash matches
+    idempotency_key: host-id-app-and-target-route-revision
+    recovery: matching target is complete; otherwise restore recorded previous route
+    tests: [FX-ROUTE-SWITCH-*, PVD-COMB-007]
+
+  - id: FX-OLD-SLOT-STOP
+    owner: agent
+    phase: reconcile-app
+    operation: RuntimeSteps.StopOldSlot
+    intent_record: app, previous active slot, and committed target route
+    observe: prove target route and target health before touching old slot
+    act: drain and stop the owned previous slot
+    verify: old slot stopped, target route healthy, data sentinel unchanged
+    idempotency_key: app-and-committed-route-revision
+    recovery: already stopped is complete; missing target proof blocks action
+    tests: [FX-OLD-SLOT-STOP-*, RUNTIME-SLOT-*]
+
+  - id: FX-LOCAL-PROXY
+    owner: agent
+    phase: reconcile-proxy-local
+    operation: RuntimeSteps.ReconcileLocalProxy
+    intent_record: owned proxy identity, credential revision, and desired mode
+    observe: inspect process/container ownership and local probe
+    act: create/start/update/stop only the owned local proxy
+    verify: local probe, labels, listen address, and credential revision
+    idempotency_key: host-id-proxy-and-desired-revision
+    recovery: observe-before-act; unowned collision fails closed
+    tests: [FX-LOCAL-PROXY-*, PROXY-LOCAL-*]
+
+  - id: FX-FIREWALL-APPLY
+    owner: agent-root-helper
+    phase: reconcile-proxy-local
+    operation: RuntimeSteps.ApplyFirewall
+    intent_record: owned nftables table identity and canonical rules revision
+    observe: read only the owned table and ownership metadata
+    act: atomically replace the owned table through fixed root-helper command
+    verify: read back canonical rules and ownership
+    idempotency_key: installation-id-table-and-rules-revision
+    recovery: matching rules complete; unowned or ambiguous table is recovery-required
+    tests: [FX-FIREWALL-*, PROXY-FIREWALL-*]
+
+  - id: FX-TUNNEL-CONNECTOR
+    owner: agent
+    phase: reconcile-proxy-local
+    operation: RuntimeSteps.ReconcileConnector
+    intent_record: connector ID, owned runtime identity, image digest, routes, and secret revision
+    observe: inspect owned connector runtime without calling the Cloudflare provider API
+    act: create/start/update/stop only the owned local connector container
+    verify: labels, image, configured routes, secret revision, and local process health
+    idempotency_key: host-id-connector-id-and-desired-revision
+    recovery: observe-before-act; unowned connector collision fails closed
+    tests: [FX-TUNNEL-CONNECTOR-*, RUNTIME-CONNECTOR-*]
+
+  - id: FX-PROXY-REGISTRY-UPSERT
+    owner: provider-proxy-registry
+    phase: provider-registry
+    operation: ProxyRegistry.UpsertOwned
+    intent_record: provider operation trace with fixed record key and desired revision
+    observe: ReadOwned by fixed key and verify ownership metadata
+    act: idempotent create or update of the owned record
+    verify: ReadOwned matches desired revision and ownership
+    idempotency_key: environment-host-record-key
+    recovery: read-after-unknown; never overwrite an unowned record
+    tests: [FX-REGISTRY-UPSERT-*, PVD-RESTART-001]
+
+  - id: FX-PROXY-REGISTRY-DELETE
+    owner: provider-proxy-registry
+    phase: provider-retire
+    operation: ProxyRegistry.DeleteOwned
+    intent_record: saved-plan digest, record key, ownership, and retire approval ID
+    observe: ReadOwned and prove current Host ownership
+    act: delete the owned record
+    verify: ReadOwned confirms absent
+    idempotency_key: environment-host-record-key-and-retire-operation
+    recovery: read-after-unknown; unowned record blocks retirement
+    tests: [FX-REGISTRY-DELETE-*, RETIRE-PLAN-*]
+
+  - id: FX-PROXY-REGISTRY-DISABLE
+    owner: provider-proxy-registry
+    phase: provider-registry
+    operation: ProxyRegistry.DeleteOwned during enabled-to-disabled Update
+    intent_record: Host operation trace, previous owned record key/revision, and disabled desired sentinel
+    observe: ReadOwned and prove previous Host ownership
+    act: delete the owned record without retire approval
+    verify: read-after-unknown confirms absent before all four registry revisions commit to registry-disabled/v1
+    idempotency_key: environment-host-record-key-and-disabled-desired-revision
+    recovery: absent is complete; unowned record or ambiguous ownership fails closed
+    tests: [FX-REGISTRY-DISABLE-*, PVD-REGISTRY-DISABLE-*]
+
+  - id: FX-HOST-STATE-COMMIT
+    owner: agent
+    phase: commit
+    operation: agent commit
+    intent_record: desired, observed, secret, route, and operation revisions
+    observe: read current durable state and current transition
+    act: atomic write, fsync, rename, and directory fsync of host state
+    verify: re-read exact committed revisions and operation reference
+    idempotency_key: operation-id-and-committed-revisions
+    recovery: uncertain durability is recovery-required; never infer from process exit
+    tests: [FX-STATE-COMMIT-*, JRN-PHASE-COMMIT-*]
+
+  - id: FX-RETIRE-RUNTIME
+    owner: agent
+    phase: retire-runtime
+    operation: agent retire
+    intent_record: preserve inventory, owned runtime inventory, and retire approval binding
+    observe: verify ownership and capture volume/bind/data sentinels
+    act: stop/remove only managed app, route, proxy, connector, firewall, and nondata runtime
+    verify: preserved inventory identity unchanged and managed publication runtime absent
+    idempotency_key: host-id-owner-epoch-and-retire-operation
+    recovery: observe each owned object before retry; never remove data or unowned objects
+    substeps:
+      - id: FX-RETIRE-STOP-APP
+        phase: retire-runtime
+        act: stop and remove one owned App slot/container
+        checkpoint: app-target-absent
+        tests: [FX-RETIRE-STOP-APP-*]
+      - id: FX-RETIRE-REMOVE-ROUTE
+        phase: retire-runtime
+        act: remove one owned local route
+        checkpoint: route-target-absent
+        tests: [FX-RETIRE-REMOVE-ROUTE-*]
+      - id: FX-RETIRE-STOP-EDGE
+        phase: retire-runtime
+        act: stop and remove owned Traefik runtime
+        checkpoint: edge-absent
+        tests: [FX-RETIRE-STOP-EDGE-*]
+      - id: FX-RETIRE-STOP-PROXY
+        phase: retire-runtime
+        act: stop and remove one owned MicroSocks runtime
+        checkpoint: proxy-target-absent
+        tests: [FX-RETIRE-STOP-PROXY-*]
+      - id: FX-RETIRE-STOP-CONNECTOR
+        phase: retire-runtime
+        act: stop and remove one owned Tunnel connector
+        checkpoint: connector-target-absent
+        tests: [FX-RETIRE-STOP-CONNECTOR-*]
+      - id: FX-RETIRE-REMOVE-FIREWALL
+        phase: retire-runtime
+        act: remove one owned nftables table
+        checkpoint: firewall-target-absent
+        tests: [FX-RETIRE-REMOVE-FIREWALL-*]
+      - id: FX-RETIRE-STOP-DATA-CONTAINER
+        phase: retire-runtime
+        act: stop and remove one owned PG or Redis container without removing its volume or bind data
+        checkpoint: data-container-absent-volume-present
+        tests: [FX-RETIRE-STOP-DATA-CONTAINER-*]
+      - id: FX-RETIRE-REMOVE-NONDATA-NETWORK
+        phase: retire-runtime
+        act: remove one unshared owned nondata network
+        checkpoint: network-target-absent
+        tests: [FX-RETIRE-REMOVE-NONDATA-NETWORK-*]
+    tests: [FX-RETIRE-RUNTIME-*, RETIRE-PRESERVE-*]
+
+  - id: FX-RETIRE-SECRET-CLEANUP
+    owner: agent
+    phase: retire-secret-cleanup
+    operation: RuntimeSteps.CleanupRetiredSecrets
+    intent_record: generated credential file inventory without content
+    observe: prove all managed secret-consuming containers are stopped
+    act: unlink only owned generated dotenv and credential files
+    verify: files and managed container Config.Env surfaces are absent; master key remains
+    idempotency_key: host-id-and-retire-operation
+    recovery: absent is complete; running consumer or ownership ambiguity blocks cleanup
+    tests: [FX-RETIRE-SECRET-*, RETIRE-SECRET-*]
+
+  - id: FX-RETIRE-TOMBSTONE
+    owner: agent
+    phase: retire-tombstone
+    operation: agent retire commit
+    intent_record: Host identity, owner epoch, preserved inventory hash, approval ID, and operation ID
+    observe: read current tombstone and preserved inventory
+    act: write the immutable tombstone and then remove the active marker as separate checkpoints
+    verify: tombstone matches inventory and Create classifies Host as retired-existing
+    idempotency_key: host-id-owner-epoch-and-retire-operation
+    recovery: matching tombstone proves success; mismatch is recovery-required
+    substeps:
+      - id: FX-RETIRE-WRITE-TOMBSTONE
+        phase: retire-tombstone
+        act: atomically create and fsync immutable retired.json
+        checkpoint: tombstone-written
+        tests: [FX-RETIRE-WRITE-TOMBSTONE-*]
+      - id: FX-RETIRE-REMOVE-MARKER
+        phase: retire-tombstone
+        act: remove and directory-fsync the active management marker
+        checkpoint: active-marker-removed
+        tests: [FX-RETIRE-REMOVE-MARKER-*]
+    tests: [FX-RETIRE-TOMBSTONE-*, RET-COMB-009]

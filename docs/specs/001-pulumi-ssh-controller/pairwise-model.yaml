@@ -1,0 +1,105 @@
+version: pairwise/v1
+status: ready-for-implementation
+generator: sub2api-internal-pairwise/v1
+seed: 20260809
+factors:
+  host_role:
+    - bootstrap_leader
+    - follower
+    - existing
+    - data_only
+    - proxy_only
+  app_count: [0, 1, 2]
+  data_placement:
+    - same_host
+    - other_host
+    - external
+  postgres_mode:
+    - docker
+    - external
+  redis_mode:
+    - docker
+    - external
+  proxy_mode:
+    - disabled
+    - optional
+    - required
+  tunnel_mode:
+    - disabled
+    - connector
+  public_membership:
+    - none
+    - member
+  secret_state:
+    - absent
+    - initial
+    - rotation
+  runtime_state:
+    - empty
+    - healthy
+    - managed_drift
+    - pending_operation
+    - retired
+constraints:
+  - when: host_role in [bootstrap_leader, follower, existing]
+    require: app_count in [1, 2]
+  - when: host_role in [data_only, proxy_only]
+    require: app_count == 0
+  - when: host_role == data_only
+    require: data_placement == same_host and public_membership == none and proxy_mode == disabled
+  - when: host_role == proxy_only
+    require: data_placement == external and postgres_mode == external and redis_mode == external and public_membership == none
+  - when: public_membership == member
+    require: host_role in [bootstrap_leader, follower, existing]
+  - when: data_placement == external
+    require: postgres_mode == external and redis_mode == external
+  - when: host_role == bootstrap_leader
+    require: runtime_state == empty and secret_state == initial
+  - when: host_role == follower
+    require: runtime_state in [empty, healthy]
+  - when: runtime_state == retired
+    require: host_role == existing
+  - when: proxy_mode == disabled
+    require: host_role != proxy_only
+  - when: data_placement == same_host and postgres_mode == external and redis_mode == external
+    forbid: host_role == data_only
+coverage:
+  strength: 2
+  uncovered_pairs_must_equal: 0
+mandatory_higher_order_cases:
+  - id: PRJ-COMB-001
+    factors: {host_role: bootstrap_leader, app_count: 1, data_placement: same_host, postgres_mode: docker, redis_mode: docker, proxy_mode: required, tunnel_mode: connector, public_membership: member, secret_state: initial, runtime_state: empty}
+    oracle: bootstrap exactly once and local-ready only after all local dependencies
+  - id: PRJ-COMB-002
+    factors: {host_role: follower, app_count: 1, data_placement: external, postgres_mode: external, redis_mode: external, proxy_mode: required, tunnel_mode: disabled, public_membership: member, secret_state: absent, runtime_state: empty}
+    oracle: no bootstrap secret and AUTO_SETUP false
+  - id: PRJ-COMB-003
+    factors: {host_role: existing, app_count: 1, data_placement: other_host, postgres_mode: docker, redis_mode: docker, proxy_mode: optional, tunnel_mode: disabled, public_membership: member, secret_state: rotation, runtime_state: healthy}
+    oracle: add follower without bootstrap replay
+  - id: PRJ-COMB-004
+    factors: {host_role: existing, app_count: 2, data_placement: other_host, postgres_mode: docker, redis_mode: external, proxy_mode: required, tunnel_mode: connector, public_membership: member, secret_state: rotation, runtime_state: healthy}
+    oracle: app secret and proxy isolation
+  - id: PRJ-COMB-005
+    factors: {host_role: bootstrap_leader, app_count: 1, data_placement: external, postgres_mode: external, redis_mode: external, proxy_mode: disabled, tunnel_mode: disabled, public_membership: member, secret_state: initial, runtime_state: empty}
+    oracle: leader failure causes zero follower transport calls
+  - id: PRJ-COMB-006
+    factors: {host_role: existing, app_count: 2, data_placement: other_host, postgres_mode: docker, redis_mode: docker, proxy_mode: disabled, tunnel_mode: disabled, public_membership: member, secret_state: absent, runtime_state: healthy}
+    oracle: stable Host dependency cycle error before registration
+  - id: PVD-COMB-007
+    factors: {host_role: existing, app_count: 1, data_placement: external, postgres_mode: external, redis_mode: external, proxy_mode: optional, tunnel_mode: disabled, public_membership: member, secret_state: absent, runtime_state: healthy}
+    oracle: response EOF and Provider restart produce one route switch
+  - id: APR-COMB-008
+    factors: {host_role: existing, app_count: 1, data_placement: external, postgres_mode: external, redis_mode: external, proxy_mode: disabled, tunnel_mode: disabled, public_membership: member, secret_state: rotation, runtime_state: healthy}
+    oracle: consumed approval resumes only the original operation
+  - id: RET-COMB-009
+    factors: {host_role: existing, app_count: 1, data_placement: same_host, postgres_mode: docker, redis_mode: docker, proxy_mode: required, tunnel_mode: connector, public_membership: member, secret_state: rotation, runtime_state: healthy}
+    oracle: tombstone proves retire and data sentinels remain
+  - id: MIG-COMB-010
+    factors: {host_role: existing, app_count: 1, data_placement: other_host, postgres_mode: docker, redis_mode: external, proxy_mode: optional, tunnel_mode: disabled, public_membership: member, secret_state: absent, runtime_state: healthy}
+    oracle: one side-effect trace across old writer takeover and second Stack
+  - id: SEC-COMB-011
+    factors: {host_role: existing, app_count: 1, data_placement: external, postgres_mode: external, redis_mode: external, proxy_mode: required, tunnel_mode: connector, public_membership: member, secret_state: rotation, runtime_state: managed_drift}
+    oracle: malformed output and stderr canary leak nothing and recover same operation
+  - id: PVD-COMB-012
+    factors: {host_role: existing, app_count: 1, data_placement: external, postgres_mode: external, redis_mode: external, proxy_mode: disabled, tunnel_mode: disabled, public_membership: member, secret_state: absent, runtime_state: healthy}
+    oracle: health-only refresh updates health without a write diff
