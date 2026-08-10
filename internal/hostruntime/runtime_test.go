@@ -1,0 +1,545 @@
+package hostruntime
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"testing"
+
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
+)
+
+const testMachineID = "0123456789abcdef0123456789abcdef"
+
+func TestMachineIdentityStrictInputAndGolden(t *testing.T) {
+	rt := testRuntime(t)
+	got, err := rt.MachineIdentity()
+	if err != nil || got.Value != "mid1:0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54" {
+		t.Fatalf("identity = %#v, %v", got, err)
+	}
+	for _, input := range []string{"", testMachineID + "\n\n", testMachineID + " ", "00000000000000000000000000000000", "0123456789ABCDEF0123456789abcdef"} {
+		if err := os.WriteFile(rt.machinePath, []byte(input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rt.MachineIdentity(); err == nil || bytes.Contains([]byte(err.Error()), []byte(testMachineID)) {
+			t.Fatalf("accepted or leaked %q: %v", input, err)
+		}
+	}
+}
+
+func TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry(t *testing.T) {
+	rt, state := initialized(t)
+	key := reconcileKey(state, revisionB())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var effects atomic.Int32
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := rt.RunOperation(key, nil, func(*Operation) (hostprotocol.Result, hostcontract.StableObservation, error) {
+			effects.Add(1)
+			close(started)
+			<-release
+			return applied(key, state), observation(state, key.TargetRevision), nil
+		})
+		firstDone <- err
+	}()
+	<-started
+	if _, err := rt.Begin(key, nil); !errors.Is(err, ErrLocked) {
+		t.Fatalf("concurrent begin = %v", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	result, err := rt.RunOperation(key, nil, func(*Operation) (hostprotocol.Result, hostcontract.StableObservation, error) {
+		effects.Add(1)
+		return hostprotocol.Result{}, hostcontract.StableObservation{}, nil
+	})
+	if err != nil || result.Status != hostprotocol.ResultApplied || effects.Load() != 1 {
+		t.Fatalf("retry = %#v, %v, effects %d", result, err, effects.Load())
+	}
+}
+
+func TestPendingResumeConflictAndCompletionAdvancesState(t *testing.T) {
+	rt, state := initialized(t)
+	key := reconcileKey(state, revisionB())
+	op, err := rt.Begin(key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Close(); err != nil {
+		t.Fatal(err)
+	} // Simulate response/process loss after intent persistence.
+	other := reconcileKey(state, revisionC())
+	if _, err := rt.Begin(other, nil); !isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) {
+		t.Fatalf("different pending = %v", err)
+	}
+	op, err = rt.Begin(key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Complete(applied(key, state), observation(state, key.TargetRevision)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := rt.readState()
+	if err != nil || got.AppliedRevision != key.TargetRevision || got.Observation.AppliedRevision != key.TargetRevision || got.Journal == nil || got.Journal.Status != journalComplete {
+		t.Fatalf("completion state = %#v, %v", got, err)
+	}
+}
+
+func TestNextOperationReplacesTerminalAndRetireIsDurable(t *testing.T) {
+	rt, state := initialized(t)
+	key := reconcileKey(state, revisionB())
+	op, err := rt.Begin(key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Complete(applied(key, state), observation(state, key.TargetRevision)); err != nil {
+		t.Fatal(err)
+	}
+	nextState, _ := rt.readState()
+	next := reconcileKey(nextState, revisionC())
+	op, err = rt.Begin(next, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateState(op.state); err != nil {
+		t.Fatalf("pending next state invalid: %v: %#v", err, op.state)
+	}
+	completeResult, completeObservation := applied(next, nextState), observation(nextState, next.TargetRevision)
+	if err := op.Complete(completeResult, completeObservation); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := rt.Begin(key, nil)
+	if err != nil || !retry.closed || retry.state.Journal.Result.Status != hostprotocol.ResultApplied {
+		t.Fatalf("previous terminal retry = %#v, %v", retry, err)
+	}
+	retireState, _ := rt.readState()
+	retire := retireKey(retireState)
+	approval := retireApproval(retire, retireState)
+	op, err = rt.Begin(retire, &approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &retireState.Machine, Ownership: &retireState.Ownership, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}
+	if err := op.Complete(result, hostcontract.StableObservation{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := rt.readState()
+	if err != nil || got.Retirement == nil || got.Journal == nil || got.Journal.Result.Status != hostprotocol.ResultRetired {
+		t.Fatalf("retire state = %#v, %v", got, err)
+	}
+}
+
+func TestApprovalAndPreconditionsAreExact(t *testing.T) {
+	rt, state := initialized(t)
+	key := reconcileKey(state, revisionB())
+	bad := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: state.Resource.Environment, Resource: state.Resource, Machine: state.Machine, Ownership: state.Ownership, TargetRevision: revisionC(), PreserveData: true}
+	if _, err := rt.Begin(key, &bad); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("bad approval = %v", err)
+	}
+	key.PriorAppliedRevision = revisionC()
+	if _, err := rt.Begin(key, nil); !isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) {
+		t.Fatalf("prior revision = %v", err)
+	}
+	key = reconcileObservationKey(state, revisionB())
+	key.PriorObservation = "wrong"
+	if _, err := rt.Begin(key, nil); !isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) {
+		t.Fatalf("prior observation = %v", err)
+	}
+}
+
+func TestInspectNeverCreatesAndCorruptStateIsPreserved(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "absent")
+	machine := filepath.Join(t.TempDir(), "machine")
+	if err := os.WriteFile(machine, []byte(testMachineID+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt := New(root, machine)
+	if _, err := rt.Inspect(resource()); !isRemote(err, hostprotocol.ErrorTransport, hostprotocol.CodeUnavailable) {
+		t.Fatalf("missing = %v", err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inspect created root: %v", err)
+	}
+	rt, state := initialized(t)
+	valid, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := bytes.Replace(valid, []byte(`"version"`), []byte(`"Version"`), 1)
+	if err := os.WriteFile(rt.statePath(), bad, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Inspect(state.Resource); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("case fold state = %v", err)
+	}
+	got, _ := os.ReadFile(rt.statePath())
+	if !bytes.Equal(got, bad) {
+		t.Fatal("inspect modified corrupt state")
+	}
+}
+
+func TestPersistedPendingRevalidatesPreconditionAndApproval(t *testing.T) {
+	rt, state := initialized(t)
+	key := reconcileKey(state, revisionB())
+	op, err := rt.Begin(key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := rt.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted.AppliedRevision = revisionB()
+	persisted.Observation.AppliedRevision = revisionB()
+	raw, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Begin(key, nil); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("stale resumed precondition = %v", err)
+	}
+}
+
+func TestStatePathHardeningAndAdoption(t *testing.T) {
+	rt := testRuntime(t)
+	if err := os.MkdirAll(rt.root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Initialize(resource(), ownership(), observationFor(rt, revision())); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("permissive root = %v", err)
+	}
+	if err := os.Chmod(rt.root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Initialize(resource(), ownership(), observationFor(rt, revision())); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(rt.statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("elsewhere", rt.statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Inspect(resource()); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("state symlink = %v", err)
+	}
+}
+
+func TestStateRejectsContradictionsAndSecrets(t *testing.T) {
+	rt, state := initialized(t)
+	state.Observation.Ownership = hostcontract.OwnershipIdentity{Value: "other"}
+	if err := rt.writeState(state); err == nil {
+		t.Fatal("contradiction accepted")
+	}
+	key := reconcileKey(testState(t, rt), revisionB())
+	approval := hostcontract.ApprovalSubject{AppID: "do-not-persist-secret"}
+	_, _ = rt.Begin(key, &approval)
+	b, _ := os.ReadFile(rt.statePath())
+	if bytes.Contains(b, []byte("do-not-persist-secret")) {
+		t.Fatal("secret persisted")
+	}
+}
+
+func TestStateRejectsInvalidJournalAndRetirementCombinations(t *testing.T) {
+	_, state := initialized(t)
+	key := reconcileKey(state, revisionB())
+	appliedResult := applied(key, state)
+	validTerminal := &Journal{Key: key, Status: journalComplete, Result: &appliedResult}
+	retire := retireKey(state)
+	retireResult := hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &state.Machine, Ownership: &state.Ownership, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}
+	for name, mutate := range map[string]func(*State){
+		"applied revision differs from key": func(s *State) {
+			r := appliedResult
+			r.AppliedRevision = revisionC()
+			s.Journal = &Journal{Key: key, Status: journalComplete, Result: &r}
+		},
+		"applied result on retire": func(s *State) {
+			s.Journal = &Journal{Key: retire, Status: journalComplete, Approval: ptr(retireApproval(retire, state)), Result: &appliedResult}
+		},
+		"retired result on reconcile": func(s *State) { s.Journal = &Journal{Key: key, Status: journalComplete, Result: &retireResult} },
+		"pending stale prior": func(s *State) {
+			stale := key
+			stale.PriorAppliedRevision = revisionC()
+			s.Journal = &Journal{Key: stale, Status: journalPending}
+		},
+		"orphan retirement": func(s *State) {
+			s.Retirement = &Retirement{Machine: s.Machine, Ownership: s.Ownership, PreserveData: true}
+		},
+		"last operation pending": func(s *State) { s.LastOperation = &Journal{Key: key, Status: journalPending} },
+		"journal last contradict": func(s *State) {
+			s.Journal = validTerminal
+			other := *validTerminal
+			other.Key.TargetRevision = revisionC()
+			s.LastOperation = &other
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := state
+			mutate(&candidate)
+			if err := validateState(candidate); err == nil {
+				t.Fatalf("accepted %#v", candidate)
+			}
+		})
+	}
+}
+
+func TestInspectIdentityMismatchRequiresRecovery(t *testing.T) {
+	rt, state := initialized(t)
+	if _, err := rt.Inspect(hostcontract.ResourceIdentity{Environment: "other", ServerKey: state.Resource.ServerKey}); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("resource mismatch = %v", err)
+	}
+	if err := os.WriteFile(rt.machinePath, []byte("fedcba9876543210fedcba9876543210\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Inspect(state.Resource); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("machine mismatch = %v", err)
+	}
+}
+
+func TestAtomicWriteFailureDoesNotReplaceState(t *testing.T) {
+	rt, state := initialized(t)
+	before, err := os.ReadFile(rt.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []string{"chmod", "write", "fsync", "close", "rename", "dirsync"} {
+		t.Run(step, func(t *testing.T) {
+			stateWriteHook = func(got string) error {
+				if got == step {
+					return errors.New("injected")
+				}
+				return nil
+			}
+			t.Cleanup(func() { stateWriteHook = nil })
+			candidate := state
+			candidate.Observation.HostRelease = "release2"
+			if err := rt.writeState(candidate); err == nil {
+				t.Fatal("write succeeded")
+			}
+			after, err := os.ReadFile(rt.statePath())
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("old state changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestPostRenameDirectorySyncFailureLeavesReadableNewState(t *testing.T) {
+	rt, state := initialized(t)
+	candidate := state
+	candidate.Observation.HostRelease = "release2"
+	syncDirHook = func() error { return errors.New("injected") }
+	t.Cleanup(func() { syncDirHook = nil })
+	if err := rt.writeState(candidate); err == nil {
+		t.Fatal("write succeeded")
+	}
+	got, err := rt.readState()
+	if err != nil || got.Observation.HostRelease != "release2" {
+		t.Fatalf("new state is not strictly readable: %#v, %v", got, err)
+	}
+}
+
+func TestJournalRejectsMalformedKeyRevision(t *testing.T) {
+	_, state := initialized(t)
+	for name, journal := range map[string]Journal{
+		"pending":          {Key: hostcontract.OperationKey{Resource: state.Resource, Action: hostcontract.ActionReconcile, TargetRevision: "not-a-revision", PriorAppliedRevision: state.AppliedRevision}, Status: journalPending},
+		"completed retire": {Key: hostcontract.OperationKey{Resource: state.Resource, Action: hostcontract.ActionRetirePreserveData, TargetRevision: "not-a-revision", PriorAppliedRevision: state.AppliedRevision}, Status: journalComplete, Approval: ptr(hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: state.Resource.Environment, Resource: state.Resource, Machine: state.Machine, Ownership: state.Ownership, TargetRevision: "not-a-revision", PreserveData: true}), Result: &hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &state.Machine, Ownership: &state.Ownership, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := state
+			candidate.Journal = &journal
+			if err := validateState(candidate); err == nil {
+				t.Fatalf("accepted %#v", candidate.Journal)
+			}
+		})
+	}
+}
+
+func TestDescriptorPathRejectsUnsafeLockAndWrongOwner(t *testing.T) {
+	rt, state := initialized(t)
+	if err := os.Remove(rt.lockPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("state.json", rt.lockPath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.lock(); err == nil {
+		t.Fatal("lock symlink accepted")
+	}
+	if err := os.Remove(rt.lockPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(rt.statePath(), rt.lockPath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.lock(); err == nil {
+		t.Fatal("lock hardlink accepted")
+	}
+	if err := os.Remove(rt.lockPath()); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := rt.lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertSafeSingleLinkFixture(t, rt.statePath())
+	assertSafeSingleLinkFixture(t, rt.lockPath())
+	rt.expectedRootUID = os.Geteuid()
+	rt.expectedUID++
+	if _, err := rt.Inspect(state.Resource); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("state wrong owner = %v", err)
+	}
+	if _, err := rt.lock(); err == nil {
+		t.Fatal("lock wrong owner accepted")
+	}
+}
+
+func assertSafeSingleLinkFixture(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Nlink != 1 {
+		t.Fatalf("unsafe fixture %q: mode=%v stat=%#v", path, info.Mode(), info.Sys())
+	}
+}
+
+func TestReadStateTransfersDescriptorOwnershipToFile(t *testing.T) {
+	rt, state := initialized(t)
+	for i := 0; i < 512; i++ {
+		got, err := rt.readState()
+		if err != nil || got.Resource != state.Resource {
+			t.Fatalf("read %d = %#v, %v", i, got, err)
+		}
+	}
+}
+
+func TestDescriptorPathRejectsParentSymlinkAndHardlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	machine := filepath.Join(base, "machine")
+	if err := os.WriteFile(machine, []byte(testMachineID+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt := New(filepath.Join(link, "state"), machine)
+	if err := rt.Initialize(resource(), ownership(), observationFor(rt, revision())); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("parent symlink = %v", err)
+	}
+	rt, state := initialized(t)
+	copy := filepath.Join(filepath.Dir(rt.statePath()), "state-copy")
+	if err := os.Link(rt.statePath(), copy); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(rt.statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(copy, rt.statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Inspect(state.Resource); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("hardlink state = %v", err)
+	}
+}
+
+func initialized(t *testing.T) (*Runtime, State) {
+	t.Helper()
+	rt := testRuntime(t)
+	state := testState(t, rt)
+	if err := rt.Initialize(state.Resource, state.Ownership, state.Observation); err != nil {
+		t.Fatal(err)
+	}
+	return rt, state
+}
+func testRuntime(t *testing.T) *Runtime {
+	t.Helper()
+	root := t.TempDir()
+	machine := filepath.Join(root, "machine-id")
+	if err := os.WriteFile(machine, []byte(testMachineID+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return New(filepath.Join(root, "state"), machine)
+}
+func resource() hostcontract.ResourceIdentity {
+	return hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}
+}
+func ownership() hostcontract.OwnershipIdentity {
+	return hostcontract.OwnershipIdentity{Value: "owner1"}
+}
+func testState(t *testing.T, rt *Runtime) State {
+	t.Helper()
+	return State{Version: stateVersion, Resource: resource(), Machine: mustMachine(t, rt), Ownership: ownership(), AppliedRevision: revision(), Observation: observationFor(rt, revision())}
+}
+func mustMachine(t *testing.T, rt *Runtime) hostcontract.MachineIdentity {
+	t.Helper()
+	v, err := rt.MachineIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+func observationFor(rt *Runtime, rev string) hostcontract.StableObservation {
+	return hostcontract.StableObservation{Machine: mustMachineNoTest(rt), Ownership: ownership(), HostRelease: "release1", AppliedRevision: rev, Ready: true}
+}
+func mustMachineNoTest(rt *Runtime) hostcontract.MachineIdentity {
+	v, err := rt.MachineIdentity()
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+func observation(state State, rev string) hostcontract.StableObservation {
+	o := state.Observation
+	o.AppliedRevision = rev
+	return o
+}
+func reconcileKey(s State, target string) hostcontract.OperationKey {
+	return hostcontract.OperationKey{Resource: s.Resource, Action: hostcontract.ActionReconcile, TargetRevision: target, PriorAppliedRevision: s.AppliedRevision}
+}
+func reconcileObservationKey(s State, target string) hostcontract.OperationKey {
+	return hostcontract.OperationKey{Resource: s.Resource, Action: hostcontract.ActionReconcile, TargetRevision: target, PriorObservation: observationFingerprint(s.Observation)}
+}
+func retireKey(s State) hostcontract.OperationKey {
+	return hostcontract.OperationKey{Resource: s.Resource, Action: hostcontract.ActionRetirePreserveData, TargetRevision: s.AppliedRevision, PriorAppliedRevision: s.AppliedRevision}
+}
+func retireApproval(k hostcontract.OperationKey, s State) hostcontract.ApprovalSubject {
+	return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: s.Resource.Environment, Resource: s.Resource, Machine: s.Machine, Ownership: s.Ownership, TargetRevision: k.TargetRevision, PreserveData: true}
+}
+func applied(k hostcontract.OperationKey, _ State) hostprotocol.Result {
+	return hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: k.TargetRevision}
+}
+func ptr[T any](value T) *T { return &value }
+func revision() string {
+	return "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+func revisionB() string { return "tr1:0123456789abcdef:" + strings.Repeat("a", 64) }
+func revisionC() string { return "tr1:0123456789abcdef:" + strings.Repeat("b", 64) }
+func isRemote(err error, category hostprotocol.ErrorCategory, code hostprotocol.ErrorCode) bool {
+	var remote *RemoteError
+	return errors.As(err, &remote) && remote.Category == category && remote.Code == code
+}
