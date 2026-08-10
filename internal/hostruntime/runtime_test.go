@@ -338,6 +338,54 @@ func TestAtomicWriteFailureDoesNotReplaceState(t *testing.T) {
 	}
 }
 
+func TestWriterReclaimsOnlySafeStaleStateTemp(t *testing.T) {
+	rt, state := initialized(t)
+	stale := filepath.Join(rt.root, ".state-tmp")
+	if err := os.WriteFile(stale, []byte("interrupted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	key := reconcileKey(state, revisionB())
+	op, err := rt.Begin(key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = op.Complete(applied(key, state), observation(state, key.TargetRevision)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Lstat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale temp remains: %v", err)
+	}
+
+	before := mustFile(t, rt.statePath())
+	if err = os.Symlink("state.json", stale); err != nil {
+		t.Fatal(err)
+	}
+	next := reconcileKey(mustState(t, rt), revisionC())
+	if _, err = rt.Begin(next, nil); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("unsafe temp = %v", err)
+	}
+	if !bytes.Equal(before, mustFile(t, rt.statePath())) {
+		t.Fatal("unsafe temp changed state")
+	}
+}
+
+func TestWriterRejectsStaleFIFOWithoutBlockingOrUnlinking(t *testing.T) {
+	rt, state := initialized(t)
+	temp := filepath.Join(rt.root, ".state-tmp")
+	if err := syscall.Mkfifo(temp, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before := mustFile(t, rt.statePath())
+	key := reconcileKey(state, revisionB())
+	if _, err := rt.Begin(key, nil); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("fifo temp = %v", err)
+	}
+	info, err := os.Lstat(temp)
+	if err != nil || info.Mode()&os.ModeNamedPipe == 0 || !bytes.Equal(before, mustFile(t, rt.statePath())) {
+		t.Fatalf("fifo changed: info=%#v err=%v", info, err)
+	}
+}
+
 func TestPostRenameDirectorySyncFailureLeavesReadableNewState(t *testing.T) {
 	rt, state := initialized(t)
 	candidate := state
@@ -542,4 +590,12 @@ func revisionC() string { return "tr1:0123456789abcdef:" + strings.Repeat("b", 6
 func isRemote(err error, category hostprotocol.ErrorCategory, code hostprotocol.ErrorCode) bool {
 	var remote *RemoteError
 	return errors.As(err, &remote) && remote.Category == category && remote.Code == code
+}
+func mustState(t *testing.T, rt *Runtime) State {
+	t.Helper()
+	state, err := rt.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
 }

@@ -171,12 +171,54 @@ func TestReconcileCreatesOwnedSharedNetworkAndUsesItForEveryContainer(t *testing
 		t.Fatal(err)
 	}
 	network := networkName(state)
-	if !runner.hasCall([]string{"network", "create", "--label", "sub2api.host.network=" + networkLabelFor(state.Resource, state.Ownership), network}) {
+	if !runner.hasCall([]string{"network", "create", "--label", "sub2api.host=" + ownershipLabelFor(state.Resource, state.Ownership, "network", "", ""), "--label", "sub2api.host.network=" + networkLabelFor(state.Resource, state.Ownership), network}) {
 		t.Fatalf("network trace=%#v", runner.calls)
 	}
 	for _, call := range runner.calls {
 		if len(call) > 0 && call[0] == "run" && !containsPair(call, "--network", network) {
 			t.Fatalf("container missing network: %#v", call)
+		}
+		if len(call) > 0 && call[0] == "run" && (!hasLabel(call, "sub2api.host") || !hasLabel(call, "sub2api.host.target")) {
+			t.Fatalf("container missing keyed ownership labels: %#v", call)
+		}
+	}
+}
+
+func TestAppRunUsesRestartUnlessStoppedAndDefaultDrain(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), app("one", "image"))); err != nil {
+		t.Fatal(err)
+	}
+	object := findApp(mustInventory(t, rt), appToken("one"))
+	if object.DrainSeconds != 30 {
+		t.Fatalf("default drain = %d", object.DrainSeconds)
+	}
+	if !runner.hasCallPrefix([]string{"run", "-d", "--restart", "unless-stopped"}) {
+		t.Fatalf("app restart argv=%#v", runner.calls)
+	}
+}
+
+func TestEveryRunRoleUsesExactKeyedOwnershipAndTargetLabels(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	local := localObject(state, hostcontract.LocalDataServiceTarget{ID: "cache", Type: "redis", Port: 6380}, revisionB())
+	local.DataToken = token("data", local.AppToken)
+	if err := rt.runLocal(context.Background(), state, local); err != nil {
+		t.Fatal(err)
+	}
+	proxy := proxyObject(state, hostcontract.ReverseProxyTarget{Image: "traefik:v3"}, revisionB())
+	if err := rt.runProxy(context.Background(), state, proxy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), app("one", "image"))); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range []managedObject{local, proxy, findApp(mustInventory(t, rt), appToken("one"))} {
+		if runner.inspect[object.Name] != ownershipLabelFor(state.Resource, state.Ownership, object.Role, object.AppToken, object.Active) || runner.targets[object.Name] != targetLabelFor(object) {
+			t.Fatalf("labels for %s = ownership %q target %q", object.Role, runner.inspect[object.Name], runner.targets[object.Name])
 		}
 	}
 }
@@ -255,7 +297,7 @@ func TestRuntimeDirectorySymlinkAndUnsafeACMEAreRejectedWithoutDocker(t *testing
 func TestInventoryRejectsIrrelevantFieldsAndMalformedLocalTokens(t *testing.T) {
 	base := inventory{Version: inventoryVersion, Resource: resource(), Ownership: ownership()}
 	for name, object := range map[string]managedObject{
-		"app data identity":   {Role: "app", AppToken: appToken("one"), Name: "app", Image: "image", Revision: revision(), Active: "blue", Hostname: "one.example", DataIdentity: dataIdentity("x")},
+		"app data identity":   {Role: "app", AppToken: appToken("one"), Name: "app", Image: "image", Revision: revision(), Active: "blue", Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30, DataIdentity: dataIdentity("x")},
 		"metadata live field": {Role: "local-data-meta", AppToken: localDataToken("one"), Type: "redis", DataToken: token("data", localDataToken("one")), PathToken: token("path", localDataToken("one")), DataIdentity: hostcontract.DataIdentity{Kind: "redis", ProviderID: "x", Endpoint: "x", Port: 1, Database: "0"}, Env: "env-0123456789abcdef0123456789abcdef0123456789abcdef01234567"},
 		"bad data token":      {Role: "local-data", AppToken: localDataToken("one"), Name: "x", Type: "redis", Image: redisImage, Revision: revision(), Port: 1, DataToken: "bad", PathToken: token("path", localDataToken("one")), DataIdentity: hostcontract.DataIdentity{Kind: "redis", ProviderID: "x", Endpoint: "x", Port: 1, Database: "0"}},
 	} {
@@ -263,6 +305,13 @@ func TestInventoryRejectsIrrelevantFieldsAndMalformedLocalTokens(t *testing.T) {
 		if err := validateInventory(base); err == nil {
 			t.Fatalf("accepted %s", name)
 		}
+	}
+}
+
+func TestInventoryVersionOneFailsClosed(t *testing.T) {
+	legacy := inventory{Version: 1, Resource: resource(), Ownership: ownership()}
+	if err := validateInventory(legacy); err == nil {
+		t.Fatal("inventory v1 accepted")
 	}
 }
 
@@ -707,7 +756,7 @@ func TestUnsafeACMEAndPersistedDataTokensFailBeforeDockerMutation(t *testing.T) 
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
 	rt.runner = runner
-	bad := []byte(`{"version":1,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"local-data","appToken":"` + localDataToken("cache") + `","name":"x","image":"redis:8-alpine","revision":"` + revision() + `","type":"redis","port":6380,"dataToken":"../bad","pathToken":"` + token("path", localDataToken("cache")) + `","dataIdentity":{"kind":"redis","providerID":"x","endpoint":"x","port":6380,"database":"0"},"env":"` + envName(localDataToken("cache"), revision()) + `","config":"` + artifactConfigPrefix + token(localDataToken("cache"), revision()) + `"}]}`)
+	bad := []byte(`{"version":2,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"local-data","appToken":"` + localDataToken("cache") + `","name":"x","image":"redis:8-alpine","revision":"` + revision() + `","type":"redis","port":6380,"dataToken":"../bad","pathToken":"` + token("path", localDataToken("cache")) + `","dataIdentity":{"kind":"redis","providerID":"x","endpoint":"x","port":6380,"database":"0"},"env":"` + envName(localDataToken("cache"), revision()) + `","config":"` + artifactConfigPrefix + token(localDataToken("cache"), revision()) + `"}]}`)
 	if err := rt.writeArtifact(artifactInventory, bad, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -719,8 +768,8 @@ func TestUnsafeACMEAndPersistedDataTokensFailBeforeDockerMutation(t *testing.T) 
 func TestInventoryRejectsMalformedAndDuplicateManagedObjects(t *testing.T) {
 	rt, state := initialized(t)
 	for name, value := range map[string][]byte{
-		"unknown role":   []byte(`{"version":1,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"future","name":"x"}]}`),
-		"duplicate name": []byte(`{"version":1,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"app","appToken":"0123456789abcdef01234567","name":"same","image":"old","revision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active":"blue"},{"role":"app","appToken":"fedcba9876543210fedcba98","name":"same","image":"old","revision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active":"green"}]}`),
+		"unknown role":   []byte(`{"version":2,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"future","name":"x"}]}`),
+		"duplicate name": []byte(`{"version":2,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"app","appToken":"0123456789abcdef01234567","name":"same","image":"old","revision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active":"blue"},{"role":"app","appToken":"fedcba9876543210fedcba98","name":"same","image":"old","revision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active":"green"}]}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := rt.writeArtifact(artifactInventory, value, 0600); err != nil {
@@ -745,7 +794,7 @@ func TestReconcileManagedInspectFailureAndCandidateUnownedFailBeforeMutation(t *
 		return nil
 	}
 	oldName := objectName(state, "app", appToken("one"), "blue")
-	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: oldName, Image: "old", Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example"}}}); err != nil {
+	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: oldName, Image: "old", Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.writeArtifact(routeName(appToken("one")), mustRoute(t, rt, state, "one"), 0600); err != nil {
@@ -1256,7 +1305,7 @@ func TestReconcileDataApprovalAndUnownedAdmissionHaveNoJournalOrMutation(t *test
 	runner := &recordingRunner{}
 	rt.runner = runner
 	old := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old", Endpoint: "old.db", Port: 5432, Database: "app", TLSServerName: "old.db"}
-	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: objectName(state, "app", appToken("one"), "blue"), Image: "old", Data: []managedLink{{Name: "main", Identity: old}}, Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example"}}}); err != nil {
+	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: objectName(state, "app", appToken("one"), "blue"), Image: "old", Data: []managedLink{{Name: "main", Identity: old}}, Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.writeArtifact(routeName(appToken("one")), mustRoute(t, rt, state, "one"), 0600); err != nil {
@@ -1341,7 +1390,7 @@ func TestPendingBlueGreenUnknownOldRemovalResumesFromTargetRoute(t *testing.T) {
 	}
 	state, _ = rt.readState()
 	old := objectName(state, "app", appToken("one"), "green")
-	candidate := managedObject{Role: "app", AppToken: appToken("one"), Name: objectName(state, "app", appToken("one"), "blue"), Image: "new", Revision: revisionC(), Active: "blue", Env: envName(appToken("one"), revisionC()), Hostname: "one.example"}
+	candidate := managedObject{Role: "app", AppToken: appToken("one"), Name: objectName(state, "app", appToken("one"), "blue"), Image: "new", Revision: revisionC(), Active: "blue", Env: envName(appToken("one"), revisionC()), Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30}
 	runner.calls = nil
 	runner.fail = func(argv []string) error {
 		if len(argv) > 2 && argv[0] == "rm" && argv[len(argv)-1] == old {
@@ -1532,6 +1581,275 @@ func TestPostgresAlterThenUnknownRemovalResumesWithoutSecondAlter(t *testing.T) 
 	calls := len(runner.calls)
 	if _, err := rt.Reconcile(context.Background(), second); err != nil || len(runner.calls) != calls {
 		t.Fatalf("terminal replay=%v calls=%#v", err, runner.calls)
+	}
+}
+
+func TestPostgresReplacementRunUnknownResumesWithoutSecondAlterOrRun(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	first := requestFor(state, revisionB())
+	first.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432}}
+	first.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "old"}}
+	if _, err := rt.Reconcile(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = rt.readState()
+	old := findLocalData(mustInventory(t, rt), localDataToken("primary"))
+	runner.calls = nil
+	runner.failAfter = true
+	runner.fail = func(argv []string) error {
+		if len(argv) > 0 && argv[0] == "run" {
+			return errors.New("replacement response lost")
+		}
+		return nil
+	}
+	second := requestFor(state, revisionC())
+	second.Target.DataServices = first.Target.DataServices
+	second.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "new"}}
+	if _, err := rt.Reconcile(context.Background(), second); err == nil {
+		t.Fatal("replacement run unexpectedly succeeded")
+	}
+	runner.fail, runner.failAfter = nil, false
+	result, err := rt.Reconcile(context.Background(), second)
+	if err != nil || result.Status != hostprotocol.ResultApplied || runner.mutations("run") != 1 || runner.mutations("rm") != 1 || countAlter(runner.calls) != 1 || runner.hasSecret("new") {
+		t.Fatalf("retry=%#v %v calls=%#v", result, err, runner.calls)
+	}
+	if runner.targets[old.Name] != targetLabelFor(findLocalData(mustInventory(t, rt), localDataToken("primary"))) {
+		t.Fatalf("replacement target=%q", runner.targets[old.Name])
+	}
+}
+
+func TestPostgresPendingReplacementRejectsWrongProposedTarget(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{failAfter: true}
+	rt.runner = runner
+	first := requestFor(state, revisionB())
+	first.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432}}
+	first.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "old"}}
+	if _, err := rt.Reconcile(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = rt.readState()
+	runner.calls = nil
+	runner.fail = func(argv []string) error {
+		if len(argv) > 0 && argv[0] == "run" {
+			return errors.New("replacement response lost")
+		}
+		return nil
+	}
+	second := requestFor(state, revisionC())
+	second.Target.DataServices = first.Target.DataServices
+	second.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "new"}}
+	if _, err := rt.Reconcile(context.Background(), second); err == nil {
+		t.Fatal("replacement run unexpectedly succeeded")
+	}
+	old := findLocalData(mustInventory(t, rt), localDataToken("primary"))
+	runner.targets[old.Name] = "wrong-target"
+	runner.fail, runner.failAfter = nil, false
+	if _, err := rt.Reconcile(context.Background(), second); !isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) || runner.mutations("run") != 1 {
+		t.Fatalf("wrong target = %v calls=%#v", err, runner.calls)
+	}
+}
+
+func TestInspectReportsLiveDriftWithoutPersistingChanges(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), app("one", "image"))); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = rt.readState()
+	beforeState, beforeInventory := mustFile(t, rt.statePath()), mustArtifact(t, rt, artifactInventory)
+	healthy, err := rt.Inspect(state.Resource)
+	if err != nil || healthy.Drifted || !healthy.Ready {
+		t.Fatalf("healthy inspect=%#v %v", healthy, err)
+	}
+	object := findApp(mustInventory(t, rt), appToken("one"))
+	delete(runner.inspect, object.Name)
+	runner.calls = nil
+	drifted, err := rt.Inspect(state.Resource)
+	if err != nil || !drifted.Drifted || drifted.Ready || len(drifted.Apps) != 1 || drifted.Apps[0].Ready || runner.dockerMutations() != 0 || !bytes.Equal(beforeState, mustFile(t, rt.statePath())) || !bytes.Equal(beforeInventory, mustArtifact(t, rt, artifactInventory)) {
+		t.Fatalf("missing app inspect=%#v %v calls=%#v", drifted, err, runner.calls)
+	}
+	runner.inspect[object.Name] = "wrong-owner"
+	if _, err = rt.Inspect(state.Resource); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+		t.Fatalf("wrong ownership=%v", err)
+	}
+}
+
+func TestInspectPendingAndInventoryStateDisagreementAreDriftOnly(t *testing.T) {
+	for name, mutate := range map[string]func(*testing.T, *Runtime, *State, *inventory){
+		"pending": func(t *testing.T, rt *Runtime, state *State, inv *inventory) {
+			t.Helper()
+			key := reconcileKey(*state, revisionC())
+			op, err := rt.Begin(key, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = op.Close(); err != nil {
+				t.Fatal(err)
+			}
+			candidate := appObject(*state, app("one", "new"), revisionC(), "blue")
+			inv.Objects = []managedObject{candidate}
+			if err = rt.writeInventory(*inv); err != nil {
+				t.Fatal(err)
+			}
+			if err = rt.writeRoute(*inv, candidate); err != nil {
+				t.Fatal(err)
+			}
+			runner := rt.runner.(*recordingRunner)
+			delete(runner.inspect, objectName(*state, "app", appToken("one"), "green"))
+			runner.inspect[candidate.Name] = ownershipLabelFor(state.Resource, state.Ownership, candidate.Role, candidate.AppToken, candidate.Active)
+			runner.targets[candidate.Name] = targetLabelFor(candidate)
+		},
+		"app revision": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) { inv.Objects[0].Revision = revisionC() },
+		"app image": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) { inv.Objects[0].Image = "other-image" },
+		"missing app": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) { inv.Objects = nil },
+		"extra app": func(_ *testing.T, _ *Runtime, state *State, inv *inventory) {
+			inv.Objects = append(inv.Objects, appObject(*state, app("two", "image-two"), state.AppliedRevision, "blue"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt, state := initialized(t)
+			runner := &recordingRunner{}
+			rt.runner = runner
+			if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), app("one", "image"))); err != nil {
+				t.Fatal(err)
+			}
+			state, _ = rt.readState()
+			inv := mustInventory(t, rt)
+			mutate(t, rt, &state, &inv)
+			if name != "pending" {
+				if err := rt.writeInventory(inv); err != nil {
+					t.Fatal(err)
+				}
+				for _, object := range inv.Objects {
+					if object.Name != "" {
+						runner.inspect[object.Name] = ownershipLabelFor(state.Resource, state.Ownership, object.Role, object.AppToken, object.Active)
+						runner.targets[object.Name] = targetLabelFor(object)
+					}
+				}
+			}
+			beforeState, beforeInventory := mustFile(t, rt.statePath()), mustArtifact(t, rt, artifactInventory)
+			runner.calls = nil
+			observed, err := rt.Inspect(state.Resource)
+			if err != nil || !observed.Drifted || observed.Ready || runner.dockerMutations() != 0 || !bytes.Equal(beforeState, mustFile(t, rt.statePath())) || !bytes.Equal(beforeInventory, mustArtifact(t, rt, artifactInventory)) {
+				t.Fatalf("inspect=%#v err=%v calls=%#v", observed, err, runner.calls)
+			}
+		})
+	}
+}
+
+func TestInspectLocalDataInventorySetDisagreementIsDriftOnly(t *testing.T) {
+	for name, mutate := range map[string]func(*testing.T, *Runtime, *inventory){
+		"missing data": func(_ *testing.T, _ *Runtime, inv *inventory) {
+			for index, object := range inv.Objects {
+				if object.Role == "local-data" {
+					inv.Objects = append(inv.Objects[:index], inv.Objects[index+1:]...)
+					return
+				}
+			}
+		},
+		"extra data": func(t *testing.T, rt *Runtime, inv *inventory) {
+			extra := localObject(mustState(t, rt), hostcontract.LocalDataServiceTarget{ID: "other", Type: "redis", Port: 6381}, mustState(t, rt).AppliedRevision)
+			extra.DataToken, extra.PathToken = token("data", extra.AppToken), token("path", extra.AppToken)
+			inv.Objects = append(inv.Objects, extra)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt, state := initialized(t)
+			runner := &recordingRunner{}
+			rt.runner = runner
+			req := requestFor(state, revisionB(), app("one", "image"))
+			req.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "cache", Type: "redis", Port: 6380}}
+			req.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"cache": {AdminPassword: "safe"}}
+			if _, err := rt.Reconcile(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+			state, _ = rt.readState()
+			inv := mustInventory(t, rt)
+			mutate(t, rt, &inv)
+			if err := rt.writeInventory(inv); err != nil {
+				t.Fatal(err)
+			}
+			for _, object := range inv.Objects {
+				if object.Name != "" {
+					runner.inspect[object.Name] = ownershipLabelFor(state.Resource, state.Ownership, object.Role, object.AppToken, object.Active)
+					runner.targets[object.Name] = targetLabelFor(object)
+				}
+			}
+			beforeState, beforeInventory := mustFile(t, rt.statePath()), mustArtifact(t, rt, artifactInventory)
+			runner.calls = nil
+			observed, err := rt.Inspect(state.Resource)
+			if err != nil || !observed.Drifted || observed.Ready || runner.dockerMutations() != 0 || !bytes.Equal(beforeState, mustFile(t, rt.statePath())) || !bytes.Equal(beforeInventory, mustArtifact(t, rt, artifactInventory)) {
+				t.Fatalf("inspect=%#v err=%v calls=%#v", observed, err, runner.calls)
+			}
+		})
+	}
+}
+
+func TestAppDrainStopsAfterRouteProbeBeforeOldRemoval(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	first := requestFor(state, revisionB(), app("one", "old"))
+	first.Target.Apps[0].DrainTimeout = "7s"
+	if _, err := rt.Reconcile(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = rt.readState()
+	runner.calls = nil
+	second := requestFor(state, revisionC(), app("one", "new"))
+	second.Target.Apps[0].DrainTimeout = "7s"
+	if _, err := rt.Reconcile(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	old := objectName(state, "app", appToken("one"), "green")
+	candidate := objectName(state, "app", appToken("one"), "blue")
+	probe, stop, remove := callIndex(runner.calls, []string{"exec", candidate}), callIndex(runner.calls, []string{"stop", "--time", "7", old}), callIndex(runner.calls, []string{"rm", "-f", old})
+	if !(probe >= 0 && probe < stop && stop < remove) {
+		t.Fatalf("drain order calls=%#v", runner.calls)
+	}
+}
+
+func TestAppDrainStopFailureNeverRemovesOldApp(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), app("one", "old"))); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = rt.readState()
+	old := findApp(mustInventory(t, rt), appToken("one"))
+	runner.calls = nil
+	runner.fail = func(argv []string) error {
+		if len(argv) > 0 && argv[0] == "stop" {
+			return errors.New("stop response lost")
+		}
+		return nil
+	}
+	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionC(), app("one", "new"))); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("stop failure = %v", err)
+	}
+	if runner.hasCall([]string{"rm", "-f", old.Name}) {
+		t.Fatalf("removed after stop failure: %#v", runner.calls)
+	}
+}
+
+func TestInvalidDrainTimeoutIsRejectedBeforeMutation(t *testing.T) {
+	for _, drain := range []string{"-1s", "500ms", "601s", "invalid"} {
+		t.Run(drain, func(t *testing.T) {
+			rt, state := initialized(t)
+			runner := &recordingRunner{}
+			rt.runner = runner
+			before := mustFile(t, rt.statePath())
+			req := requestFor(state, revisionB(), app("one", "image"))
+			req.Target.Apps[0].DrainTimeout = drain
+			if _, err := rt.Reconcile(context.Background(), req); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) || len(runner.calls) != 0 || !bytes.Equal(before, mustFile(t, rt.statePath())) {
+				t.Fatalf("drain=%q err=%v calls=%#v", drain, err, runner.calls)
+			}
+		})
 	}
 }
 
@@ -1884,7 +2202,7 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 			}
 		}
 		if label, ok := r.networks[name]; ok {
-			return []byte(name + "\t" + label + "\n"), nil
+			return []byte(name + "\t" + ownershipLabelFor(resource(), ownership(), "network", "", "") + "\t" + label + "\n"), nil
 		}
 		return nil, nil
 	}
@@ -1892,7 +2210,11 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 		if r.networks == nil {
 			r.networks = map[string]string{}
 		}
-		r.networks[argv[len(argv)-1]] = strings.TrimPrefix(argv[3], "sub2api.host.network=")
+		for i := range argv {
+			if argv[i] == "--label" && i+1 < len(argv) && strings.HasPrefix(argv[i+1], "sub2api.host.network=") {
+				r.networks[argv[len(argv)-1]] = strings.TrimPrefix(argv[i+1], "sub2api.host.network=")
+			}
+		}
 	}
 	if len(argv) > 1 && argv[0] == "network" && argv[1] == "rm" && r.networks != nil {
 		delete(r.networks, argv[len(argv)-1])
@@ -1933,8 +2255,8 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 			if argv[i] == "--label" && i+1 < len(argv) {
 				if strings.HasPrefix(argv[i+1], "sub2api.host.target=") {
 					target = strings.TrimPrefix(argv[i+1], "sub2api.host.target=")
-				} else {
-					label = argv[i+1]
+				} else if strings.HasPrefix(argv[i+1], "sub2api.host=") {
+					label = strings.TrimPrefix(argv[i+1], "sub2api.host=")
 				}
 			}
 			if argv[i] == "--name" && i+1 < len(argv) {
@@ -2064,6 +2386,17 @@ func (r *recordingRunner) hasCall(want []string) bool {
 	}
 	return false
 }
+func (r *recordingRunner) hasCallPrefix(want []string) bool {
+	return callIndex(r.calls, want) >= 0
+}
+func hasLabel(call []string, key string) bool {
+	for index := 0; index+1 < len(call); index++ {
+		if call[index] == "--label" && strings.HasPrefix(call[index+1], key+"=") {
+			return true
+		}
+	}
+	return false
+}
 func (r *recordingRunner) anyArg(prefix, value string) bool {
 	for _, call := range r.calls {
 		for i := 0; i+1 < len(call); i++ {
@@ -2110,6 +2443,33 @@ func eachRemovalAtMostOnce(calls [][]string) bool {
 		}
 	}
 	return true
+}
+func countAlter(calls [][]string) int {
+	count := 0
+	for _, call := range calls {
+		if len(call) > 1 && call[0] == "exec" && call[1] == "-i" {
+			count++
+		}
+	}
+	return count
+}
+func callIndex(calls [][]string, prefix []string) int {
+	for index, call := range calls {
+		if len(call) < len(prefix) {
+			continue
+		}
+		matches := true
+		for item := range prefix {
+			if call[item] != prefix[item] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return index
+		}
+	}
+	return -1
 }
 func sameStrings(got, want []string) bool {
 	if len(got) != len(want) {

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
@@ -27,7 +28,9 @@ const (
 	artifactEnvPrefix    = "env-"
 	artifactRoutePrefix  = "route-"
 	artifactConfigPrefix = "config-"
-	inventoryVersion     = 1
+	// inventoryVersion 2 adds app readiness and bounded drain recovery fields.
+	// It is private and unreleased, so older inventories fail closed.
+	inventoryVersion     = 2
 	maxCommandOutput     = 64 * 1024
 	maxArtifactSize      = 1 << 20
 )
@@ -130,22 +133,24 @@ type inventory struct {
 	Objects   []managedObject                `json:"objects"`
 }
 type managedObject struct {
-	Role         string                    `json:"role"`
-	AppToken     string                    `json:"appToken,omitempty"`
-	Name         string                    `json:"name"`
-	Image        string                    `json:"image,omitempty"`
-	Data         []managedLink             `json:"data,omitempty"`
-	Revision     string                    `json:"revision,omitempty"`
-	Active       string                    `json:"active,omitempty"`
-	Env          string                    `json:"env,omitempty"`
-	Type         string                    `json:"type,omitempty"`
-	Port         int                       `json:"port,omitempty"`
-	Persistence  bool                      `json:"persistence,omitempty"`
-	DataToken    string                    `json:"dataToken,omitempty"`
-	PathToken    string                    `json:"pathToken,omitempty"`
-	DataIdentity hostcontract.DataIdentity `json:"dataIdentity,omitempty"`
-	Config       string                    `json:"config,omitempty"`
-	Hostname     string                    `json:"hostname,omitempty"`
+	Role          string                    `json:"role"`
+	AppToken      string                    `json:"appToken,omitempty"`
+	Name          string                    `json:"name"`
+	Image         string                    `json:"image,omitempty"`
+	Data          []managedLink             `json:"data,omitempty"`
+	Revision      string                    `json:"revision,omitempty"`
+	Active        string                    `json:"active,omitempty"`
+	Env           string                    `json:"env,omitempty"`
+	Type          string                    `json:"type,omitempty"`
+	Port          int                       `json:"port,omitempty"`
+	Persistence   bool                      `json:"persistence,omitempty"`
+	DataToken     string                    `json:"dataToken,omitempty"`
+	PathToken     string                    `json:"pathToken,omitempty"`
+	DataIdentity  hostcontract.DataIdentity `json:"dataIdentity,omitempty"`
+	Config        string                    `json:"config,omitempty"`
+	Hostname      string                    `json:"hostname,omitempty"`
+	ReadinessPath string                    `json:"readinessPath,omitempty"`
+	DrainSeconds  int                       `json:"drainSeconds,omitempty"`
 }
 type managedLink struct {
 	Name     string                    `json:"name"`
@@ -222,7 +227,11 @@ func (r *Runtime) Handle(ctx context.Context, q hostprotocol.Request) (hostproto
 		if s.Retirement != nil {
 			return hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &s.Machine, Ownership: &s.Ownership, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}, nil
 		}
-		return hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &s.Observation}, nil
+		observation, err := r.observe(ctx, s)
+		if err != nil {
+			return hostprotocol.Result{}, err
+		}
+		return hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &observation}, nil
 	case hostcontract.ActionReconcile:
 		return r.Reconcile(ctx, q)
 	case hostcontract.ActionRetirePreserveData:
@@ -272,7 +281,7 @@ func (r *Runtime) admitReconcile(q hostprotocol.Request) error {
 		return operationFailed()
 	}
 	for _, a := range q.Target.Apps {
-		if !safeEnvironment(a, (*q.Secrets).Apps[a.ID]) || !validHostname(a.Hostname) {
+		if !safeEnvironment(a, (*q.Secrets).Apps[a.ID]) || !validHostname(a.Hostname) || appDrainSeconds(a) == 0 {
 			return operationFailed()
 		}
 	}
@@ -339,7 +348,8 @@ func (r *Runtime) admitPostgresPasswordChange(ctx context.Context, state State, 
 		if !changed {
 			continue
 		}
-		present, err := r.ownedPresent(ctx, inv, old)
+		proposed, proposedOK := pendingReplacement(state, old, q)
+		present, err := r.ownedPresentEither(ctx, inv, old, proposed, pending && proposedOK)
 		if err != nil {
 			return err
 		}
@@ -404,7 +414,7 @@ func (r *Runtime) preflightTargets(ctx context.Context, state State, inv invento
 		old := findApp(inv, token)
 		if old.Name == "" {
 			if _, err := r.readArtifactBytes(routeName(token)); err == nil {
-				candidate := managedObject{Role: "app", AppToken: token, Name: objectName(state, "app", token, "green"), Image: target.Image, Data: links(target), Revision: q.TargetRevision, Active: "green", Env: envName(token, q.TargetRevision), Hostname: target.Hostname}
+				candidate := appObject(state, target, q.TargetRevision, "green")
 				if state.Journal == nil || state.Journal.Status != journalPending || state.Journal.Key != requestKey(q) || !r.routeMatches(inv, candidate) {
 					return conflict()
 				}
@@ -420,7 +430,7 @@ func (r *Runtime) preflightTargets(ctx context.Context, state State, inv invento
 		if active == "blue" {
 			inactive = "green"
 		}
-		candidate := managedObject{Role: "app", AppToken: token, Name: objectName(state, "app", token, inactive), Image: target.Image, Data: links(target), Revision: q.TargetRevision, Active: inactive, Env: envName(token, q.TargetRevision), Hostname: target.Hostname}
+		candidate := appObject(state, target, q.TargetRevision, inactive)
 		if err := r.inspectCandidate(ctx, inv, candidate); err != nil {
 			return err
 		}
@@ -452,7 +462,7 @@ func (r *Runtime) validatePersistedRoutes(inv inventory, q hostprotocol.Request)
 			if current.Active == "blue" {
 				inactive = "green"
 			}
-			candidate := managedObject{Role: "app", AppToken: current.AppToken, Name: objectName(state, "app", current.AppToken, inactive), Image: target.Image, Data: links(target), Revision: q.TargetRevision, Active: inactive, Env: envName(current.AppToken, q.TargetRevision), Hostname: target.Hostname}
+			candidate := appObject(state, target, q.TargetRevision, inactive)
 			if r.routeMatches(inv, candidate) {
 				goto next
 			}
@@ -609,6 +619,147 @@ func (r *Runtime) checkKnownOwnedForRequest(ctx context.Context, state State, in
 	}
 	return nil
 }
+
+// observe is intentionally read-only: it only lists known containers/networks
+// and performs the fixed readiness probes needed to report live drift.
+func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.StableObservation, error) {
+	inv, err := r.readInventory()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			observation := state.Observation
+			observation.Drifted, observation.Ready = true, false
+			return observation, nil
+		}
+		return hostcontract.StableObservation{}, recovery()
+	}
+	if validateInventoryForState(inv, state) != nil {
+		return hostcontract.StableObservation{}, recovery()
+	}
+	if err = r.admitNetwork(ctx, state); err != nil {
+		return hostcontract.StableObservation{}, recovery()
+	}
+	network, err := r.runner.Run(ctx, networkListArgs(state), nil)
+	if err != nil {
+		return hostcontract.StableObservation{}, recovery()
+	}
+	observation := state.Observation
+	observation.Drifted, observation.Ready = false, true
+	apps := map[string]bool{}
+	data := map[hostcontract.DataIdentity]bool{}
+	inventoryApps := map[string]bool{}
+	inventoryData := map[hostcontract.DataIdentity]bool{}
+	stableApps := map[string]hostcontract.AppObservation{}
+	stableData := map[hostcontract.DataIdentity]bool{}
+	for _, app := range observation.Apps {
+		stableApps[appToken(app.ID)] = app
+	}
+	for _, datum := range observation.Data {
+		stableData[datum.Identity] = true
+	}
+	if strings.TrimSpace(string(network)) == "" {
+		observation.Drifted, observation.Ready = true, false
+	}
+	for _, object := range inv.Objects {
+		if object.Name == "" {
+			continue
+		}
+		present, observed := r.ownedPresent(ctx, inv, object)
+		if observed != nil {
+			return hostcontract.StableObservation{}, recovery()
+		}
+		if !present {
+			observation.Drifted, observation.Ready = true, false
+			continue
+		}
+		if object.Revision != state.AppliedRevision {
+			observation.Drifted, observation.Ready = true, false
+		}
+		switch object.Role {
+		case "app":
+			inventoryApps[object.AppToken] = true
+			stable, known := stableApps[object.AppToken]
+			if !known || stable.ActiveImage != object.Image {
+				observation.Drifted, observation.Ready = true, false
+			}
+			route, routeErr := r.readArtifactBytes(routeName(object.AppToken))
+			if routeErr != nil && !errors.Is(routeErr, os.ErrNotExist) {
+				return hostcontract.StableObservation{}, recovery()
+			}
+			if routeErr == nil {
+				var parsed traefikRoute
+				if strictJSON(route, &parsed) != nil || !validRouteDocument(parsed) {
+					return hostcontract.StableObservation{}, recovery()
+				}
+			}
+			if routeErr != nil || !r.routeMatches(inv, object) || r.ready(ctx, object.Name, object.ReadinessPath) != nil {
+				observation.Drifted, observation.Ready = true, false
+			} else {
+				apps[object.AppToken] = true
+			}
+		case "local-data":
+			inventoryData[object.DataIdentity] = true
+			if !stableData[object.DataIdentity] {
+				observation.Drifted, observation.Ready = true, false
+			}
+			if r.localReady(ctx, object) != nil {
+				observation.Drifted, observation.Ready = true, false
+			} else {
+				data[object.DataIdentity] = true
+			}
+		case "proxy":
+			if r.proxyReady(ctx, object) != nil {
+				observation.Drifted, observation.Ready = true, false
+			}
+		}
+	}
+	for index := range observation.Apps {
+		token := appToken(observation.Apps[index].ID)
+		observation.Apps[index].Ready = apps[token]
+		if !observation.Apps[index].Ready {
+			observation.Ready = false
+		}
+	}
+	for index := range observation.Data {
+		observation.Data[index].Ready = data[observation.Data[index].Identity]
+		if !observation.Data[index].Ready {
+			observation.Ready = false
+		}
+	}
+	if len(inventoryApps) != len(observation.Apps) || len(inventoryData) != len(observation.Data) || len(apps) != len(observation.Apps) || len(data) != len(observation.Data) {
+		observation.Drifted, observation.Ready = true, false
+	}
+	if state.Journal != nil && state.Journal.Status == journalPending {
+		observation.Drifted, observation.Ready = true, false
+	}
+	if observation.Ready {
+		observation.Drifted = false
+	}
+	return observation, nil
+}
+func validRouteDocument(route traefikRoute) bool {
+	if len(route.HTTP.Routers) == 0 || len(route.HTTP.Services) == 0 {
+		return false
+	}
+	for _, router := range route.HTTP.Routers {
+		if router.Rule == "" || len(router.EntryPoints) == 0 || router.Service == "" {
+			return false
+		}
+		if _, ok := route.HTTP.Services[router.Service]; !ok {
+			return false
+		}
+	}
+	for _, service := range route.HTTP.Services {
+		if len(service.LoadBalancer.Servers) == 0 {
+			return false
+		}
+		for _, server := range service.LoadBalancer.Servers {
+			if server.URL == "" {
+				return false
+			}
+		}
+	}
+	return true
+}
 func pendingReplacement(state State, old managedObject, q hostprotocol.Request) (managedObject, bool) {
 	if old.Role == "local-data" {
 		for _, target := range q.Target.DataServices {
@@ -736,8 +887,7 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 		if active == "green" {
 			inactive = "blue"
 		}
-		name := objectName(s, "app", token, inactive)
-		candidate := managedObject{Role: "app", AppToken: token, Name: name, Image: a.Image, Data: links(a), Revision: q.TargetRevision, Active: inactive, Env: envName(token, q.TargetRevision), Hostname: a.Hostname}
+		candidate := appObject(s, a, q.TargetRevision, inactive)
 		if e = r.inspectCandidate(ctx, inv, candidate); e != nil {
 			return hostprotocol.Result{}, hostcontract.StableObservation{}, e
 		}
@@ -749,7 +899,7 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 			return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
 		}
 		if !exists {
-			if e = r.docker(ctx, "run", "-d", "--label", ownershipLabelFor(s.Resource, s.Ownership, "app", token, inactive), "--label", "sub2api.host.target="+targetLabelFor(candidate), "--name", name, "--network", networkName(s), "--env-file", r.artifactPath(candidate.Env), a.Image); e != nil {
+			if e = r.docker(ctx, "run", "-d", "--restart", "unless-stopped", "--label", "sub2api.host="+ownershipLabelFor(s.Resource, s.Ownership, "app", token, inactive), "--label", "sub2api.host.target="+targetLabelFor(candidate), "--name", candidate.Name, "--network", networkName(s), "--env-file", r.artifactPath(candidate.Env), a.Image); e != nil {
 				if exists, observed := r.candidateExists(ctx, inv, candidate); observed != nil {
 					return hostprotocol.Result{}, hostcontract.StableObservation{}, observed
 				} else if !exists {
@@ -758,7 +908,7 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
 			}
 		}
-		if e = r.ready(ctx, name, a.ReadinessPath); e != nil {
+		if e = r.ready(ctx, candidate.Name, a.ReadinessPath); e != nil {
 			if e = r.removeOwned(ctx, inv, candidate); e != nil {
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, e
 			}
@@ -791,7 +941,7 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 			return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
 		}
 		if old.Name != "" {
-			if e = r.removeOwnedProgress(ctx, inv, old, s.Journal != nil && s.Journal.Status == journalPending && s.Journal.Key == requestKey(q)); e != nil {
+			if e = r.drainAndRemoveApp(ctx, inv, old, s.Journal != nil && s.Journal.Status == journalPending && s.Journal.Key == requestKey(q)); e != nil {
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, e
 			}
 			if old.Env != "" && old.Env != candidate.Env {
@@ -1044,6 +1194,21 @@ func localObject(s State, t hostcontract.LocalDataServiceTarget, revision string
 	}
 	return o
 }
+func appObject(s State, a hostcontract.AppTarget, revision, active string) managedObject {
+	token := appToken(a.ID)
+	return managedObject{Role: "app", AppToken: token, Name: objectName(s, "app", token, active), Image: a.Image, Data: links(a), Revision: revision, Active: active, Env: envName(token, revision), Hostname: a.Hostname, ReadinessPath: a.ReadinessPath, DrainSeconds: appDrainSeconds(a)}
+}
+func appDrainSeconds(a hostcontract.AppTarget) int {
+	v := a.DrainTimeout
+	if v == "" {
+		v = "30s"
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 || d%time.Second != 0 || d > 10*time.Minute {
+		return 0
+	}
+	return int(d / time.Second)
+}
 func nameForLocal(s State, token string) string { return objectName(s, "local-data", token, "live") }
 func findProxy(i inventory) managedObject {
 	for _, o := range i.Objects {
@@ -1244,6 +1409,32 @@ func (r *Runtime) removeOwnedProgress(ctx context.Context, inv inventory, o mana
 	}
 	return r.docker(ctx, "rm", "-f", o.Name)
 }
+func (r *Runtime) drainAndRemoveApp(ctx context.Context, inv inventory, o managedObject, allowAbsent bool) error {
+	present, err := r.ownedPresent(ctx, inv, o)
+	if err != nil {
+		return err
+	}
+	if !present {
+		if allowAbsent {
+			return nil
+		}
+		return recovery()
+	}
+	seconds := o.DrainSeconds
+	if seconds == 0 {
+		seconds = 30
+	}
+	if err = r.docker(ctx, "stop", "--time", strconv.Itoa(seconds), o.Name); err != nil {
+		// A prior stop may have completed while its response was lost. Reinspect
+		// ownership, then leave the pending operation for a safe retry rather
+		// than force-removing a possibly active app.
+		if err = r.inspectOwned(ctx, inv, o); err != nil {
+			return err
+		}
+		return operationFailed()
+	}
+	return r.removeOwnedProgress(ctx, inv, o, allowAbsent)
+}
 func (r *Runtime) docker(ctx context.Context, args ...string) error {
 	_, e := r.runner.Run(ctx, args, nil)
 	return e
@@ -1304,7 +1495,7 @@ func postgresPasswordSQL(password string) ([]byte, error) {
 }
 func (r *Runtime) runLocal(ctx context.Context, s State, o managedObject) error {
 	label := ownershipLabelFor(s.Resource, s.Ownership, o.Role, o.AppToken, "")
-	args := []string{"run", "-d", "--restart", "unless-stopped", "--label", label, "--label", "sub2api.host.target=" + targetLabelFor(o), "--name", o.Name, "--network", networkName(s), "--env-file", r.artifactPath(o.Env), "-v", r.dataPath(o.DataToken) + ":"}
+	args := []string{"run", "-d", "--restart", "unless-stopped", "--label", "sub2api.host=" + label, "--label", "sub2api.host.target=" + targetLabelFor(o), "--name", o.Name, "--network", networkName(s), "--env-file", r.artifactPath(o.Env), "-v", r.dataPath(o.DataToken) + ":"}
 	if o.Type == "postgres" {
 		args[len(args)-1] += "/var/lib/postgresql/data"
 		args = append(args, o.Image, "-p", strconv.Itoa(o.Port))
@@ -1318,7 +1509,7 @@ func traefikStaticConfig(email string) []byte {
 	return []byte("entryPoints:\n  web:\n    address: \":80\"\n  websecure:\n    address: \":443\"\n  probe:\n    address: \":8081\"\nproviders:\n  file:\n    directory: /etc/traefik/dynamic\n    watch: true\ncertificatesResolvers:\n  cloudflare:\n    acme:\n      email: " + yamlQuote(email) + "\n      storage: /etc/traefik/acme.json\n      dnsChallenge:\n        provider: cloudflare\n")
 }
 func (r *Runtime) runProxy(ctx context.Context, s State, o managedObject) error {
-	return r.docker(ctx, "run", "-d", "--restart", "unless-stopped", "--label", ownershipLabelFor(s.Resource, s.Ownership, "proxy", "", ""), "--label", "sub2api.host.target="+targetLabelFor(o), "--name", o.Name, "--network", networkName(s), "--env-file", r.artifactPath(o.Env), "-p", "80:80", "-p", "443:443", "-v", r.artifactPath(o.Config)+":/etc/traefik/traefik.yml:ro", "-v", r.dynamicPath()+":/etc/traefik/dynamic:ro", "-v", r.proxyACMEPath()+":/etc/traefik/acme.json", o.Image)
+	return r.docker(ctx, "run", "-d", "--restart", "unless-stopped", "--label", "sub2api.host="+ownershipLabelFor(s.Resource, s.Ownership, "proxy", "", ""), "--label", "sub2api.host.target="+targetLabelFor(o), "--name", o.Name, "--network", networkName(s), "--env-file", r.artifactPath(o.Env), "-p", "80:80", "-p", "443:443", "-v", r.artifactPath(o.Config)+":/etc/traefik/traefik.yml:ro", "-v", r.dynamicPath()+":/etc/traefik/dynamic:ro", "-v", r.proxyACMEPath()+":/etc/traefik/acme.json", o.Image)
 }
 func (r *Runtime) proxyReady(ctx context.Context, o managedObject) error {
 	return r.docker(ctx, "exec", o.Name, "traefik", "version")
@@ -1477,7 +1668,7 @@ func validateInventory(v inventory) error {
 			links[link.Name] = true
 		}
 		if o.Role == "app" {
-			if o.Name == "" || o.Image == "" || o.Revision == "" || o.Hostname == "" || (o.Active != "blue" && o.Active != "green") || names[o.Name] || !utf8.ValidString(o.Name) || !utf8.ValidString(o.Image) || !validHostname(o.Hostname) || o.Type != "" || o.Port != 0 || o.Persistence || o.DataToken != "" || o.PathToken != "" || o.DataIdentity != (hostcontract.DataIdentity{}) || o.Config != "" {
+			if o.Name == "" || o.Image == "" || o.Revision == "" || o.Hostname == "" || o.ReadinessPath == "" || o.DrainSeconds < 1 || o.DrainSeconds > 600 || (o.Active != "blue" && o.Active != "green") || names[o.Name] || !utf8.ValidString(o.Name) || !utf8.ValidString(o.Image) || !validHostname(o.Hostname) || o.Type != "" || o.Port != 0 || o.Persistence || o.DataToken != "" || o.PathToken != "" || o.DataIdentity != (hostcontract.DataIdentity{}) || o.Config != "" {
 				return errors.New("inventory app")
 			}
 			if _, err := hostcontract.ParseRevision(o.Revision); err != nil {
@@ -1487,10 +1678,10 @@ func validateInventory(v inventory) error {
 				return errors.New("inventory app")
 			}
 			names[o.Name] = true
-		} else if o.Role == "app-data" && (o.Name != "" || o.Image != "" || o.Revision != "" || o.Active != "" || o.Env != "" || len(o.Data) == 0 || o.Type != "" || o.Port != 0 || o.Persistence || o.DataToken != "" || o.PathToken != "" || o.DataIdentity != (hostcontract.DataIdentity{}) || o.Config != "" || o.Hostname != "") {
+		} else if o.Role == "app-data" && (o.Name != "" || o.Image != "" || o.Revision != "" || o.Active != "" || o.Env != "" || len(o.Data) == 0 || o.Type != "" || o.Port != 0 || o.Persistence || o.DataToken != "" || o.PathToken != "" || o.DataIdentity != (hostcontract.DataIdentity{}) || o.Config != "" || o.Hostname != "" || o.ReadinessPath != "" || o.DrainSeconds != 0) {
 			return errors.New("inventory data")
 		} else if o.Role == "local-data" {
-			if o.Name == "" || names[o.Name] || (o.Type != "postgres" && o.Type != "redis") || (o.Type == "postgres" && o.Image != postgresImage) || (o.Type == "redis" && o.Image != redisImage) || o.Port < 1 || o.Port > 65535 || o.Revision == "" || len(o.DataToken) != 24 || !lowerHex(o.DataToken) || len(o.PathToken) != 24 || !lowerHex(o.PathToken) || o.DataToken != token("data", o.AppToken) || o.PathToken != token("path", o.AppToken) || !validDataIdentity(o.DataIdentity) || len(o.Data) != 0 || o.Active != "" || o.Hostname != "" {
+			if o.Name == "" || names[o.Name] || (o.Type != "postgres" && o.Type != "redis") || (o.Type == "postgres" && o.Image != postgresImage) || (o.Type == "redis" && o.Image != redisImage) || o.Port < 1 || o.Port > 65535 || o.Revision == "" || len(o.DataToken) != 24 || !lowerHex(o.DataToken) || len(o.PathToken) != 24 || !lowerHex(o.PathToken) || o.DataToken != token("data", o.AppToken) || o.PathToken != token("path", o.AppToken) || !validDataIdentity(o.DataIdentity) || len(o.Data) != 0 || o.Active != "" || o.Hostname != "" || o.ReadinessPath != "" || o.DrainSeconds != 0 {
 				return errors.New("inventory local data")
 			}
 			database, tls := "sub2api", o.Name
@@ -1510,11 +1701,11 @@ func validateInventory(v inventory) error {
 			}
 			names[o.Name] = true
 		} else if o.Role == "local-data-meta" {
-			if o.Name != "" || o.Type == "" || o.DataIdentity.Kind != o.Type || len(o.DataToken) != 24 || !lowerHex(o.DataToken) || len(o.PathToken) != 24 || !lowerHex(o.PathToken) || o.DataToken != token("data", o.AppToken) || o.PathToken != token("path", o.AppToken) || !validDataIdentity(o.DataIdentity) || o.Image != "" || o.Revision != "" || o.Active != "" || o.Env != "" || o.Config != "" || len(o.Data) != 0 || o.Port != 0 || o.Persistence || o.Hostname != "" {
+			if o.Name != "" || o.Type == "" || o.DataIdentity.Kind != o.Type || len(o.DataToken) != 24 || !lowerHex(o.DataToken) || len(o.PathToken) != 24 || !lowerHex(o.PathToken) || o.DataToken != token("data", o.AppToken) || o.PathToken != token("path", o.AppToken) || !validDataIdentity(o.DataIdentity) || o.Image != "" || o.Revision != "" || o.Active != "" || o.Env != "" || o.Config != "" || len(o.Data) != 0 || o.Port != 0 || o.Persistence || o.Hostname != "" || o.ReadinessPath != "" || o.DrainSeconds != 0 {
 				return errors.New("inventory local data meta")
 			}
 		} else if o.Role == "proxy" {
-			if o.Name == "" || names[o.Name] || o.Image == "" || o.Revision == "" || !validArtifactName(o.Env) || !validArtifactName(o.Config) || o.AppToken != "" || o.Active != "" || len(o.Data) != 0 || o.Type != "" || o.Port != 0 || o.Persistence || o.DataToken != "" || o.PathToken != "" || o.DataIdentity != (hostcontract.DataIdentity{}) || o.Hostname != "" {
+			if o.Name == "" || names[o.Name] || o.Image == "" || o.Revision == "" || !validArtifactName(o.Env) || !validArtifactName(o.Config) || o.AppToken != "" || o.Active != "" || len(o.Data) != 0 || o.Type != "" || o.Port != 0 || o.Persistence || o.DataToken != "" || o.PathToken != "" || o.DataIdentity != (hostcontract.DataIdentity{}) || o.Hostname != "" || o.ReadinessPath != "" || o.DrainSeconds != 0 {
 				return errors.New("inventory proxy")
 			}
 			if _, err := hostcontract.ParseRevision(o.Revision); err != nil {
@@ -1834,7 +2025,7 @@ func networkLabelFor(resource hostcontract.ResourceIdentity, ownership hostcontr
 	return "s2hnet1:" + token(resource.Environment, resource.ServerKey, ownership.Value)
 }
 func (r *Runtime) admitNetwork(ctx context.Context, s State) error {
-	out, err := r.runner.Run(ctx, []string{"network", "ls", "--filter", "name=^" + networkName(s) + "$", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host.network\"}}"}, nil)
+	out, err := r.runner.Run(ctx, networkListArgs(s), nil)
 	if err != nil {
 		return recovery()
 	}
@@ -1846,10 +2037,10 @@ func (r *Runtime) admitNetwork(ctx context.Context, s State) error {
 		return recovery()
 	}
 	parts := strings.Split(rows[0], "\t")
-	if len(parts) != 2 || parts[0] != networkName(s) {
+	if len(parts) != 3 || parts[0] != networkName(s) {
 		return recovery()
 	}
-	if parts[1] != networkLabelFor(s.Resource, s.Ownership) {
+	if parts[1] != ownershipLabelFor(s.Resource, s.Ownership, "network", "", "") || parts[2] != networkLabelFor(s.Resource, s.Ownership) {
 		return conflict()
 	}
 	return nil
@@ -1865,7 +2056,7 @@ func (r *Runtime) ensureNetwork(ctx context.Context, s State) error {
 	if strings.TrimSpace(string(out)) != "" {
 		return nil
 	}
-	if err := r.docker(ctx, "network", "create", "--label", "sub2api.host.network="+networkLabelFor(s.Resource, s.Ownership), networkName(s)); err != nil {
+	if err := r.docker(ctx, "network", "create", "--label", "sub2api.host="+ownershipLabelFor(s.Resource, s.Ownership, "network", "", ""), "--label", "sub2api.host.network="+networkLabelFor(s.Resource, s.Ownership), networkName(s)); err != nil {
 		if observed := r.admitNetwork(ctx, s); observed == nil {
 			out, observed = r.runner.Run(ctx, networkListArgs(s), nil)
 			if observed == nil && strings.TrimSpace(string(out)) != "" {
@@ -1877,7 +2068,7 @@ func (r *Runtime) ensureNetwork(ctx context.Context, s State) error {
 	return nil
 }
 func networkListArgs(s State) []string {
-	return []string{"network", "ls", "--filter", "name=^" + networkName(s) + "$", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host.network\"}}"}
+	return []string{"network", "ls", "--filter", "name=^" + networkName(s) + "$", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.network\"}}"}
 }
 func validHostname(v string) bool {
 	if len(v) == 0 || len(v) > 253 || !utf8.ValidString(v) || strings.HasSuffix(v, ".") {
