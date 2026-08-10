@@ -1703,9 +1703,12 @@ func TestInspectPendingAndInventoryStateDisagreementAreDriftOnly(t *testing.T) {
 			runner.inspect[candidate.Name] = ownershipLabelFor(state.Resource, state.Ownership, candidate.Role, candidate.AppToken, candidate.Active)
 			runner.targets[candidate.Name] = targetLabelFor(candidate)
 		},
-		"app revision": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) { inv.Objects[0].Revision = revisionC() },
+		"app revision": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) {
+			inv.Objects[0].Revision = revisionC()
+			inv.Objects[0].Env = envName(inv.Objects[0].AppToken, revisionC())
+		},
 		"app image": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) { inv.Objects[0].Image = "other-image" },
-		"missing app": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) { inv.Objects = nil },
+		"missing app": func(_ *testing.T, _ *Runtime, _ *State, inv *inventory) { inv.Objects = []managedObject{} },
 		"extra app": func(_ *testing.T, _ *Runtime, state *State, inv *inventory) {
 			inv.Objects = append(inv.Objects, appObject(*state, app("two", "image-two"), state.AppliedRevision, "blue"))
 		},
