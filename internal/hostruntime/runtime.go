@@ -3,6 +3,7 @@ package hostruntime
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -173,7 +174,7 @@ func (r *Runtime) Inspect(resource hostcontract.ResourceIdentity) (hostcontract.
 	if e != nil || state.Resource != resource || state.Machine != machine || state.Observation.Machine != machine || state.Observation.Ownership != state.Ownership {
 		return hostcontract.StableObservation{}, recovery()
 	}
-	return state.Observation, nil
+	return r.observe(context.Background(), state)
 }
 
 // Initialize is the narrow Create/adoption binding seam. It never guesses ownership.
@@ -393,6 +394,11 @@ func (r *Runtime) writeState(s State) error {
 		return e
 	}
 	defer syscall.Close(root)
+	// The only callers hold writer.lock. A deterministic temp left behind is
+	// therefore from an interrupted writer, not a concurrent operation.
+	if e = r.removeStaleStateTemp(root); e != nil {
+		return e
+	}
 	b, e := json.Marshal(s)
 	if e != nil {
 		return e
@@ -451,6 +457,25 @@ func (r *Runtime) writeState(s State) error {
 		if e = syncDirHook(); e != nil {
 			return e
 		}
+	}
+	return syscall.Fsync(root)
+}
+func (r *Runtime) removeStaleStateTemp(root int) error {
+	fd, err := syscall.Openat(root, ".state-tmp", syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, syscall.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("unsafe state temp")
+	}
+	var st syscall.Stat_t
+	valid := syscall.Fstat(fd, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFREG && st.Mode&0077 == 0 && int(st.Uid) == r.expectedUID && st.Nlink == 1 && st.Size <= maxStateSize
+	_ = syscall.Close(fd)
+	if !valid {
+		return errors.New("unsafe state temp")
+	}
+	if err = syscall.Unlinkat(root, ".state-tmp"); err != nil {
+		return err
 	}
 	return syscall.Fsync(root)
 }
