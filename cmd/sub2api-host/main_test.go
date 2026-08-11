@@ -100,6 +100,96 @@ func TestStdioProcessExitsAfterOneFrameAndRejectsTwo(t *testing.T) {
 	}
 }
 
+func TestBootstrapStdioProcessExitsAfterOneRejectedFrame(t *testing.T) {
+	if os.Getenv("SUB2API_HOST_BOOTSTRAP_HELPER") == "1" {
+		os.Args = []string{"sub2api-host", "bootstrap-stdio"}
+		main()
+		os.Exit(0)
+	}
+	request := hostprotocol.Request{Action: hostcontract.ActionInspect, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}, TargetRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+	frame, err := hostprotocol.EncodeRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestBootstrapStdioProcessExitsAfterOneRejectedFrame")
+	cmd.Env = append(os.Environ(), "SUB2API_HOST_BOOTSTRAP_HELPER=1")
+	cmd.Stdin = bytes.NewReader(frame)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := hostprotocol.DecodeResponse(output)
+	if err != nil || response.Error == nil || response.Error.Category != hostprotocol.ErrorRemoteOperation || response.Error.Code != hostprotocol.CodeOperationFailed || !bytes.Equal(output, mustResponse(t, hostprotocol.Response{Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorRemoteOperation, Code: hostprotocol.CodeOperationFailed}})) {
+		t.Fatalf("bootstrap process output = %q, %#v, %v", output, response, err)
+	}
+}
+
+func TestBootstrapStdioServesOneReconcileFrameAndReturnsAppliedResult(t *testing.T) {
+	root := t.TempDir()
+	machine := filepath.Join(root, "machine-id")
+	if err := os.WriteFile(machine, []byte("0123456789abcdef0123456789abcdef\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt := hostruntime.New(filepath.Join(root, "state"), machine)
+	request := hostprotocol.Request{
+		Action:               hostcontract.ActionReconcile,
+		Server:               hostcontract.ServerTarget{SSHAlias: "edge"},
+		Resource:             hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"},
+		TargetRevision:       "tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PriorAppliedRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Target:               &hostcontract.Target{ReleaseArtifact: "release"},
+		Secrets:              &hostcontract.Secrets{},
+	}
+	frame, err := hostprotocol.EncodeRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := bootstrapServe(&out, bytes.NewReader(frame), rt); err != nil {
+		t.Fatal(err)
+	}
+	response, err := hostprotocol.DecodeResponse(out.Bytes())
+	if err != nil || response.Result == nil || response.Result.Status != hostprotocol.ResultApplied || response.Result.AppliedRevision != request.TargetRevision || response.Result.Observation != nil {
+		t.Fatalf("bootstrap response = %#v, %v", response, err)
+	}
+	_, err = os.ReadFile(filepath.Join(root, "state", "state.json"))
+	if err != nil {
+		t.Fatalf("bootstrap omitted state: %v", err)
+	}
+
+	out.Reset()
+	if err := bootstrapServe(&out, bytes.NewReader(append(frame, frame...)), rt); err == nil {
+		t.Fatal("bootstrap accepted two frames")
+	}
+	if response, err := hostprotocol.DecodeResponse(out.Bytes()); err != nil || response.Error == nil || response.Error.Category != hostprotocol.ErrorProtocol || response.Error.Code != hostprotocol.CodeMalformedFrame {
+		t.Fatalf("two bootstrap frames = %#v, %v", response, err)
+	}
+}
+
+func TestBootstrapStdioRejectsInspectWithoutCreatingState(t *testing.T) {
+	root := t.TempDir()
+	machine := filepath.Join(root, "machine-id")
+	if err := os.WriteFile(machine, []byte("0123456789abcdef0123456789abcdef\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	request := hostprotocol.Request{Action: hostcontract.ActionInspect, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}, TargetRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+	frame, err := hostprotocol.EncodeRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := bootstrapServe(&out, bytes.NewReader(frame), hostruntime.New(filepath.Join(root, "state"), machine)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := hostprotocol.DecodeResponse(out.Bytes())
+	if err != nil || response.Error == nil || response.Error.Category != hostprotocol.ErrorRemoteOperation || response.Error.Code != hostprotocol.CodeOperationFailed {
+		t.Fatalf("inspect bootstrap response = %#v, %v", response, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "state")); !os.IsNotExist(err) {
+		t.Fatalf("inspect bootstrap created state: %v", err)
+	}
+}
+
 func mustResponse(t *testing.T, response hostprotocol.Response) []byte {
 	t.Helper()
 	frame, err := hostprotocol.EncodeResponse(response)
