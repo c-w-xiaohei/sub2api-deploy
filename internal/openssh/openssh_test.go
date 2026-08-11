@@ -203,7 +203,7 @@ func TestBootstrapReceiverAttestationCannotReadBootstrapRequest(t *testing.T) {
 	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
 	seen, received := filepath.Join(dir, "attest-seen"), filepath.Join(dir, "received")
 	request := []byte("bootstrap request remains secret until final execution")
-	candidate := phaseCandidate(t, "if IFS= read -r byte; then printf %s \"$byte\" > "+shellQuote(seen)+"; else printf EOF > "+shellQuote(seen)+"; fi", "cat > "+shellQuote(received))
+	candidate := phaseCandidate(t, "if IFS= read -r byte; then printf %s \"$byte\" > "+shellQuote(seen)+"; elif [ -e /proc/self/fd/4 ]; then printf FD4 > "+shellQuote(seen)+"; else printf EOF > "+shellQuote(seen)+"; fi", "cat > "+shellQuote(received))
 	stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, request)
 	if err != nil || !bytes.Equal(stdout, successResponse(t)) || len(stderr) != 0 {
 		t.Fatalf("receiver = stdout %q stderr %q err %v", stdout, stderr, err)
