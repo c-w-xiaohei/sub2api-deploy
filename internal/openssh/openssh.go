@@ -65,8 +65,9 @@ func bootstrapReceiverScript(stage, final string) string {
 umask 077
 stage=%s
 lock=%s
+ok="$stage.ok"
 mkdir "$lock"
-trap 'rm -f "$stage"; rmdir "$lock"' EXIT HUP INT TERM
+trap 'rm -f "$stage" "$ok"; rmdir "$lock"' EXIT HUP INT TERM
 IFS= read -r header
 case "$header" in s2a1:*:*) ;; *) exit 64 ;; esac
 body=${header#s2a1:}
@@ -80,12 +81,23 @@ dd of="$stage" bs=1 count="$size" status=none
 [ "$(wc -c < "$stage")" -eq "$size" ]
 [ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
 chmod 700 "$stage"
-: %s
+if [ -L "$final" ]; then exit 64; fi
+if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
 set +e
-"$stage" bootstrap-stdio
+"$stage" bootstrap-stdio 3>"$ok"
 status=$?
 set -e
-exit "$status"
+if [ -s "$ok" ]; then
+  if ! printf %%s 'sub2api-bootstrap-attested-v1' | cmp -s "$ok" -; then exit 64; fi
+  [ "$status" -eq 0 ] || exit 64
+else
+  exit 0
+fi
+[ "$(wc -c < "$stage")" -eq "$size" ]
+[ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
+if [ -L "$final" ]; then exit 64; fi
+if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
+mv "$stage" "$final"
 `, shellQuote(stage), shellQuote(stage+".lock"), shellQuote(final))
 }
 
