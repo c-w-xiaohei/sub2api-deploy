@@ -42,14 +42,124 @@ func TestLifecyclePreviewPreservesInputsAndHasNoEffects(t *testing.T) {
 	assertNoCalls(t, r)
 }
 
-func TestPublicCreateFailsClosedWhenArtifactIsUnavailable(t *testing.T) {
+func TestReleaseBundleLocatorLoadsOnlyTheProviderSiblingHostArtifacts(t *testing.T) {
+	bundleRoot := t.TempDir()
+	providerPath := filepath.Join(bundleRoot, "bin", "pulumi-resource-sub2api-host")
+	if err := os.MkdirAll(filepath.Dir(providerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(providerPath, []byte("provider"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := releaseBundleHostArtifacts(t, bundleRoot, "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	got, err := loadReleaseBundle(providerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Root != filepath.Join(bundleRoot, "artifacts", "sub2api-host") || !reflect.DeepEqual(got.Manifest, want.Manifest) {
+		t.Fatalf("locator selected %#v, want exact released Host artifacts %#v", got, want)
+	}
+}
+
+func TestNewHostAtExecutableWiresOnlyItsReleaseRelativeHostArtifacts(t *testing.T) {
+	bundleRoot := t.TempDir()
+	providerPath := releaseBundleProvider(t, bundleRoot)
+	want, _ := releaseBundleHostArtifacts(t, bundleRoot, "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	h := newHostAtExecutable("1.0.0", providerPath)
+	got, err := h.deps.artifact()
+	if err != nil || got.Root != want.Root || !reflect.DeepEqual(got.Manifest, want.Manifest) {
+		t.Fatalf("constructor artifact wiring = %#v, %v; want release-relative bundle %#v", got, err, want)
+	}
+}
+
+func TestPublicNewUsesResolvedProviderExecutableForReleaseBundle(t *testing.T) {
+	bundleRoot := t.TempDir()
+	providerPath := releaseBundleProvider(t, bundleRoot)
+	releaseBundleHostArtifacts(t, bundleRoot, "other-release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	original := providerExecutable
+	providerExecutable = func() (string, error) { return providerPath, nil }
+	t.Cleanup(func() { providerExecutable = original })
+
 	provider := New("1.0.0")
 	configureProvider(t, provider)
 	_, err := provider.Create(t.Context(), p.CreateRequest{Properties: lifecycleInputs("edge")})
-	if !errors.Is(err, errArtifactUnavailable) {
-		t.Fatal("public Create did not return the artifact-unavailable sentinel")
+	if err == nil || errors.Is(err, errArtifactUnavailable) || !strings.Contains(err.Error(), "does not match target release") {
+		t.Fatalf("public New did not use the executable-relative release bundle: %v", err)
 	}
-	assertNoCanary(t, errString(err))
+}
+
+func TestReleaseBundleLocatorFailsClosedForMissingMalformedAndSymlinkedArtifacts(t *testing.T) {
+	for _, scenario := range []struct {
+		name  string
+		setup func(t *testing.T, bundleRoot string)
+	}{
+		{"missing", func(t *testing.T, _ string) {}},
+		{"malformed manifest", func(t *testing.T, bundleRoot string) {
+			root := filepath.Join(bundleRoot, "artifacts", "sub2api-host")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "manifest.json"), []byte("not-json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlinked ancestor", func(t *testing.T, bundleRoot string) {
+			real := t.TempDir()
+			releaseBundleHostArtifacts(t, real, "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			if err := os.MkdirAll(filepath.Join(bundleRoot, "artifacts"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(real, "artifacts", "sub2api-host"), filepath.Join(bundleRoot, "artifacts", "sub2api-host")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlinked manifest", func(t *testing.T, bundleRoot string) {
+			root := filepath.Join(bundleRoot, "artifacts", "sub2api-host")
+			releaseBundleHostArtifacts(t, bundleRoot, "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			real := t.TempDir()
+			realBundle, _ := releaseBundleHostArtifacts(t, real, "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			if err := os.Remove(filepath.Join(root, "manifest.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(realBundle.Root, "manifest.json"), filepath.Join(root, "manifest.json")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			bundleRoot := t.TempDir()
+			providerPath := releaseBundleProvider(t, bundleRoot)
+			cwd := t.TempDir()
+			releaseBundleProvider(t, cwd)
+			releaseBundleHostArtifacts(t, cwd, "decoy-cwd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			pathDir := t.TempDir()
+			releaseBundleProvider(t, pathDir)
+			releaseBundleHostArtifacts(t, pathDir, "decoy-path@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			originalCWD, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalPath := os.Getenv("PATH")
+			if err := os.Chdir(cwd); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Setenv("PATH", filepath.Join(pathDir, "bin")+string(os.PathListSeparator)+originalPath); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(originalCWD); _ = os.Setenv("PATH", originalPath) })
+			scenario.setup(t, bundleRoot)
+			if _, err := loadReleaseBundle(providerPath); err == nil {
+				t.Fatal("unsafe or absent released Host artifacts were accepted")
+			}
+			if h := newHostAtExecutable("1.0.0", providerPath); h.deps.artifact == nil {
+				t.Fatal("constructor did not retain release-relative artifact source")
+			} else if _, err := h.deps.artifact(); err == nil {
+				t.Fatal("constructor used cwd or PATH artifact fallback")
+			}
+		})
+	}
 }
 
 func TestLifecycleCreateBootstrapsThenInspectsAndCheckpoints(t *testing.T) {
@@ -237,21 +347,56 @@ func TestLifecycleUpdateReconcilesWithOldCheckpointRevision(t *testing.T) {
 	assertCheckpoint(t, got.Properties, next, observation(desired), desired)
 }
 
-func TestLifecycleUpdateReplaysOldCheckpointKeyAfterResponseLoss(t *testing.T) {
-	old, next := lifecycleInputs("edge"), rotateSecret(t, lifecycleInputs("edge"))
+func TestLifecycleUpdateResponseLossWithVerifiedNextReleaseDoesNotRepeatBootstrapOrReconcile(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
 	r := &recordingLifecycleTransport{}
-	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
-	r.outcomes = []lifecycleOutcome{response(inspected(observation(desired))), response(applied(desired)), response(inspected(observation(desired)))}
+	nextObservation := observationFor(nextTarget, desired)
+	r.outcomes = []lifecycleOutcome{response(inspected(nextObservation))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || len(r.calls) != 3 || len(r.outcomes) != 0 {
-		t.Fatal("response-loss retry did not complete with three Host calls")
+	if err != nil || !onlyInspect(r) || len(r.outcomes) != 0 {
+		t.Fatal("verified response-loss retry did not complete from its first final observation")
 	}
 	assertInspect(t, r.calls[0], next, desired)
-	assertReconcile(t, r.calls[1].request, next, desired, oldRevision, nil)
-	assertReconcileFrame(t, r.calls[1].stdin, next, desired, oldRevision)
-	assertInspect(t, r.calls[2], next, desired)
-	assertCheckpoint(t, got.Properties, next, observation(desired), desired)
+	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
+}
+
+func TestLifecycleUpdateTerminalShortcutValidatesCompleteNextObservation(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
+	for _, mutate := range []func(hostcontract.StableObservation) hostcontract.StableObservation{wrongMachine, wrongOwner, wrongRelease, wrongRevision, notReady, drifted, wrongAppImage, notReadyApp, wrongAppID, duplicateAppID, missingApps} {
+		r := &recordingLifecycleTransport{}
+		artifactCalls := 0
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return artifactBundle{}, errors.New("must not load") }, approve: fatalApproval(t)})
+		oldRevision, desired := revision(t, h, old), revision(t, h, next)
+		r.outcomes = []lifecycleOutcome{response(inspected(mutate(observationFor(nextTarget, desired))))}
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+		if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) || artifactCalls != 0 || hasWrite(r) {
+			t.Fatal("invalid terminal release observation returned state or repeated effects")
+		}
+	}
+
+	old = localDataInputs(t, "edge")
+	nextTarget = decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next = old.Set("target", encodeValue(t, nextTarget))
+	for _, mutate := range []func(hostcontract.StableObservation) hostcontract.StableObservation{emptyLocalDataIdentity, wrongLocalDataKind, wrongLocalDataPort, wrongLocalDataDatabase, wrongLocalDataTLS, mismatchedLocalDataProviderAndEndpoint, notReadyLocalData, missingLocalData, duplicateLocalData} {
+		r := &recordingLifecycleTransport{}
+		artifactCalls := 0
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return artifactBundle{}, errors.New("must not load") }, approve: fatalApproval(t)})
+		oldRevision, desired := revision(t, h, old), revision(t, h, next)
+		r.outcomes = []lifecycleOutcome{response(inspected(mutate(observationFor(nextTarget, desired))))}
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observationFor(decodeTarget(t, old), oldRevision), oldRevision), OldInputs: old, Inputs: next})
+		if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) || artifactCalls != 0 || hasWrite(r) {
+			t.Fatal("invalid terminal local-data observation returned state or repeated effects")
+		}
+	}
 }
 
 func TestLifecycleUpdateRequestsOnlyExactSingleDataLinkApproval(t *testing.T) {
@@ -417,7 +562,7 @@ func TestLifecycleUpdateAcceptsOwnershipScopedLocalDataIdentity(t *testing.T) {
 
 func TestLifecycleUpdateOrdinaryChangesAndUnknownInputs(t *testing.T) {
 	old := lifecycleInputs("edge")
-	for _, next := range []property.Map{old, rotateSecret(t, old), changeImage(t, old), changeHostname(t, old), old.Set("resource", property.New(property.Computed)), old.Set("server", property.New(property.Computed)), old.Set("target", property.New(property.Computed)), old.Set("secrets", property.New(property.Computed).WithSecret(true))} {
+	for _, next := range []property.Map{rotateSecret(t, old), changeImage(t, old), changeHostname(t, old), old.Set("resource", property.New(property.Computed)), old.Set("server", property.New(property.Computed)), old.Set("target", property.New(property.Computed)), old.Set("secrets", property.New(property.Computed).WithSecret(true))} {
 		r := &recordingLifecycleTransport{}
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t), artifact: fatalArtifact(t)})
 		oldRevision := revision(t, h, old)
@@ -441,20 +586,92 @@ func TestLifecycleUpdateOrdinaryChangesAndUnknownInputs(t *testing.T) {
 	}
 }
 
-func TestLifecycleUpdateRejectsReleaseUpgradeWithoutWrite(t *testing.T) {
+func TestLifecycleUpdateHealthyNoOpAndCompletedSameReleaseRetryOnlyInspect(t *testing.T) {
+	old := lifecycleInputs("edge")
+	for _, next := range []property.Map{old, rotateSecret(t, old), changeImage(t, old)} {
+		r := &recordingLifecycleTransport{}
+		artifactCalls := 0
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return artifactBundle{}, errors.New("must not load") }, approve: fatalApproval(t)})
+		oldRevision, desired := revision(t, h, old), revision(t, h, next)
+		nextObservation := observationFor(decodeTarget(t, next), desired)
+		r.outcomes = []lifecycleOutcome{response(inspected(nextObservation))}
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+		if err != nil || !onlyInspect(r) || artifactCalls != 0 || got.Properties.Len() == 0 {
+			t.Fatal("healthy completed Update did not finish with one validated inspect and no repeated effects")
+		}
+		assertInspect(t, r.calls[0], next, desired)
+		assertCheckpoint(t, got.Properties, next, nextObservation, desired)
+	}
+}
+
+func TestLifecycleUpdateUpgradesReleasedHostArtifactInPlace(t *testing.T) {
 	old := lifecycleInputs("edge")
 	nextTarget := decodeTarget(t, old)
 	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	next := old.Set("target", encodeValue(t, nextTarget))
-	r := &recordingLifecycleTransport{}
-	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
-	oldRevision := revision(t, h, old)
-	r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision)))}
+	bundle, binary := lifecycleBundle(t, nextTarget.ReleaseArtifact)
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}}
+	artifactCalls := 0
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return bundle, nil }, approve: fatalApproval(t)})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), response(applied(desired)), response(inspected(observationFor(nextTarget, desired)))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err == nil || got.Properties.Len() != 0 || !strings.Contains(err.Error(), "unsupported upgrade") || hasWrite(r) {
-		t.Fatal("release upgrade was not rejected before write")
+	if err != nil || artifactCalls != 1 || len(r.calls) != 4 || r.calls[0].request.Action != hostcontract.ActionInspect || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver || r.calls[3].request.Action != hostcontract.ActionInspect {
+		t.Fatal("release upgrade did not use inspect, probe, BootstrapReceiver, inspect")
 	}
-	assertNoCanary(t, errString(err))
+	assertInspect(t, r.calls[0], next, desired)
+	bootstrap := decodeBootstrapRequest(t, r.calls[2].stdin, binary)
+	assertReconcile(t, bootstrap, next, desired, oldRevision, nil)
+	assertInspect(t, r.calls[3], next, desired)
+	assertCheckpoint(t, got.Properties, next, observationFor(nextTarget, desired), desired)
+}
+
+func TestLifecycleUpdateReleaseUpgradeGuardsAndPostBootstrapFailures(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
+	for _, scenario := range []struct {
+		name    string
+		bundle  func(t *testing.T) (artifactBundle, error)
+		probe   artifact.ProbeInfo
+		calls   int
+		write   bool
+	}{
+		{"artifact unavailable", func(*testing.T) (artifactBundle, error) { return artifactBundle{}, errors.New("absent") }, artifact.ProbeInfo{}, 1, false},
+		{"manifest release mismatch", func(t *testing.T) (artifactBundle, error) { bundle, _ := lifecycleBundle(t, "other-release"); return bundle, nil }, artifact.ProbeInfo{}, 1, false},
+		{"unsupported architecture", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "mips", Machine: "machine-a"}, 2, false},
+		{"checksum mismatch", func(t *testing.T) (artifactBundle, error) { bundle := lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact); bundle.Manifest.LinuxAMD64.SHA256 = strings.Repeat("0", 64); return bundle, nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 2, false},
+		{"probe OS mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Darwin", Arch: "amd64", Machine: "machine-a"}, 2, false},
+		{"probe machine mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-b"}, 2, false},
+		{"bootstrap invalid response", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
+		{"bootstrap transport failure", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
+		{"final observation mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 4, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			r := &recordingLifecycleTransport{probe: scenario.probe}
+			artifactCalls := 0
+			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return scenario.bundle(t) }, approve: fatalApproval(t)})
+			oldRevision, desired := revision(t, h, old), revision(t, h, next)
+			r.outcomes = []lifecycleOutcome{response(inspected(observationFor(decodeTarget(t, old), oldRevision)))}
+			if scenario.calls > 1 {
+				if scenario.calls == 3 {
+					r.outcomes = append(r.outcomes, failure(openssh.ErrTransport))
+				}
+				if scenario.calls == 4 {
+					r.outcomes = append(r.outcomes, response(applied(desired)), response(inspected(wrongRelease(observationFor(nextTarget, desired)))))
+				}
+			}
+			if scenario.name == "bootstrap invalid response" {
+				r.outcomes[1] = response(inspected(observationFor(nextTarget, desired)))
+			}
+			got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+			if err == nil || got.Properties.Len() != 0 || artifactCalls != 1 || len(r.calls) != scenario.calls || hasWrite(r) != scenario.write {
+				t.Fatal("release upgrade guard or post-bootstrap failure had an unexpected artifact call, state, or write")
+			}
+			assertNoCanary(t, errString(err))
+		})
+	}
 }
 
 func TestLifecycleUpdateDirectGuardsFailBeforeTransport(t *testing.T) {
@@ -796,6 +1013,9 @@ func dangerousChange(t *testing.T) (property.Map, property.Map) { old, next := l
 func twoDangerousChanges(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next); secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSServerName: "old-two.example"}; secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSServerName: "new-two.example"}; oldTarget.Apps[0].DataLinks = append(oldTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondOld}); nextTarget.Apps[0].DataLinks = append(nextTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondNew}); oldTarget.Apps[0].DataLinks[0].Identity.Endpoint = "old-one.example"; nextTarget.Apps[0].DataLinks[0].Identity.Endpoint = "new-one.example"; return old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget)) }
 func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity { database, tls := "sub2api", ""; managed := "owner-scoped-" + service.Type + "-" + service.ID + "-managed"; if service.Type == "redis" { database = "0" } else { tls = managed }; return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSServerName: tls} }
 func lifecycleBundle(t *testing.T, release string) (artifactBundle, []byte) { t.Helper(); root := t.TempDir(); amd64, arm64 := []byte("pinned-host-amd64"), []byte("pinned-host-arm64"); write := func(name string, contents []byte) { if err := os.WriteFile(filepath.Join(root, name), contents, 0o600); err != nil { t.Fatal("artifact fixture write failed") } }; write("host-amd64", amd64); write("host-arm64", arm64); sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }; return artifactBundle{Root: root, Manifest: artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "host-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "host-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}}, amd64 }
+func lifecycleArtifactBundle(t *testing.T, release string) artifactBundle { t.Helper(); bundle, _ := lifecycleBundle(t, release); return bundle }
+func releaseBundleProvider(t *testing.T, bundleRoot string) string { t.Helper(); provider := filepath.Join(bundleRoot, "bin", "pulumi-resource-sub2api-host"); if err := os.MkdirAll(filepath.Dir(provider), 0o700); err != nil { t.Fatal(err) }; if err := os.WriteFile(provider, []byte("provider"), 0o700); err != nil { t.Fatal(err) }; return provider }
+func releaseBundleHostArtifacts(t *testing.T, bundleRoot, release string) (artifactBundle, []byte) { t.Helper(); root := filepath.Join(bundleRoot, "artifacts", "sub2api-host"); if err := os.MkdirAll(root, 0o700); err != nil { t.Fatal(err) }; amd64, arm64 := []byte("released-host-amd64"), []byte("released-host-arm64"); sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }; manifest := artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "sub2api-host-linux-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "sub2api-host-linux-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}; for name, contents := range map[string][]byte{manifest.LinuxAMD64.Path: amd64, manifest.LinuxARM64.Path: arm64} { if err := os.WriteFile(filepath.Join(root, name), contents, 0o700); err != nil { t.Fatal(err) } }; encoded, err := json.Marshal(manifest); if err != nil { t.Fatal(err) }; if err := os.WriteFile(filepath.Join(root, "manifest.json"), encoded, 0o600); err != nil { t.Fatal(err) }; return artifactBundle{Root: root, Manifest: manifest}, amd64 }
 func decodeBootstrapRequest(t *testing.T, stdin, binary []byte) hostprotocol.Request { t.Helper(); hash := sha256.Sum256(binary); prefix := []byte(fmt.Sprintf("s2a1:%d:%x\n", len(binary), hash)); if len(stdin) < len(prefix)+len(binary) || !bytes.Equal(stdin[:len(prefix)], prefix) || !bytes.Equal(stdin[len(prefix):len(prefix)+len(binary)], binary) { t.Fatal("bootstrap input did not contain the pinned artifact") }; request, err := hostprotocol.DecodeRequest(stdin[len(prefix)+len(binary):]); if err != nil { t.Fatal("bootstrap did not contain one valid request frame") }; return request }
 func assertInspect(t *testing.T, call lifecycleCall, inputs property.Map, desired string) { t.Helper(); alias := field(valueAt(t, inputs, "server"), "sshAlias").AsString(); request := call.request; if call.command != openssh.Host || call.alias != alias || request.Action != hostcontract.ActionInspect || request.Server.SSHAlias != alias || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != desired || request.Target != nil || request.Secrets != nil || request.Approval != nil || request.PriorAppliedRevision != "" || request.PriorObservation != "" { t.Fatal("Inspect request contract was not exact") } }
 func assertReconcile(t *testing.T, request hostprotocol.Request, inputs property.Map, desired, prior string, approval *hostcontract.ApprovalSubject) { t.Helper(); alias := field(valueAt(t, inputs, "server"), "sshAlias").AsString(); if request.Action != hostcontract.ActionReconcile || request.Server.SSHAlias != alias || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != desired || request.PriorAppliedRevision != prior || request.PriorObservation != "" || !reflect.DeepEqual(request.Approval, approval) || request.Target == nil || request.Secrets == nil || !reflect.DeepEqual(*request.Target, decodeTarget(t, inputs)) || !reflect.DeepEqual(*request.Secrets, decodeSecrets(t, inputs)) { t.Fatal("Reconcile request contract was not exact") } }

@@ -79,6 +79,70 @@ func TestBootstrapBindsHostGeneratedOwnershipThenReconcilesAndReplaysExactly(t *
 	}
 }
 
+func TestBootstrapAdvancesCompletedManagedHostToNextReleaseWithoutRepeatingRetry(t *testing.T) {
+	rt, old := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	oldRequest := requestFor(old, revisionB(), app("one", "image-old"))
+	oldResult, err := rt.Reconcile(t.Context(), oldRequest)
+	if err != nil || oldResult.Status != hostprotocol.ResultApplied {
+		t.Fatalf("trusted prior reconcile = %#v, %v", oldResult, err)
+	}
+	completed := mustState(t, rt)
+	oldJournal := *completed.Journal
+	next := requestFor(completed, revisionC(), app("one", "image-next"))
+	next.Server = hostcontract.ServerTarget{SSHAlias: "edge"}
+	next.Target.ReleaseArtifact = "release-next"
+
+	mutations := runner.mutations()
+	result, err := rt.Bootstrap(t.Context(), next)
+	after := mustState(t, rt)
+	if err != nil || result.Status != hostprotocol.ResultApplied || result.AppliedRevision != next.TargetRevision || runner.mutations() <= mutations || after.Resource != completed.Resource || after.Machine != completed.Machine || after.Ownership != completed.Ownership || after.AppliedRevision != next.TargetRevision || after.Observation.HostRelease != next.Target.ReleaseArtifact || after.Observation.AppliedRevision != next.TargetRevision || len(after.Observation.Apps) != 1 || after.Observation.Apps[0].ID != "one" || after.Observation.Apps[0].ActiveImage != "image-next" || !after.Observation.Apps[0].Ready || after.LastOperation == nil || !reflect.DeepEqual(*after.LastOperation, oldJournal) || after.Journal == nil || after.Journal.Status != journalComplete || after.Journal.Key != requestKey(next) || after.Journal.Result == nil || !reflect.DeepEqual(*after.Journal.Result, result) {
+		t.Fatalf("completed Host upgrade = %#v, %#v, %v", result, after, err)
+	}
+	calls := len(runner.calls)
+	retry, err := rt.Bootstrap(t.Context(), next)
+	if err != nil || !reflect.DeepEqual(retry, result) || len(runner.calls) != calls {
+		t.Fatalf("exact completed Host upgrade retry = %#v, %v; calls %d -> %d", retry, err, calls, len(runner.calls))
+	}
+}
+
+func TestBootstrapRejectsUnsafeNextOperationWithoutMutation(t *testing.T) {
+	for _, scenario := range []func(*State, *hostprotocol.Request){
+		func(state *State, request *hostprotocol.Request) { request.Resource.ServerKey = "other" },
+		func(state *State, request *hostprotocol.Request) { state.Machine.Value = "mid1:other"; state.Observation.Machine = state.Machine },
+		func(_ *State, request *hostprotocol.Request) { request.PriorAppliedRevision = revisionC() },
+		func(state *State, _ *hostprotocol.Request) { state.Journal = &Journal{Key: reconcileKey(*state, revision()), Status: journalPending} },
+	} {
+		rt, state := initialized(t)
+		key := reconcileKey(state, revisionB())
+		op, err := rt.Begin(key, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := op.Complete(applied(key, state), observation(state, key.TargetRevision)); err != nil {
+			t.Fatal(err)
+		}
+		state = mustState(t, rt)
+		next := bootstrapRequest()
+		next.TargetRevision, next.PriorAppliedRevision = revisionC(), state.AppliedRevision
+		next.Target.ReleaseArtifact = "release-next"
+		scenario(&state, &next)
+		raw, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		runner := &recordingRunner{}
+		rt.runner = runner
+		if _, err := rt.Bootstrap(t.Context(), next); err == nil || runner.mutations() != 0 || len(runner.calls) != 0 || !bytes.Equal(mustFile(t, rt.statePath()), raw) {
+			t.Fatal("unsafe Host upgrade bootstrap mutated managed state")
+		}
+	}
+}
+
 func TestBootstrapRejectsInvalidMachineBeforeStateOrMutationWithoutSecretLeak(t *testing.T) {
 	rt := testRuntime(t)
 	if err := os.WriteFile(rt.machinePath, []byte("00000000000000000000000000000000\n"), 0600); err != nil {
