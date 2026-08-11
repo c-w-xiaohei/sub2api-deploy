@@ -203,6 +203,19 @@ func TestLifecycleCreateGuardsFailBeforeArtifactOrTransport(t *testing.T) {
 	}
 }
 
+func TestLifecycleCreateRejectsUnsecretTopLevelSecretsBeforeArtifactOrTransport(t *testing.T) {
+	valid := lifecycleInputs("edge")
+	inputs := valid.Set("secrets", encodeValue(t, decodeSecrets(t, valid)))
+	r := &recordingLifecycleTransport{}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+	got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
+	if err == nil || got.ID != "" || got.Properties.Len() != 0 {
+		t.Fatal("Create accepted unsecret top-level secrets")
+	}
+	assertNoCalls(t, r)
+	assertNoCanary(t, errString(err))
+}
+
 func TestLifecycleUpdateReconcilesWithOldCheckpointRevision(t *testing.T) {
 	old, next := lifecycleInputs("edge-old"), lifecycleInputs("edge-new")
 	next = rotateSecret(t, next)
@@ -270,6 +283,34 @@ func TestLifecycleUpdateRequestsOnlyExactSingleDataLinkApproval(t *testing.T) {
 	if r.calls[1].request.Approval == nil || !reflect.DeepEqual(*r.calls[1].request.Approval, expected) {
 		t.Fatal("reconcile did not include the exact approval")
 	}
+}
+
+func TestLifecycleUpdateRequestsApprovalForRenamedExactSingleDataLink(t *testing.T) {
+	old, next := lifecycleInputs("edge"), lifecycleInputs("edge")
+	oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next)
+	oldIdentity := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-db", Endpoint: "old-db.example", Port: 5432, Database: "app", TLSServerName: "old-db.example"}
+	newIdentity := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-db", Endpoint: "new-db.example", Port: 5432, Database: "app", TLSServerName: "new-db.example"}
+	oldTarget.Apps[0].DataLinks[0] = hostcontract.DataLink{Name: "old-main", Identity: oldIdentity}
+	nextTarget.Apps[0].DataLinks[0] = hostcontract.DataLink{Name: "new-main", Identity: newIdentity}
+	old, next = old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget))
+	r := &recordingLifecycleTransport{}
+	var expected hostcontract.ApprovalSubject
+	approvals := 0
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+		approvals++
+		r.events = append(r.events, "approve")
+		if !reflect.DeepEqual(subject, expected) { t.Fatal("renamed link approval subject was not exact") }
+		return &expected, nil
+	}})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	oldObservation := observationFor(oldTarget, oldRevision)
+	expected = hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: "prod", Resource: lifecycleResource(t, old), AppID: "api", DataKind: "postgres", OldData: oldIdentity, NewData: newIdentity, TargetRevision: desired}
+	r.outcomes = []lifecycleOutcome{response(inspected(oldObservation)), response(applied(desired)), response(inspected(observationFor(nextTarget, desired)))}
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
+	if err != nil || got.Properties.Len() == 0 || approvals != 1 || strings.Join(r.events, ",") != "inspect,approve,reconcile,inspect" {
+		t.Fatal("renamed exact single data-link did not use inspect, approve, reconcile, inspect")
+	}
+	if r.calls[1].request.Approval == nil || !reflect.DeepEqual(*r.calls[1].request.Approval, expected) { t.Fatal("renamed link reconcile did not include the exact approval") }
 }
 
 func TestLifecycleUpdateApprovalFailuresAndMultipleChangesDoNotWrite(t *testing.T) {
@@ -345,7 +386,7 @@ func TestLifecycleUpdateRejectsInvalidFinalObservation(t *testing.T) {
 
 func TestLifecycleUpdateRejectsInvalidFinalLocalDataObservation(t *testing.T) {
 	old, next := localDataInputs(t, "edge"), rotateSecret(t, localDataInputs(t, "edge"))
-	for _, mutate := range []func(hostcontract.StableObservation) hostcontract.StableObservation{wrongLocalData, missingLocalData, duplicateLocalData, notReadyLocalData} {
+	for _, mutate := range []func(hostcontract.StableObservation) hostcontract.StableObservation{emptyLocalDataIdentity, wrongLocalDataKind, wrongLocalDataPort, wrongLocalDataDatabase, wrongLocalDataTLS, mismatchedLocalDataProviderAndEndpoint, notReadyLocalData, missingLocalData, duplicateLocalData} {
 		r := &recordingLifecycleTransport{}
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 		oldRevision, desired := revision(t, h, old), revision(t, h, next)
@@ -357,6 +398,21 @@ func TestLifecycleUpdateRejectsInvalidFinalLocalDataObservation(t *testing.T) {
 		}
 		assertNoCanary(t, errString(err))
 	}
+}
+
+func TestLifecycleUpdateAcceptsOwnershipScopedLocalDataIdentity(t *testing.T) {
+	old, next := localDataInputs(t, "edge"), rotateSecret(t, localDataInputs(t, "edge"))
+	r := &recordingLifecycleTransport{}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	oldObservation, nextObservation := observationFor(decodeTarget(t, old), oldRevision), observationFor(decodeTarget(t, next), desired)
+	if len(nextObservation.Data) != 2 || nextObservation.Data[0].Identity.ProviderID == "primary" || nextObservation.Data[1].Identity.ProviderID == "replica" || nextObservation.Data[0].Identity.ProviderID == nextObservation.Data[1].Identity.ProviderID {
+		t.Fatal("local data fixture did not contain two distinct opaque managed identities")
+	}
+	r.outcomes = []lifecycleOutcome{response(inspected(oldObservation)), response(applied(desired)), response(inspected(nextObservation))}
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
+	if err != nil || len(r.calls) != 3 { t.Fatal("Update rejected an ownership-scoped local data identity") }
+	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
 }
 
 func TestLifecycleUpdateOrdinaryChangesAndUnknownInputs(t *testing.T) {
@@ -415,16 +471,58 @@ func TestLifecycleUpdateDirectGuardsFailBeforeTransport(t *testing.T) {
 		{"malformed ownership", "stable", checkpointFor(t, old).Set("ownership", property.New("bad")), old, old},
 		{"malformed revision", "stable", checkpointFor(t, old).Set("appliedRevision", property.New("bad")), old, old},
 		{"malformed observation", "stable", checkpointFor(t, old).Set("observation", property.New("bad")), old, old},
+		{"computed old inputs", "stable", checkpointFor(t, old), old.Set("target", property.New(property.Computed)), old},
+		{"missing old inputs field", "stable", checkpointFor(t, old), old.Delete("target"), old},
+		{"malformed old inputs", "stable", checkpointFor(t, old), old.Set("server", property.New("bad")), old},
+		{"unsecret old inputs", "stable", checkpointFor(t, old), old.Set("secrets", encodeValue(t, decodeSecrets(t, old))), old},
+		{"unsecret next inputs", "stable", checkpointFor(t, old), old, old.Set("secrets", encodeValue(t, decodeSecrets(t, old)))},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			r := &recordingLifecycleTransport{}
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
-			_, err := h.update(t.Context(), p.UpdateRequest{ID: scenario.id, State: scenario.state, OldInputs: scenario.oldInputs, Inputs: scenario.inputs})
-			if err == nil { t.Fatal("invalid Update guard was accepted") }
+			got, err := h.update(t.Context(), p.UpdateRequest{ID: scenario.id, State: scenario.state, OldInputs: scenario.oldInputs, Inputs: scenario.inputs})
+			if err == nil || got.Properties.Len() != 0 { t.Fatal("invalid Update guard was accepted or fabricated state") }
 			assertNoCalls(t, r)
 			assertNoCanary(t, errString(err))
 		})
 	}
+}
+
+func TestLifecycleRemoteErrorsReturnEmptyResponsesWithoutPanic(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	bundle, _ := lifecycleBundle(t, release(t, inputs))
+	t.Run("Create bootstrap conflict", func(t *testing.T) {
+		r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, outcomes: []lifecycleOutcome{remoteError(hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict)}}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
+		assertNoPanic(t, func() {
+			got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 2 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver { t.Fatal("Create remote conflict did not return a bounded empty response") }
+			assertNoCanary(t, errString(err))
+		})
+	})
+	t.Run("Update inspect recovery required", func(t *testing.T) {
+		old, next := lifecycleInputs("edge"), rotateSecret(t, lifecycleInputs("edge"))
+		r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{remoteError(hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired)}}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		oldRevision := revision(t, h, old)
+		assertNoPanic(t, func() {
+			got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+			if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) { t.Fatal("Update remote recovery error did not return a bounded empty response") }
+			assertNoCanary(t, errString(err))
+		})
+	})
+	t.Run("Update reconcile conflict", func(t *testing.T) {
+		old, next := lifecycleInputs("edge"), rotateSecret(t, lifecycleInputs("edge"))
+		r := &recordingLifecycleTransport{}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		oldRevision := revision(t, h, old)
+		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), remoteError(hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict)}
+		assertNoPanic(t, func() {
+			got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+			if err == nil || got.Properties.Len() != 0 || len(r.calls) != 2 || !onlyInspectThenReconcile(r) { t.Fatal("Update reconcile remote conflict did not return a bounded empty response") }
+			assertNoCanary(t, errString(err))
+		})
+	})
 }
 
 type lifecycleCall struct { kind, alias string; command openssh.Command; stdin []byte; request hostprotocol.Request; hostAttempted, decoded bool }
@@ -432,6 +530,7 @@ type lifecycleOutcome struct { response hostprotocol.Response; err error }
 type recordingLifecycleTransport struct { probe artifact.ProbeInfo; probeErr error; outcomes []lifecycleOutcome; calls []lifecycleCall; events []string }
 func response(value hostprotocol.Response) lifecycleOutcome { return lifecycleOutcome{response: value} }
 func failure(err error) lifecycleOutcome { return lifecycleOutcome{err: err} }
+func remoteError(category hostprotocol.ErrorCategory, code hostprotocol.ErrorCode) lifecycleOutcome { return response(hostprotocol.Response{Version: hostprotocol.Version, Error: &hostprotocol.RemoteError{Category: category, Code: code}}) }
 func (r *recordingLifecycleTransport) Probe(_ context.Context, alias string) (artifact.ProbeInfo, error) { r.calls = append(r.calls, lifecycleCall{kind: "probe", alias: alias}); return r.probe, r.probeErr }
 func (r *recordingLifecycleTransport) Bootstrap(ctx context.Context, alias string, stdin []byte) (hostprotocol.Response, error) { return r.Run(ctx, alias, openssh.BootstrapReceiver, stdin) }
 func (r *recordingLifecycleTransport) Run(_ context.Context, alias string, command openssh.Command, stdin []byte) (hostprotocol.Response, error) {
@@ -448,7 +547,7 @@ func configureHost(t *testing.T, h *host) { t.Helper(); key := base64.StdEncodin
 func configureProvider(t *testing.T, provider p.Provider) { t.Helper(); key := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901")); if err := provider.Configure(t.Context(), p.ConfigureRequest{Args: property.NewMap(map[string]property.Value{"revisionKey": property.New(key).WithSecret(true)})}); err != nil { t.Fatal("Configure failed") } }
 func lifecycleInputs(alias string) property.Map { return property.NewMap(map[string]property.Value{"resource": object("environment", property.New("prod"), "serverKey", property.New("edge")), "server": object("sshAlias", property.New(alias)), "target": object("releaseArtifact", property.New("release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "apps", property.New(property.NewArray([]property.Value{object("id", property.New("api"), "image", property.New("api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "hostname", property.New("api.example"), "readinessPath", property.New("/ready"), "dataLinks", property.New(property.NewArray([]property.Value{object("name", property.New("main"), "identity", object("kind", property.New("postgres"), "providerId", property.New("db-1"), "endpoint", property.New("db.example"), "port", property.New(5432.0), "database", property.New("app"), "tlsServerName", property.New("db.example")))})))}))), "secrets": property.New(property.NewMap(map[string]property.Value{"apps": object("api", object("jwtSecret", property.New(lifecycleCanary)))})).WithSecret(true)}) }
 func lifecycleResource(t *testing.T, inputs property.Map) hostcontract.ResourceIdentity { t.Helper(); resource := valueAt(t, inputs, "resource"); return hostcontract.ResourceIdentity{Environment: field(resource, "environment").AsString(), ServerKey: field(resource, "serverKey").AsString()} }
-func localDataInputs(t *testing.T, alias string) property.Map { t.Helper(); inputs := lifecycleInputs(alias); target, secrets := decodeTarget(t, inputs), decodeSecrets(t, inputs); target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432, Persistence: true}}; secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: lifecycleCanary}}; return inputs.Set("target", encodeValue(t, target)).Set("secrets", encodeValue(t, secrets).WithSecret(true)) }
+func localDataInputs(t *testing.T, alias string) property.Map { t.Helper(); inputs := lifecycleInputs(alias); target, secrets := decodeTarget(t, inputs), decodeSecrets(t, inputs); target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432, Persistence: true}, {ID: "replica", Type: "postgres", Port: 5432, Persistence: true}}; secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: lifecycleCanary}, "replica": {AdminPassword: lifecycleCanary}}; return inputs.Set("target", encodeValue(t, target)).Set("secrets", encodeValue(t, secrets).WithSecret(true)) }
 func revision(t *testing.T, h *host, inputs property.Map) string { t.Helper(); value, err := hostcontract.TargetRevision(h.key, lifecycleResource(t, inputs), decodeTarget(t, inputs), decodeSecrets(t, inputs)); if err != nil { t.Fatal("revision failed") }; return value }
 func revisionForInputs(t *testing.T, inputs property.Map) string { t.Helper(); h := configuredLifecycleHost(t, lifecycleDependencies{}); return revision(t, h, inputs) }
 func baselineRevision(t *testing.T, h *host, inputs property.Map) string { t.Helper(); value, err := hostcontract.TargetRevision(h.key, lifecycleResource(t, inputs), hostcontract.Target{ReleaseArtifact: release(t, inputs)}, hostcontract.Secrets{}); if err != nil { t.Fatal("baseline revision failed") }; return value }
@@ -469,16 +568,21 @@ func notReadyApp(value hostcontract.StableObservation) hostcontract.StableObserv
 func wrongAppID(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps[0].ID = "other"; return value }
 func duplicateAppID(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps = append(value.Apps, value.Apps[0]); return value }
 func missingApps(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps = nil; return value }
-func wrongLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Port++; return value }
-func missingLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data = nil; return value }
-func duplicateLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data = append(value.Data, value.Data[0]); return value }
+func wrongLocalDataKind(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Kind = "redis"; return value }
+func emptyLocalDataIdentity(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.ProviderID, value.Data[0].Identity.Endpoint = "", ""; return value }
+func wrongLocalDataPort(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Port++; return value }
+func wrongLocalDataDatabase(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Database = "other"; return value }
+func wrongLocalDataTLS(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.TLSServerName = "other"; return value }
+func mismatchedLocalDataProviderAndEndpoint(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Endpoint = "other"; return value }
+func missingLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data = value.Data[:1]; return value }
+func duplicateLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[1] = value.Data[0]; return value }
 func notReadyLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Ready = false; return value }
 func rotateSecret(t *testing.T, inputs property.Map) property.Map { secrets := decodeSecrets(t, inputs); secrets.Apps["api"] = hostcontract.AppSecrets{JWTSecret: "rotated-" + lifecycleCanary}; return inputs.Set("secrets", encodeValue(t, secrets).WithSecret(true)) }
 func changeImage(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Image = "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; return inputs.Set("target", encodeValue(t, target)) }
 func changeHostname(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Hostname = "other.example"; return inputs.Set("target", encodeValue(t, target)) }
 func dangerousChange(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); target := decodeTarget(t, old); target.Apps[0].DataLinks[0].Identity.Endpoint = "old-db.example"; return old.Set("target", encodeValue(t, target)), next }
 func twoDangerousChanges(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next); secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSServerName: "old-two.example"}; secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSServerName: "new-two.example"}; oldTarget.Apps[0].DataLinks = append(oldTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondOld}); nextTarget.Apps[0].DataLinks = append(nextTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondNew}); oldTarget.Apps[0].DataLinks[0].Identity.Endpoint = "old-one.example"; nextTarget.Apps[0].DataLinks[0].Identity.Endpoint = "new-one.example"; return old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget)) }
-func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity { database, tls := "sub2api", ""; if service.Type == "redis" { database = "0" } else { tls = service.ID }; return hostcontract.DataIdentity{Kind: service.Type, ProviderID: service.ID, Endpoint: service.ID, Port: service.Port, Database: database, TLSServerName: tls} }
+func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity { database, tls := "sub2api", ""; managed := "owner-scoped-" + service.Type + "-" + service.ID + "-managed"; if service.Type == "redis" { database = "0" } else { tls = managed }; return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSServerName: tls} }
 func lifecycleBundle(t *testing.T, release string) (artifactBundle, []byte) { t.Helper(); root := t.TempDir(); amd64, arm64 := []byte("pinned-host-amd64"), []byte("pinned-host-arm64"); write := func(name string, contents []byte) { if err := os.WriteFile(filepath.Join(root, name), contents, 0o600); err != nil { t.Fatal("artifact fixture write failed") } }; write("host-amd64", amd64); write("host-arm64", arm64); sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }; return artifactBundle{Root: root, Manifest: artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "host-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "host-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}}, amd64 }
 func decodeBootstrapRequest(t *testing.T, stdin, binary []byte) hostprotocol.Request { t.Helper(); hash := sha256.Sum256(binary); prefix := []byte(fmt.Sprintf("s2a1:%d:%x\n", len(binary), hash)); if len(stdin) < len(prefix)+len(binary) || !bytes.Equal(stdin[:len(prefix)], prefix) || !bytes.Equal(stdin[len(prefix):len(prefix)+len(binary)], binary) { t.Fatal("bootstrap input did not contain the pinned artifact") }; request, err := hostprotocol.DecodeRequest(stdin[len(prefix)+len(binary):]); if err != nil { t.Fatal("bootstrap did not contain one valid request frame") }; return request }
 func assertInspect(t *testing.T, call lifecycleCall, inputs property.Map, desired string) { t.Helper(); alias := field(valueAt(t, inputs, "server"), "sshAlias").AsString(); request := call.request; if call.command != openssh.Host || call.alias != alias || request.Action != hostcontract.ActionInspect || request.Server.SSHAlias != alias || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != desired || request.Target != nil || request.Secrets != nil || request.Approval != nil || request.PriorAppliedRevision != "" || request.PriorObservation != "" { t.Fatal("Inspect request contract was not exact") } }
@@ -498,6 +602,8 @@ func fatalArtifact(t *testing.T) func() (artifactBundle, error) { return func() 
 func fatalApproval(t *testing.T) func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { return func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { t.Fatal("approval source was called"); return nil, nil } }
 func assertNoCalls(t *testing.T, r *recordingLifecycleTransport) { t.Helper(); if len(r.calls) != 0 { t.Fatal("transport was called") } }
 func onlyInspect(r *recordingLifecycleTransport) bool { return len(r.calls) == 1 && r.calls[0].command == openssh.Host && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect }
+func onlyInspectThenReconcile(r *recordingLifecycleTransport) bool { return len(r.calls) == 2 && r.calls[0].command == openssh.Host && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect && r.calls[1].command == openssh.Host && r.calls[1].decoded && r.calls[1].request.Action == hostcontract.ActionReconcile }
 func hasWrite(r *recordingLifecycleTransport) bool { for _, call := range r.calls { if call.command == openssh.BootstrapReceiver || call.hostAttempted && (!call.decoded || call.request.Action != hostcontract.ActionInspect) { return true } }; return false }
 func errString(err error) string { if err == nil { return "" }; return err.Error() }
 func assertNoCanary(t *testing.T, values ...string) { t.Helper(); for _, value := range values { if strings.Contains(value, lifecycleCanary) { t.Fatal("secret canary leaked") } } }
+func assertNoPanic(t *testing.T, run func()) { t.Helper(); defer func() { if recover() != nil { t.Fatal("lifecycle panicked") } }(); run() }
