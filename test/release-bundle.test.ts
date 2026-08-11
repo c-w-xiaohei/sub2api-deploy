@@ -90,7 +90,7 @@ function failureStderr(action: () => void) {
 }
 
 function workflowJobs(workflow: string) {
-  return [...workflow.matchAll(/^  ([A-Za-z0-9_-]+):\n([\s\S]*?)(?=^  [A-Za-z0-9_-]+:\n|$)/gm)]
+  return [...workflow.matchAll(/^  ([A-Za-z0-9_-]+):\n([\s\S]*?)(?=^  [A-Za-z0-9_-]+:\n|(?![\s\S]))/gm)]
     .map(([, name, body]) => ({ name, body }));
 }
 
