@@ -82,13 +82,18 @@ archive_members() {
 
 verify_archive_shape() {
   local archive="$1"
-  local member relative top="" path has_child=false
-  local -a members expected
-  declare -A seen=()
+  local member relative top="" path has_child=false type
+  local -a members metadata expected
+  declare -A seen=() member_types=()
 
   mapfile -t members < <(archive_members "$archive")
+  # GNU tar emits the entry type as the first character of verbose metadata.
+  # Pair it with the plain listing so quoted or otherwise unusual names fail closed.
+  mapfile -t metadata < <(tar -tvzf "$archive")
   ((${#members[@]} > 0)) || die 'archive is empty'
+  ((${#members[@]} == ${#metadata[@]})) || die 'archive metadata cannot be safely inspected'
   for member in "${members[@]}"; do
+    type="${metadata[${#member_types[@]}]:0:1}"
     [[ "$member" != /* && "$member" != ../* && "$member" != */../* && "$member" != */.. ]] || die "unsafe archive member: $member"
     [[ "$member" != *$'\n'* ]] || die 'archive member contains a newline'
     if [[ -z "$top" ]]; then
@@ -97,14 +102,18 @@ verify_archive_shape() {
     [[ "$member" == "$top" || "$member" == "$top/"* ]] || die 'archive contains more than one top-level bundle'
     [[ "$member" == "$top/"* ]] && has_child=true
     [[ -z "${seen[$member]+present}" ]] || die "archive contains duplicate member: $member"
+    [[ "$type" == '-' || "$type" == 'd' ]] || die "archive member is not a regular file or directory: $member"
     seen["$member"]=1
+    member_types["$member"]="$type"
   done
   [[ "$has_child" == true ]] || die 'archive has no top-level bundle directory'
+  [[ "${member_types[$top]:-}" == d ]] || die 'archive top-level bundle is not a directory'
 
   expected=(bin/go bin/pulumi bin/sub2api-deploy bin/pulumi-program bin/pulumi-resource-sub2api-host artifacts/sub2api-host/manifest.json artifacts/sub2api-host/sub2api-host-linux-amd64 artifacts/sub2api-host/sub2api-host-linux-arm64)
   while IFS= read -r path; do expected+=("$path"); done < <(manifest_paths)
   for path in "${expected[@]}"; do
     [[ -n "${seen[$top/$path]+present}" ]] || die "required archive member is missing: $path"
+    [[ "${member_types[$top/$path]}" == '-' ]] || die "required archive member is not a regular file: $path"
   done
   for member in "${members[@]}"; do
     [[ "$member" == "$top" ]] && continue
@@ -135,13 +144,13 @@ verify_host_artifacts() {
     type == "object" and
     (keys | sort) == ["linux-amd64", "linux-arm64", "release", "schemaVersion"] and
     (.schemaVersion | type == "number" and . == 1) and
-    (.release | type == "string") and
+    (.release | type == "string" and length > 0) and
     ([."linux-amd64", ."linux-arm64"] | all(
       type == "object" and
       (keys | sort) == ["path", "sha256", "size"] and
       (.path | type == "string") and
       (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-      (.size | type == "number" and floor == . and . >= 0)
+      (.size | type == "number" and floor == . and . >= 0 and . <= 67108864)
     ))
   ' "$manifest" >/dev/null || die 'Host artifact manifest has an invalid schema'
 
@@ -291,9 +300,12 @@ verify_content() {
   local verification_dir edge_env edge_json site_env app_env site_json site_id
 
   for path in bin/go bin/pulumi bin/sub2api-deploy bin/pulumi-program bin/pulumi-resource-sub2api-host; do
-    [[ -x "$bundle_root/$path" ]] || die "required executable is missing: $path"
+    [[ -f "$bundle_root/$path" && ! -L "$bundle_root/$path" && -x "$bundle_root/$path" ]] || die "required executable is missing, not regular, or not executable: $path"
   done
   verify_host_artifacts "$bundle_root"
+  while IFS= read -r path; do
+    [[ -f "$bundle_root/$path" && ! -L "$bundle_root/$path" ]] || die "required bundle file is missing or not regular: $path"
+  done < <(manifest_paths)
   for path in compose/edge.yml compose/site.yml traefik/dynamic/sing-box.yml traefik/dynamic/site.yml scripts/host-preflight.ts scripts/bootstrap-site.sh scripts/application-release.sh scripts/switch-slot.sh scripts/rollback-slot.sh scripts/reconcile-site.sh scripts/reconcile-edge.sh docs/migrations/single-site-to-multi-site.md; do
     [[ -f "$bundle_root/$path" ]] || die "required active path is missing: $path"
   done
