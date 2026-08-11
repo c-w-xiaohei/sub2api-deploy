@@ -9,7 +9,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/artifact"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	p "github.com/pulumi/pulumi-go-provider"
@@ -18,19 +21,38 @@ import (
 
 const hostToken = "sub2api-host:index:Host"
 
-// New creates the Host provider with deliberately unavailable release artifacts.
+var providerExecutable = os.Executable
+
+// New creates the Host provider using only artifacts shipped beside its executable.
 func New(version string) p.Provider {
 	h := newHost(version)
 	return p.Provider{GetSchema: h.schema, CheckConfig: h.checkConfig, Configure: h.configure, Check: h.check, Diff: h.diff, Create: h.create, Read: h.read, Update: h.update, Delete: h.delete}
 }
 
 func newHost(version string) *host {
+	path, err := providerExecutable()
+	if err != nil {
+		return newHostWithDependencies(version, lifecycleDependencies{transport: openssh.New(), artifact: func() (artifactBundle, error) { return artifactBundle{}, errArtifactUnavailable }})
+	}
+	return newHostAtExecutable(version, path)
+}
+
+func newHostAtExecutable(version, path string) *host {
 	return newHostWithDependencies(version, lifecycleDependencies{
 		transport: openssh.New(),
 		artifact: func() (artifactBundle, error) {
-			return artifactBundle{}, errArtifactUnavailable
+			return loadReleaseBundle(path)
 		},
 	})
+}
+
+func loadReleaseBundle(providerPath string) (artifactBundle, error) {
+	root := filepath.Join(filepath.Dir(filepath.Dir(providerPath)), "artifacts", "sub2api-host")
+	bundle, err := artifact.LoadBundle(root)
+	if err != nil {
+		return artifactBundle{}, err
+	}
+	return artifactBundle{Root: bundle.Root, Manifest: bundle.Manifest}, nil
 }
 
 type host struct {

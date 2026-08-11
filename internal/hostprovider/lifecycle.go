@@ -255,14 +255,18 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 	if err != nil {
 		return p.UpdateResponse{}, err
 	}
-	if initial.Machine != machine ||
-		initial.Ownership != owner ||
-		initial.HostRelease != old.target.ReleaseArtifact ||
-		(initial.AppliedRevision != applied && initial.AppliedRevision != next.revision) {
+	if initial.Machine != machine || initial.Ownership != owner {
 		return p.UpdateResponse{}, fmt.Errorf("unsafe remote observation")
 	}
-	if next.target.ReleaseArtifact != old.target.ReleaseArtifact {
-		return p.UpdateResponse{}, fmt.Errorf("unsupported upgrade")
+	if err := validateObservation(initial, machine.Value, owner.Value, next.target, next.revision); err == nil {
+		state, err := checkpointState(next.original, initial, next.revision)
+		if err != nil {
+			return p.UpdateResponse{}, err
+		}
+		return p.UpdateResponse{Properties: state}, nil
+	}
+	if initial.HostRelease != old.target.ReleaseArtifact || initial.AppliedRevision != applied {
+		return p.UpdateResponse{}, fmt.Errorf("unsafe remote observation")
 	}
 
 	approval, err := dangerousApproval(ctx, h.deps.approve, old, next)
@@ -276,6 +280,49 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 	}
 	if h.deps.transport == nil {
 		return p.UpdateResponse{}, fmt.Errorf("transport unavailable")
+	}
+	if next.target.ReleaseArtifact != old.target.ReleaseArtifact {
+		if h.deps.artifact == nil {
+			return p.UpdateResponse{}, errArtifactUnavailable
+		}
+		bundle, err := h.deps.artifact()
+		if err != nil || bundle.Manifest.Release != next.target.ReleaseArtifact {
+			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
+		}
+		probe, err := h.deps.transport.Probe(ctx, next.server.SSHAlias)
+		if err != nil || probe.OS != "Linux" || probe.Machine != machine.Value {
+			return p.UpdateResponse{}, fmt.Errorf("unsupported host")
+		}
+		pinned, err := artifact.LoadPinned(bundle.Root, bundle.Manifest, probe.Arch)
+		if err != nil {
+			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
+		}
+		stdin, err := artifact.BootstrapInput(pinned, frame)
+		if err != nil {
+			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
+		}
+		result, err := h.deps.transport.Bootstrap(ctx, next.server.SSHAlias, stdin)
+		if err != nil {
+			return p.UpdateResponse{}, fmt.Errorf("transport failed")
+		}
+		if err := expectedResponse(result, hostprotocol.ResultApplied, "bootstrap"); err != nil || result.Result.AppliedRevision != next.revision {
+			if err != nil {
+				return p.UpdateResponse{}, err
+			}
+			return p.UpdateResponse{}, fmt.Errorf("invalid bootstrap response")
+		}
+		final, err := h.inspectObservation(ctx, next)
+		if err != nil {
+			return p.UpdateResponse{}, err
+		}
+		if err := validateObservation(final, machine.Value, owner.Value, next.target, next.revision); err != nil {
+			return p.UpdateResponse{}, err
+		}
+		state, err := checkpointState(next.original, final, next.revision)
+		if err != nil {
+			return p.UpdateResponse{}, err
+		}
+		return p.UpdateResponse{Properties: state}, nil
 	}
 	result, err := h.deps.transport.Run(ctx, next.server.SSHAlias, openssh.Host, frame)
 	if err != nil {

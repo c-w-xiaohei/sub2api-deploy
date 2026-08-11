@@ -235,6 +235,7 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 		return hostprotocol.Result{}, recovery()
 	}
 	var op *Operation
+	admitted := false
 	defer func() {
 		if op == nil {
 			_ = lock.Close()
@@ -264,22 +265,37 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 		if state.Resource != q.Resource || state.Machine != machine || state.Retirement != nil {
 			return hostprotocol.Result{}, recovery()
 		}
-		if state.Journal == nil || state.Journal.Key != key {
-			return hostprotocol.Result{}, conflict()
-		}
-		if state.Journal.Status == journalComplete {
-			if state.Journal.Result == nil {
+		if state.Journal != nil && state.Journal.Key == key {
+			if state.Journal.Status == journalComplete {
+				if state.Journal.Result == nil {
+					return hostprotocol.Result{}, recovery()
+				}
+				return *state.Journal.Result, nil
+			}
+			if state.Journal.Status != journalPending || !precondition(state, key) || !validApproval(key, state, state.Journal.Approval) {
+				return hostprotocol.Result{}, conflict()
+			}
+			op = &Operation{runtime: r, lock: lock, state: state, key: key}
+		} else {
+			if state.Journal == nil || state.Journal.Status != journalComplete || state.Journal.Result == nil || state.Observation.HostRelease == q.Target.ReleaseArtifact || !precondition(state, key) || !validApproval(key, state, q.Approval) {
+				return hostprotocol.Result{}, conflict()
+			}
+			if err = r.admitReconcile(q); err != nil {
+				return hostprotocol.Result{}, err
+			}
+			admitted = true
+			state.LastOperation = state.Journal
+			state.Journal = &Journal{Key: key, Status: journalPending, Approval: q.Approval}
+			if err = r.writeState(state); err != nil {
 				return hostprotocol.Result{}, recovery()
 			}
-			return *state.Journal.Result, nil
+			op = &Operation{runtime: r, lock: lock, state: state, key: key}
 		}
-		if state.Journal.Status != journalPending || !precondition(state, key) || !validApproval(key, state, state.Journal.Approval) {
-			return hostprotocol.Result{}, conflict()
-		}
-		op = &Operation{runtime: r, lock: lock, state: state, key: key}
 	}
-	if err = r.admitReconcile(q); err != nil {
-		return hostprotocol.Result{}, err
+	if !admitted {
+		if err = r.admitReconcile(q); err != nil {
+			return hostprotocol.Result{}, err
+		}
 	}
 	result, observation, err := r.reconcile(ctx, op.state, q)
 	if err != nil {
