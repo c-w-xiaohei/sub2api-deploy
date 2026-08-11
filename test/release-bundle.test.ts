@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -24,7 +24,14 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "sub2api-release-bundle-"));
   const components = join(root, "components");
   const bundle = join(root, "bundle");
+  const archive = join(root, "bundle.tar.gz");
+  const fakeBin = join(root, "bin");
+  const dockerLog = join(root, "docker-invoked");
   mkdirSync(components);
+  mkdirSync(fakeBin);
+  const fakeDocker = join(fakeBin, "docker");
+  writeFileSync(fakeDocker, "#!/usr/bin/env bash\ntouch \"$FAKE_DOCKER_LOG\"\nexit 97\n");
+  chmodSync(fakeDocker, 0o755);
   for (const name of ["sub2api-deploy", "pulumi-program", "pulumi-resource-sub2api-host"]) {
     const path = join(components, name);
     writeFileSync(path, `#!/usr/bin/env bash\n# ${name}\n`);
@@ -38,7 +45,15 @@ function fixture() {
     bundle,
     assemble: () => execFileSync("bash", [script, "assemble", bundle, components, "test-release"], { stdio: "pipe" }),
     verify: () => execFileSync("bash", [script, "verify-host-artifacts", bundle], { stdio: "pipe" }),
+    verifyArchive: () => {
+      execFileSync("tar", ["-C", root, "-czf", archive, "bundle"], { stdio: "pipe" });
+      execFileSync("bash", [script, "verify", archive], {
+        stdio: "pipe",
+        env: { ...process.env, FAKE_DOCKER_LOG: dockerLog, PATH: `${fakeBin}:${process.env.PATH}` },
+      });
+    },
     manifestPath: join(bundle, "artifacts", "sub2api-host", "manifest.json"),
+    dockerLog,
   };
 }
 
@@ -63,6 +78,15 @@ function readManifest(path: string) {
 
 function writeManifest(path: string, manifest: ReturnType<typeof readManifest>) {
   writeFileSync(path, `${JSON.stringify(manifest)}\n`);
+}
+
+function failureStderr(action: () => void) {
+  try {
+    action();
+  } catch (error) {
+    return (error as { stderr?: Buffer }).stderr?.toString() ?? "";
+  }
+  throw new Error("expected command to fail");
 }
 
 function workflowJobs(workflow: string) {
@@ -196,6 +220,20 @@ describe("release bundle verification fixtures", () => {
     });
   });
 
+  it.each([
+    ["an empty release", (manifest: ReturnType<typeof readManifest>) => { manifest.release = ""; }],
+    ["a Host size above 64 MiB", (manifest: ReturnType<typeof readManifest>) => { manifest["linux-amd64"].size = 64 * 1024 * 1024 + 1; }],
+  ])("rejects %s as an invalid Host manifest before reading its payload", (_description, mutate) => {
+    withBundle((bundle) => {
+      const manifest = readManifest(bundle.manifestPath);
+      mutate(manifest);
+      writeManifest(bundle.manifestPath, manifest);
+      const stderr = failureStderr(bundle.verify);
+      expect(stderr).toMatch(/Host artifact manifest has an invalid schema/i);
+      expect(stderr).not.toMatch(/Host artifact size mismatch/i);
+    });
+  });
+
   it.each(["amd64", "arm64"] as const)("rejects a %s Host binary with the other ELF architecture even when its manifest entry is updated", (architecture) => {
     withBundle((bundle) => {
       const path = join(bundle.bundle, "artifacts", "sub2api-host", hostBinary(architecture));
@@ -230,6 +268,41 @@ describe("release bundle verification fixtures", () => {
         writeManifest(bundle.manifestPath, invalid as ReturnType<typeof readManifest>);
         expect(bundle.verify).toThrow();
       }
+    });
+  });
+
+  it.each([
+    ["control executable", "bin/sub2api-deploy"],
+    ["manifest-listed Host payload", "artifacts/sub2api-host/sub2api-host-linux-amd64"],
+    ["ordinary manifest-listed payload", "Pulumi.yaml"],
+  ])("rejects a full archive containing a %s symlink", (_description, relativePath) => {
+    withBundle((bundle) => {
+      const path = join(bundle.bundle, relativePath);
+      rmSync(path);
+      symlinkSync("pulumi-program", path);
+      expect(bundle.verifyArchive).toThrow();
+      expect(existsSync(bundle.dockerLog)).toBe(false);
+    });
+  });
+
+  it.each([
+    ["control executable", "bin/sub2api-deploy"],
+    ["manifest-listed Host payload", "artifacts/sub2api-host/sub2api-host-linux-amd64"],
+    ["ordinary manifest-listed payload", "Pulumi.yaml"],
+  ])("rejects a full archive containing a %s directory", (_description, relativePath) => {
+    withBundle((bundle) => {
+      const path = join(bundle.bundle, relativePath);
+      rmSync(path);
+      mkdirSync(path);
+      expect(bundle.verifyArchive).toThrow();
+      expect(existsSync(bundle.dockerLog)).toBe(false);
+    });
+  });
+
+  it("reaches content verification for an intact archive", () => {
+    withBundle((bundle) => {
+      expect(bundle.verifyArchive).toThrow();
+      expect(existsSync(bundle.dockerLog)).toBe(true);
     });
   });
 
