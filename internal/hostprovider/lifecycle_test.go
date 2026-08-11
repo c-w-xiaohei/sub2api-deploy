@@ -359,7 +359,7 @@ func TestLifecycleUpdateRejectsUnsafeInitialObservations(t *testing.T) {
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 			oldRevision := revision(t, h, old)
 			initial := observation(oldRevision)
-			if scenario.mutate != nil { r.outcomes = []lifecycleOutcome{response(scenario.mutate(initial))} } else if scenario.outcome.err != nil || scenario.outcome.response.Result != nil { r.outcomes = []lifecycleOutcome{scenario.outcome} }
+			if scenario.mutate != nil { r.outcomes = []lifecycleOutcome{response(inspected(scenario.mutate(initial)))} } else if scenario.outcome.err != nil || scenario.outcome.response.Result != nil { r.outcomes = []lifecycleOutcome{scenario.outcome} }
 			got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 			if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) {
 				t.Fatal("unsafe initial observation reached reconciliation")
