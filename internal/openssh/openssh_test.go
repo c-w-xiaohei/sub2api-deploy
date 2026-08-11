@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,8 +28,9 @@ func TestRunUsesFixedSSHArgvAndFramedStdin(t *testing.T) {
 	transport := Transport{start: recordingProcess{result: fakeResult{stdout: response}, got: &got}.start}
 	request := []byte("s2h1:secret-canary")
 	_, err = transport.Run(context.Background(), "edge.prod", Host, request)
-	if err == nil {
-		t.Fatal("remote error was accepted")
+	var remote *RemoteError
+	if !errors.Is(err, ErrRemote) || !errors.As(err, &remote) || remote.Category != hostprotocol.ErrorProtocol || remote.Code != hostprotocol.CodeMalformedFrame {
+		t.Fatalf("err = %v, want remote protocol/malformed-frame", err)
 	}
 	want := []string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "--", "edge.prod", "/usr/local/libexec/sub2api-host stdio"}
 	if got.name != "ssh" || !reflect.DeepEqual(got.args, want) {
@@ -159,7 +161,7 @@ func TestCommandsHaveOnlyFixedRemoteEntrypoints(t *testing.T) {
 	}
 }
 
-func TestBootstrapReceiverScriptSyntaxAndCandidateHandoff(t *testing.T) {
+func TestBootstrapReceiverInstallsAttestedCandidateOnlyAfterItExits(t *testing.T) {
 	dir := t.TempDir()
 	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
 	script := bootstrapReceiverScript(stage, final)
@@ -167,31 +169,161 @@ func TestBootstrapReceiverScriptSyntaxAndCandidateHandoff(t *testing.T) {
 	if output, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("shell syntax: %v: %s", err, output)
 	}
-	marker := filepath.Join(dir, "marker")
-	candidate := "#!/bin/sh\n[ \"$1\" = bootstrap-stdio ] || exit 7\ncat > \"$MARKER\"\n"
-	digest := sha256.Sum256([]byte(candidate))
-	input := []byte(fmt.Sprintf("s2a1:%d:%x\n%srequest", len(candidate), digest, candidate))
-	cmd := exec.Command("/bin/sh", "-c", script, "fixed-argv0")
-	cmd.Env = append(os.Environ(), "MARKER="+marker)
-	cmd.Stdin = bytes.NewReader(input)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("receiver: %v: %s", err, output)
+	old := []byte("old final bytes")
+	if err := os.WriteFile(final, old, 0700); err != nil {
+		t.Fatal(err)
 	}
-	if got, err := os.ReadFile(marker); err != nil || string(got) != "request" {
+	observed := filepath.Join(dir, "observed")
+	staged := filepath.Join(dir, "staged")
+	request := []byte("exact post-artifact request bytes")
+	received := filepath.Join(dir, "received")
+	candidate := attestedCandidate(t, fmt.Sprintf("printf %%s \"$0\" > %s\ncat > %s\ncat \"$FINAL\" > %s", shellQuote(staged), shellQuote(received), shellQuote(observed)))
+	stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, request)
+	if err != nil {
+		t.Fatalf("receiver: %v: stdout %q stderr %q", err, stdout, stderr)
+	}
+	if !bytes.Equal(stdout, successResponse(t)) || len(stderr) != 0 {
+		t.Fatalf("candidate streams = stdout %q stderr %q", stdout, stderr)
+	}
+	if got, err := os.ReadFile(received); err != nil || !bytes.Equal(got, request) {
 		t.Fatalf("candidate request = %q, %v", got, err)
 	}
-	if _, err := os.Stat(final); !os.IsNotExist(err) {
-		t.Fatalf("receiver changed final: %v", err)
+	if got, err := os.ReadFile(staged); err != nil || string(got) != stage {
+		t.Fatalf("candidate path = %q, want %q: %v", got, stage, err)
 	}
-	if _, err := os.Stat(stage); !os.IsNotExist(err) {
-		t.Fatalf("stage remained after candidate handoff: %v", err)
+	if got, err := os.ReadFile(observed); err != nil || !bytes.Equal(got, old) {
+		t.Fatalf("final observed during candidate = %q, %v", got, err)
 	}
-	if _, err := os.Stat(stage + ".lock"); !os.IsNotExist(err) {
-		t.Fatalf("lock remained after candidate handoff: %v", err)
+	assertFinalCandidate(t, final, candidate)
+	assertReceiverCleanup(t, stage)
+}
+
+func TestBootstrapReceiverCleanSameCandidateReplayIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+	candidate := attestedCandidate(t, "")
+	for i := 0; i != 2; i++ {
+		stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, nil)
+		if err != nil || !bytes.Equal(stdout, successResponse(t)) || len(stderr) != 0 {
+			t.Fatalf("run %d = stdout %q stderr %q err %v", i, stdout, stderr, err)
+		}
+		assertFinalCandidate(t, final, candidate)
+		assertReceiverCleanup(t, stage)
 	}
 }
 
-func TestBootstrapReceiverRejectsMatchingShortDigestAndCleansUpEveryRun(t *testing.T) {
+func TestBootstrapReceiverInstallsOnlyForExactMarkerAndZeroExit(t *testing.T) {
+	dir := t.TempDir()
+	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+	old := []byte("existing final bytes")
+	for name, tc := range map[string]struct {
+		candidate []byte
+		failure   bool
+	}{
+		"wrong marker":         {candidateWithMarker(t, successResponse(t), "wrong", 0), true},
+		"wrong marker nonzero": {candidateWithMarker(t, successResponse(t), "wrong", 1), true},
+		"truncated marker":     {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested", 0), true},
+		"truncated marker nonzero": {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested", 1), true},
+		"extra marker":         {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1!", 0), true},
+		"extra marker nonzero": {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1!", 1), true},
+		"newline marker":       {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1\n", 0), true},
+		"newline marker nonzero": {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1\n", 1), true},
+		"success no marker":    {candidateWithMarker(t, successResponse(t), "", 0), false},
+		"nonzero empty":        {candidateWithMarker(t, successResponse(t), "", 1), false},
+		"nonzero exact":        {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1", 1), true},
+		"remote error":         {candidateWithMarker(t, validRemoteError(t), "", 0), false},
+		"remote error nonzero": {candidateWithMarker(t, validRemoteError(t), "", 1), false},
+		"malformed":            {candidateWithMarker(t, []byte("not a response"), "", 0), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(final, old, 0700); err != nil {
+				t.Fatal(err)
+			}
+			gotStdout, gotStderr, err := runBootstrapReceiver(stage, final, tc.candidate, nil)
+			if tc.failure != (err != nil) {
+				t.Fatalf("receiver error = %v, want failure %v", err, tc.failure)
+			}
+			wantStdout := successResponse(t)
+			if strings.Contains(name, "remote error") {
+				wantStdout = validRemoteError(t)
+			} else if name == "malformed" {
+				wantStdout = []byte("not a response")
+			}
+			if !bytes.Equal(gotStdout, wantStdout) || string(gotStderr) != "candidate stderr" {
+				t.Fatalf("candidate streams = stdout %q stderr %q", gotStdout, gotStderr)
+			}
+			got, err := os.ReadFile(final)
+			if err != nil || !bytes.Equal(got, old) {
+				t.Fatalf("final = %q, %v", got, err)
+			}
+			assertReceiverCleanup(t, stage)
+		})
+	}
+}
+
+func TestBootstrapReceiverNonzeroCandidatePreservesFinalAndLeavesDecoderInput(t *testing.T) {
+	dir := t.TempDir()
+	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+	old := []byte("existing final bytes")
+	if err := os.WriteFile(final, old, 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runBootstrapReceiver(stage, final, []byte("#!/bin/sh\nprintf 'candidate stdout'\nprintf 'candidate stderr' >&2\nexit 1\n"), nil)
+	if err != nil || string(stdout) != "candidate stdout" || string(stderr) != "candidate stderr" {
+		t.Fatalf("receiver = stdout %q stderr %q err %v", stdout, stderr, err)
+	}
+	got, err := os.ReadFile(final)
+	if err != nil || !bytes.Equal(got, old) {
+		t.Fatalf("final = %q, %v", got, err)
+	}
+	assertReceiverCleanup(t, stage)
+}
+
+func TestBootstrapReceiverRejectsCandidateModifiedAfterAttestation(t *testing.T) {
+	dir := t.TempDir()
+	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+	old := []byte("existing final bytes")
+	if err := os.WriteFile(final, old, 0700); err != nil {
+		t.Fatal(err)
+	}
+	candidate := []byte("#!/bin/sh\nprintf %s " + shellQuote(string(successResponse(t))) + "\nprintf %s 'sub2api-bootstrap-attested-v1' >&3\nprintf '# mutation' >> \"$0\"\n")
+	_, _, err := runBootstrapReceiver(stage, final, candidate, nil)
+	if err == nil {
+		t.Fatal("modified candidate installed")
+	}
+	got, err := os.ReadFile(final)
+	if err != nil || !bytes.Equal(got, old) {
+		t.Fatalf("final = %q, %v", got, err)
+	}
+	assertReceiverCleanup(t, stage)
+}
+
+func TestBootstrapReceiverRechecksFinalBeforeRename(t *testing.T) {
+	dir := t.TempDir()
+	stage, final, target := filepath.Join(dir, "stage"), filepath.Join(dir, "final"), filepath.Join(dir, "target")
+	if err := os.WriteFile(final, []byte("old final bytes"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("protected target"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := attestedCandidate(t, "rm -f \"$FINAL\"\nln -s "+shellQuote(target)+" \"$FINAL\"")
+	_, _, err := runBootstrapReceiver(stage, final, candidate, nil)
+	if err == nil {
+		t.Fatal("final replacement raced through an unsafe final")
+	}
+	link, err := os.Readlink(final)
+	if err != nil || link != target {
+		t.Fatalf("final symlink = %q, %v", link, err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "protected target" {
+		t.Fatalf("protected target = %q, %v", got, err)
+	}
+	assertReceiverCleanup(t, stage)
+}
+
+func TestBootstrapReceiverRejectsMatchingShortDigestAndInvalidFrames(t *testing.T) {
 	dir := t.TempDir()
 	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
 	if err := os.WriteFile(final, []byte("existing"), 0700); err != nil {
@@ -199,37 +331,13 @@ func TestBootstrapReceiverRejectsMatchingShortDigestAndCleansUpEveryRun(t *testi
 	}
 	short := []byte("x")
 	shortDigest := sha256.Sum256(short)
-	cmd := exec.Command("/bin/sh", "-c", bootstrapReceiverScript(stage, final), "fixed-argv0")
-	cmd.Stdin = bytes.NewReader([]byte(fmt.Sprintf("s2a1:2:%x\n%s", shortDigest, short)))
-	if err := cmd.Run(); err == nil {
-		t.Fatal("matching digest short body accepted")
+	inputs := map[string]string{
+		"matching short digest": fmt.Sprintf("s2a1:2:%x\n%s", shortDigest, short),
+		"short":                "s2a1:10:" + strings.Repeat("a", 64) + "\nx",
+		"oversize":             "s2a1:67108865:" + strings.Repeat("a", 64) + "\n",
+		"hash":                 "s2a1:1:" + strings.Repeat("a", 64) + "\nx",
 	}
-	for i := 0; i != 2; i++ {
-		candidate := []byte("#!/bin/sh\ncat\n")
-		digest := sha256.Sum256(candidate)
-		cmd = exec.Command("/bin/sh", "-c", bootstrapReceiverScript(stage, final), "fixed-argv0")
-		cmd.Stdin = bytes.NewReader([]byte(fmt.Sprintf("s2a1:%d:%x\n%srequest", len(candidate), digest, candidate)))
-		if output, err := cmd.CombinedOutput(); err != nil || string(output) != "request" {
-			t.Fatalf("run %d = %q, %v", i, output, err)
-		}
-		for _, path := range []string{stage, stage + ".lock"} {
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				t.Fatalf("run %d retained %s: %v", i, path, err)
-			}
-		}
-	}
-	if got, err := os.ReadFile(final); err != nil || string(got) != "existing" {
-		t.Fatalf("final = %q, %v", got, err)
-	}
-}
-
-func TestBootstrapReceiverRejectsInvalidFramesWithoutChangingFinal(t *testing.T) {
-	dir := t.TempDir()
-	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
-	if err := os.WriteFile(final, []byte("existing"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	for name, input := range map[string]string{"short": "s2a1:10:" + strings.Repeat("a", 64) + "\nx", "oversize": "s2a1:67108865:" + strings.Repeat("a", 64) + "\n", "hash": "s2a1:1:" + strings.Repeat("a", 64) + "\nx"} {
+	for name, input := range inputs {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command("/bin/sh", "-c", bootstrapReceiverScript(stage, final), "fixed-argv0")
 			cmd.Stdin = strings.NewReader(input)
@@ -240,7 +348,103 @@ func TestBootstrapReceiverRejectsInvalidFramesWithoutChangingFinal(t *testing.T)
 			if err != nil || string(got) != "existing" {
 				t.Fatalf("final = %q, %v", got, err)
 			}
+			assertReceiverCleanup(t, stage)
 		})
+	}
+}
+
+func TestBootstrapReceiverAcceptsAbsentOrRegularFinalAndRejectsNonregularFinal(t *testing.T) {
+	for name, create := range map[string]func(t *testing.T, final, preserved string){
+		"absent": func(*testing.T, string, string) {},
+		"regular": func(t *testing.T, final, _ string) {
+			if err := os.WriteFile(final, []byte("regular final"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+			create(t, final, "")
+			candidate := attestedCandidate(t, "")
+			stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, nil)
+			if err != nil || !bytes.Equal(stdout, successResponse(t)) || len(stderr) != 0 {
+				t.Fatalf("receiver = stdout %q stderr %q err %v", stdout, stderr, err)
+			}
+			assertFinalCandidate(t, final, candidate)
+			assertReceiverCleanup(t, stage)
+		})
+	}
+
+	for name, create := range map[string]func(t *testing.T, final, preserved string){
+		"symlink": func(t *testing.T, final, preserved string) {
+			if err := os.WriteFile(preserved, []byte("protected target"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(preserved, final); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"directory": func(t *testing.T, final, _ string) {
+			if err := os.Mkdir(final, 0700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"FIFO": func(t *testing.T, final, _ string) {
+			if err := syscall.Mkfifo(final, 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			stage, final, preserved := filepath.Join(dir, "stage"), filepath.Join(dir, "final"), filepath.Join(dir, "preserved")
+			create(t, final, preserved)
+			before, err := os.Lstat(final)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ran := filepath.Join(dir, "ran")
+			_, _, err = runBootstrapReceiver(stage, final, attestedCandidate(t, "printf ran > "+shellQuote(ran)), nil)
+			if err == nil {
+				t.Fatal("unsafe final accepted")
+			}
+			if _, err := os.Lstat(ran); !os.IsNotExist(err) {
+				t.Fatalf("candidate ran before unsafe-final rejection: %v", err)
+			}
+			after, err := os.Lstat(final)
+			if err != nil {
+				t.Fatalf("stat final after rejection: %v", err)
+			}
+			if after.Mode() != before.Mode() {
+				t.Fatalf("final changed: before %v, after %v", before.Mode(), after.Mode())
+			}
+			if name == "symlink" {
+				link, err := os.Readlink(final)
+				if err != nil || link != preserved {
+					t.Fatalf("symlink = %q, %v", link, err)
+				}
+				got, err := os.ReadFile(preserved)
+				if err != nil || string(got) != "protected target" {
+					t.Fatalf("symlink target = %q, %v", got, err)
+				}
+			}
+			assertReceiverCleanup(t, stage)
+		})
+	}
+}
+
+func TestBootstrapReceiverAtomicallyReplacesFinalAfterCandidate(t *testing.T) {
+	script := bootstrapReceiverScript(stagePath, finalPath)
+	invoke := strings.Index(script, `"$stage" bootstrap-stdio`)
+	rename := strings.Index(script, `mv "$stage" "$final"`)
+	if invoke < 0 || rename < invoke || strings.Count(script, `mv "$stage" "$final"`) != 1 {
+		t.Fatal("receiver lacks one post-candidate atomic stage-to-final replacement")
+	}
+	for _, line := range strings.Split(script[:rename], "\n") {
+		if strings.Contains(line, `"$final"`) && (strings.Contains(line, "rm ") || strings.Contains(line, "unlink ") || strings.Contains(line, "cp ") || strings.Contains(line, "install ") || strings.Contains(line, `> "$final"`) || strings.Contains(line, `>"$final"`)) {
+			t.Fatalf("receiver mutates final before atomic replacement: %q", line)
+		}
 	}
 }
 
@@ -259,6 +463,71 @@ func TestBootstrapReceiverLockContentionAndFixedProductionPaths(t *testing.T) {
 	want := "sudo -n /bin/sh -c " + shellQuote(bootstrapReceiverScript(stagePath, finalPath)) + " fixed-argv0"
 	if remote != want || strings.Contains(remote, dir) {
 		t.Fatalf("receiver command is not fixed: %q", remote)
+	}
+}
+
+func runBootstrapReceiver(stage, final string, candidate []byte, request []byte) ([]byte, []byte, error) {
+	digest := sha256.Sum256(candidate)
+	input := []byte(fmt.Sprintf("s2a1:%d:%x\n%s", len(candidate), digest, candidate))
+	input = append(input, request...)
+	cmd := exec.Command("/bin/sh", "-c", bootstrapReceiverScript(stage, final), "fixed-argv0")
+	cmd.Env = append(os.Environ(), "FINAL="+final)
+	cmd.Stdin = bytes.NewReader(input)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func attestedCandidate(t *testing.T, body string) []byte {
+	t.Helper()
+	return []byte("#!/bin/sh\n[ \"$1\" = bootstrap-stdio ] || exit 7\n" + body + "\nprintf %s " + shellQuote(string(successResponse(t))) + "\nprintf %s 'sub2api-bootstrap-attested-v1' >&3\n")
+}
+
+func candidateWithMarker(t *testing.T, stdout []byte, marker string, status int) []byte {
+	t.Helper()
+	markerWrite := ""
+	if marker != "" {
+		markerWrite = "\nprintf %s " + shellQuote(marker) + " >&3"
+	}
+	return []byte("#!/bin/sh\nprintf %s " + shellQuote(string(stdout)) + "\nprintf 'candidate stderr' >&2" + markerWrite + fmt.Sprintf("\nexit %d\n", status))
+}
+
+func successResponse(t *testing.T) []byte {
+	t.Helper()
+	response, err := hostprotocol.EncodeResponse(hostprotocol.Response{
+		Result: &hostprotocol.Result{
+			Status:          hostprotocol.ResultApplied,
+			AppliedRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func assertFinalCandidate(t *testing.T, final string, candidate []byte) {
+	t.Helper()
+	info, err := os.Lstat(final)
+	if err != nil {
+		t.Fatalf("stat final: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		t.Fatalf("final mode = %v, want executable regular file", info.Mode())
+	}
+	got, err := os.ReadFile(final)
+	if err != nil || !bytes.Equal(got, candidate) {
+		t.Fatalf("final bytes = %q, %v", got, err)
+	}
+}
+
+func assertReceiverCleanup(t *testing.T, stage string) {
+	t.Helper()
+	for _, path := range []string{stage, stage + ".lock", stage + ".ok"} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("receiver retained %s: %v", path, err)
+		}
 	}
 }
 
