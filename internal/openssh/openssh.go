@@ -98,7 +98,7 @@ fi
 [ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
 if [ -L "$final" ]; then exit 64; fi
 if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
-mv "$stage" "$final"
+mv -T -- "$stage" "$final"
 `, shellQuote(stage), shellQuote(stage+".lock"), shellQuote(final))
 }
 
