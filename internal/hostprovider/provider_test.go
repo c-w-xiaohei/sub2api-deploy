@@ -3,6 +3,7 @@ package hostprovider
 import (
 	"context"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	p "github.com/pulumi/pulumi-go-provider"
@@ -140,7 +141,7 @@ func TestRawServerWiresLifecycleAndPropertyWrappers(t *testing.T) {
 	if _, err := server.Create(t.Context(), &pulumirpc.CreateRequest{Properties: inputs}); err == nil {
 		t.Fatal("raw non-preview Create accepted")
 	}
-	if _, err := server.Read(t.Context(), &pulumirpc.ReadRequest{}); err == nil {
+	if _, err := server.Read(t.Context(), &pulumirpc.ReadRequest{Id: "host-imported-without-context"}); err == nil {
 		t.Fatal("raw Import Read accepted")
 	}
 	if _, err := server.Update(t.Context(), &pulumirpc.UpdateRequest{}); err == nil {
@@ -160,6 +161,26 @@ func TestFrameworkServerDiffUsesOldInputs(t *testing.T) {
 	}
 	if diff.HasChanges {
 		t.Fatalf("equal inputs diffed: %#v", diff)
+	}
+}
+
+func TestDiffReportsRefreshedDriftAndAppliedRevisionMismatch(t *testing.T) {
+	inputs := hostInputs(property.New("edge"))
+	state := inputs.Set("machine", object("value", property.New("machine-a"))).Set("ownership", object("value", property.New("owner-a"))).Set("appliedRevision", property.New("tr1:0000000000000000:0000000000000000000000000000000000000000000000000000000000000000"))
+	observation := object("machine", object("value", property.New("machine-a")), "ownership", object("value", property.New("owner-a")), "hostRelease", property.New("release"), "appliedRevision", property.New("tr1:0000000000000000:1111111111111111111111111111111111111111111111111111111111111111"), "drifted", property.New(true), "ready", property.New(false))
+	state = state.Set("observation", observation)
+	diff, err := New("1.0.0").Diff(t.Context(), p.DiffRequest{OldInputs: inputs, State: state, Inputs: inputs})
+	if err != nil || !diff.HasChanges {
+		t.Fatalf("refreshed drift/applied-revision mismatch was hidden: %#v, %v", diff, err)
+	}
+}
+
+func TestReadRejectsImportStyleEmptyRequestBeforeTransport(t *testing.T) {
+	r := &recordingLifecycleTransport{}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
+	got, err := h.read(t.Context(), p.ReadRequest{ID: "host-imported-without-context"})
+	if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 0 || !strings.Contains(err.Error(), "import") || !strings.Contains(err.Error(), "context") {
+		t.Fatalf("empty import-style Read did not fail explicitly before transport: %#v, %v", got, err)
 	}
 }
 
