@@ -160,6 +160,27 @@ func TestBootstrapIgnoresEmptyDockerOwnershipLabelDuringDiscovery(t *testing.T) 
 	}
 }
 
+func TestBootstrapRejectsRootCreatedAfterCleanDiscovery(t *testing.T) {
+	rt := testRuntime(t)
+	sentinel := filepath.Join(rt.root, "racer-sentinel")
+	runner := &bootstrapDiscoveryRunner{afterNetwork: func() error {
+		if err := os.Mkdir(rt.root, 0700); err != nil {
+			return err
+		}
+		return os.WriteFile(sentinel, []byte("foreign-root"), 0600)
+	}}
+	rt.runner = runner
+	if _, err := rt.Bootstrap(context.Background(), bootstrapRequest()); !(isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) || isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired)) {
+		t.Fatalf("post-discovery root bootstrap = %v", err)
+	}
+	if _, err := os.Lstat(rt.statePath()); !errors.Is(err, os.ErrNotExist) || len(runner.calls) != 2 || !onlyBootstrapDiscovery(runner.calls) {
+		t.Fatalf("post-discovery root created state or ran unexpected command: %v, %#v", err, runner.calls)
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || !bytes.Equal(got, []byte("foreign-root")) {
+		t.Fatalf("post-discovery root sentinel changed = %q, %v", got, err)
+	}
+}
+
 func TestBootstrapPreservesConflictingExistingStateWithoutTakeover(t *testing.T) {
 	for _, name := range []string{"wrong resource", "wrong machine"} {
 		t.Run(name, func(t *testing.T) {
@@ -232,6 +253,7 @@ type bootstrapDiscoveryRunner struct {
 	evidence        bool
 	emptyLabel      bool
 	discoveryErr    error
+	afterNetwork    func() error
 	discovery       map[string]bool
 }
 
@@ -253,6 +275,12 @@ func (r *bootstrapDiscoveryRunner) Run(ctx context.Context, argv []string, stdin
 		}
 		if r.emptyLabel && kind == r.kind {
 			return []byte("existing\t\n"), nil
+		}
+		if kind == "network" && r.afterNetwork != nil {
+			if err := r.afterNetwork(); err != nil {
+				return nil, err
+			}
+			r.afterNetwork = nil
 		}
 		return nil, nil
 	}
