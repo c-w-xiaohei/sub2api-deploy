@@ -404,12 +404,21 @@ func TestFrameBoundsAndCanonicalHeaders(t *testing.T) {
 			t.Cleanup(func() { _ = clientConn.Close(); _ = serverConn.Close() })
 			var calls atomic.Int32
 			done := startServe(NewServer(func(context.Context, hostcontract.ApprovalSubject) bool { calls.Add(1); return true }), serverConn)
-			writeErr := writeRaw(clientConn, input)
-			_ = clientConn.Close()
+			writer := make(chan error, 1)
+			go func() { writer <- writeRaw(clientConn, input) }()
+			if name == "truncated body" {
+				if _, ok := awaitError(writer, testTimeout); !ok {
+					t.Fatal("truncated body writer did not complete")
+				}
+				_ = clientConn.Close()
+			}
 			serveErr := await(t, done)
 			_ = serverConn.Close()
-			if writeErr != nil {
-				t.Fatalf("write invalid header: %v", writeErr)
+			_ = clientConn.Close()
+			if name != "truncated body" {
+				if _, ok := awaitError(writer, testTimeout); !ok {
+				t.Fatal("invalid header writer did not complete")
+				}
 			}
 			assertProtocolError(t, serveErr)
 			if calls.Load() != 0 {
