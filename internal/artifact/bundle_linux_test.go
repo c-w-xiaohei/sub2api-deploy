@@ -57,9 +57,11 @@ func TestLoadBundleRejectsUnsafeManifestFile(t *testing.T) {
 				}
 			}()
 			t.Cleanup(func() {
-				file, err := os.OpenFile(path, os.O_RDWR, 0)
+				// Keep a reader open until the blocked writer has opened and closed.
+				// O_NONBLOCK lets the safe loader path release the writer without racing it.
+				file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 				if err == nil {
-					file.Close()
+					defer file.Close()
 				}
 				select {
 				case <-writerDone:
