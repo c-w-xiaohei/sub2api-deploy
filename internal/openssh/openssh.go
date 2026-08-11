@@ -68,7 +68,19 @@ lock=%s
 final=%s
 ok="$stage.ok"
 mkdir "$lock"
-trap 'rm -f "$stage" "$ok"; rmdir "$lock"' EXIT HUP INT TERM
+child=
+cancelled=
+interrupted=
+cleanup() {
+  rm -f "$stage" "$ok"
+  rmdir "$lock"
+}
+stop() {
+  cancelled=143
+  interrupted=1
+}
+trap cleanup EXIT
+trap stop HUP INT TERM
 IFS= read -r header
 case "$header" in s2a1:*:*) ;; *) exit 64 ;; esac
 body=${header#s2a1:}
@@ -85,20 +97,31 @@ chmod 700 "$stage"
 if [ -L "$final" ]; then exit 64; fi
 if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
 set +e
-"$stage" bootstrap-stdio 3>"$ok"
+"$stage" install-attest </dev/null 3>"$ok" >/dev/null 2>/dev/null
 status=$?
 set -e
-if [ -s "$ok" ]; then
-  if ! printf %%s 'sub2api-bootstrap-attested-v1' | cmp -s "$ok" -; then exit 64; fi
-  [ "$status" -eq 0 ] || exit 64
-else
-  exit 0
-fi
+[ "$status" -eq 0 ]
+[ -s "$ok" ]
+printf %%s 'sub2api-bootstrap-attested-v1' | cmp -s "$ok" -
 [ "$(wc -c < "$stage")" -eq "$size" ]
 [ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
 if [ -L "$final" ]; then exit 64; fi
 if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
 mv -T -- "$stage" "$final"
+"$final" bootstrap-stdio <&0 &
+child=$!
+set +e
+while :; do
+  interrupted=
+  wait "$child"
+  status=$?
+  [ -z "$interrupted" ] && break
+done
+set -e
+trap '' HUP INT TERM
+child=
+[ -z "$cancelled" ] || status=$cancelled
+exit "$status"
 `, shellQuote(stage), shellQuote(stage+".lock"), shellQuote(final))
 }
 

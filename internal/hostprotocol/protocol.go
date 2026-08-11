@@ -73,14 +73,26 @@ const (
 	ResultInspected ResultStatus = "inspected"
 	ResultRetired   ResultStatus = "retired"
 )
+type OperationStatus string
+
+const (
+	OperationPending  OperationStatus = "pending"
+	OperationComplete OperationStatus = "complete"
+)
+type OperationEvidence struct {
+	Key      hostcontract.OperationKey       `json:"key"`
+	Status   OperationStatus                 `json:"status"`
+	Approval *hostcontract.ApprovalSubject   `json:"approval,omitempty"`
+}
 
 type Result struct {
-	Status          ResultStatus                    `json:"status"`
-	AppliedRevision string                          `json:"appliedRevision,omitempty"`
-	Observation     *hostcontract.StableObservation `json:"observation,omitempty"`
-	Machine         *hostcontract.MachineIdentity   `json:"machine,omitempty"`
-	Ownership       *hostcontract.OwnershipIdentity `json:"ownership,omitempty"`
-	Retirement      *RetirementEvidence             `json:"retirement,omitempty"`
+	Status            ResultStatus                    `json:"status"`
+	AppliedRevision   string                          `json:"appliedRevision,omitempty"`
+	Observation       *hostcontract.StableObservation `json:"observation,omitempty"`
+	Machine           *hostcontract.MachineIdentity   `json:"machine,omitempty"`
+	Ownership         *hostcontract.OwnershipIdentity `json:"ownership,omitempty"`
+	Retirement        *RetirementEvidence             `json:"retirement,omitempty"`
+	OperationEvidence *OperationEvidence              `json:"operationEvidence,omitempty"`
 }
 
 type RetirementEvidence struct {
@@ -334,7 +346,7 @@ func validResponse(v Response) error {
 	}
 	switch v.Result.Status {
 	case ResultApplied:
-		if v.Result.AppliedRevision == "" || v.Result.Observation != nil || v.Result.Machine != nil || v.Result.Ownership != nil || v.Result.Retirement != nil {
+		if v.Result.AppliedRevision == "" || v.Result.Observation != nil || v.Result.Machine != nil || v.Result.Ownership != nil || v.Result.Retirement != nil || v.Result.OperationEvidence != nil {
 			if v.Result.AppliedRevision == "" {
 				return bad()
 			}
@@ -347,11 +359,26 @@ func validResponse(v Response) error {
 		if v.Result.Observation == nil || v.Result.AppliedRevision != "" || v.Result.Machine != nil || v.Result.Ownership != nil || v.Result.Retirement != nil || v.Result.Observation.Validate() != nil {
 			return bad()
 		}
+		if e := validEvidence(v.Result.OperationEvidence); e != nil {
+			return e
+		}
 	case ResultRetired:
-		if v.Result.Machine == nil || v.Result.Ownership == nil || v.Result.Retirement == nil || !v.Result.Retirement.PreserveData || v.Result.AppliedRevision != "" || v.Result.Observation != nil || v.Result.Machine.Value == "" || v.Result.Ownership.Value == "" || !utf8.ValidString(v.Result.Machine.Value) || !utf8.ValidString(v.Result.Ownership.Value) {
+		if v.Result.Machine == nil || v.Result.Ownership == nil || v.Result.Retirement == nil || !v.Result.Retirement.PreserveData || v.Result.AppliedRevision != "" || v.Result.Observation != nil || v.Result.OperationEvidence != nil || v.Result.Machine.Value == "" || v.Result.Ownership.Value == "" || !utf8.ValidString(v.Result.Machine.Value) || !utf8.ValidString(v.Result.Ownership.Value) {
 			return bad()
 		}
 	default:
+		return bad()
+	}
+	return nil
+}
+func validEvidence(e *OperationEvidence) error {
+	if e == nil {
+		return nil
+	}
+	if e.Key.Action != hostcontract.ActionReconcile || e.Key.Validate() != nil || (e.Status != OperationPending && e.Status != OperationComplete) {
+		return bad()
+	}
+	if e.Approval != nil && (e.Approval.Validate() != nil || !e.Approval.Matches(e.Key, e.Approval.AppID)) {
 		return bad()
 	}
 	return nil

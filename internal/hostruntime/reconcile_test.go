@@ -1003,6 +1003,35 @@ func TestReconcilePendingDataLinkApprovalResumesWithoutResubmission(t *testing.T
 	}
 }
 
+func TestReconcileTerminalDataLinkApprovalRejectsWrongReplayWithoutMutation(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	old, next := dataIdentity("old"), dataIdentity("new")
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionB(), appWithData("one", "one", old))); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = rt.readState()
+	request := requestFor(state, revisionC(), appWithData("one", "one", next))
+	approval := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: state.Resource.Environment, Resource: state.Resource, AppID: "one", DataKind: "postgres", OldData: old, NewData: next, TargetRevision: request.TargetRevision}
+	request.Approval = &approval
+	result, err := rt.Reconcile(t.Context(), request)
+	if err != nil || result.Status != hostprotocol.ResultApplied {
+		t.Fatalf("approved reconcile = %#v, %v", result, err)
+	}
+	before, mutations := mustFile(t, rt.statePath()), runner.mutations()
+	request.Approval = nil
+	if replay, err := rt.Reconcile(t.Context(), request); err != nil || !reflect.DeepEqual(replay, result) || runner.mutations() != mutations {
+		t.Fatalf("nil terminal replay = %#v, %v", replay, err)
+	}
+	wrong := approval
+	wrong.NewData.Endpoint = "different.example"
+	request.Approval = &wrong
+	if _, err := rt.Reconcile(t.Context(), request); err == nil || !bytes.Equal(before, mustFile(t, rt.statePath())) || runner.mutations() != mutations {
+		t.Fatalf("wrong terminal approval replay mutated: %v", err)
+	}
+}
+
 func TestReconcileRestoredRenamedDataRejectsWrongApprovalBeforeMutation(t *testing.T) {
 	rt, state := initialized(t)
 	runner := &recordingRunner{}

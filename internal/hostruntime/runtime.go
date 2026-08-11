@@ -254,7 +254,7 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 			return hostprotocol.Result{}, recovery()
 		}
 		baseline := hostcontract.StableObservation{Machine: machine, Ownership: ownership, HostRelease: q.Target.ReleaseArtifact, AppliedRevision: q.PriorAppliedRevision, Ready: true}
-		state = State{Version: stateVersion, Resource: q.Resource, Machine: machine, Ownership: ownership, AppliedRevision: q.PriorAppliedRevision, Observation: baseline, Journal: &Journal{Key: key, Status: journalPending}}
+		state = State{Version: stateVersion, Resource: q.Resource, Machine: machine, Ownership: ownership, AppliedRevision: q.PriorAppliedRevision, Observation: baseline, Journal: &Journal{Key: key, Status: journalPending, Approval: q.Approval}}
 		if err = r.writeState(state); err != nil {
 			return hostprotocol.Result{}, recovery()
 		}
@@ -270,17 +270,23 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 				if state.Journal.Result == nil {
 					return hostprotocol.Result{}, recovery()
 				}
+				if q.Approval != nil && (state.Journal.Approval == nil || *q.Approval != *state.Journal.Approval) {
+					return hostprotocol.Result{}, recovery()
+				}
 				return *state.Journal.Result, nil
 			}
 			if state.Journal.Status != journalPending || !precondition(state, key) || !validApproval(key, state, state.Journal.Approval) {
 				return hostprotocol.Result{}, conflict()
 			}
+			if q.Approval != nil && (state.Journal.Approval == nil || *q.Approval != *state.Journal.Approval) {
+				return hostprotocol.Result{}, recovery()
+			}
 			op = &Operation{runtime: r, lock: lock, state: state, key: key}
 		} else {
-			if state.Journal == nil || state.Journal.Status != journalComplete || state.Journal.Result == nil || state.Observation.HostRelease == q.Target.ReleaseArtifact || !precondition(state, key) || !validApproval(key, state, q.Approval) {
+			if state.Journal != nil && (state.Journal.Status != journalComplete || state.Journal.Result == nil) || state.Observation.HostRelease == q.Target.ReleaseArtifact || !precondition(state, key) || !validApproval(key, state, q.Approval) {
 				return hostprotocol.Result{}, conflict()
 			}
-			if err = r.admitReconcile(q); err != nil {
+			if err = r.admitReconcile(r.persistedApproval(q)); err != nil {
 				return hostprotocol.Result{}, err
 			}
 			admitted = true
@@ -292,6 +298,7 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 			op = &Operation{runtime: r, lock: lock, state: state, key: key}
 		}
 	}
+	q = r.persistedApproval(q)
 	if !admitted {
 		if err = r.admitReconcile(q); err != nil {
 			return hostprotocol.Result{}, err

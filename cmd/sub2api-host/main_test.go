@@ -189,24 +189,17 @@ exit 1
 	}
 	events := []string{}
 	out := orderedBuffer{name: "stdout", events: &events}
-	attestation := orderedBuffer{name: "attestation", events: &events}
-	if err := bootstrapServe(&out, bytes.NewReader(frame), rt, &attestation); err != nil {
+	if err := bootstrapServe(&out, bytes.NewReader(frame), rt); err != nil {
 		t.Fatal(err)
 	}
 	response, err := hostprotocol.DecodeResponse(out.Bytes())
 	if err != nil || response.Result == nil || response.Result.Status != hostprotocol.ResultApplied || response.Result.AppliedRevision != request.TargetRevision || response.Result.Observation != nil {
 		t.Fatalf("bootstrap response = %#v, %v", response, err)
 	}
-	if got := attestation.String(); got != "sub2api-bootstrap-attested-v1" {
-		t.Fatalf("bootstrap attestation = %q", got)
+	if len(events) != 1 || events[0] != "stdout" {
+		t.Fatalf("bootstrap writes = %v, want stdout only", events)
 	}
-	if len(events) != 2 || events[0] != "attestation" || events[1] != "stdout" {
-		t.Fatalf("bootstrap writes = %v, want attestation then stdout", events)
-	}
-	if err := bootstrapServe(io.Discard, bytes.NewReader(frame), rt, errWriter{}); err == nil {
-		t.Fatal("bootstrap accepted failed attestation write")
-	}
-	if err := bootstrapServe(errWriter{}, bytes.NewReader(frame), rt, io.Discard); err == nil {
+	if err := bootstrapServe(errWriter{}, bytes.NewReader(frame), rt); err == nil {
 		t.Fatal("bootstrap accepted failed response write")
 	}
 	_, err = os.ReadFile(filepath.Join(root, "state", "state.json"))
@@ -215,15 +208,11 @@ exit 1
 	}
 
 	out.Reset()
-	attestation.Reset()
-	if err := bootstrapServe(&out, bytes.NewReader(append(frame, frame...)), rt, &attestation); err == nil {
+	if err := bootstrapServe(&out, bytes.NewReader(append(frame, frame...)), rt); err == nil {
 		t.Fatal("bootstrap accepted two frames")
 	}
 	if response, err := hostprotocol.DecodeResponse(out.Bytes()); err != nil || response.Error == nil || response.Error.Category != hostprotocol.ErrorProtocol || response.Error.Code != hostprotocol.CodeMalformedFrame {
 		t.Fatalf("two bootstrap frames = %#v, %v", response, err)
-	}
-	if attestation.Len() != 0 {
-		t.Fatalf("malformed bootstrap attestation = %q", attestation.Bytes())
 	}
 }
 
@@ -239,7 +228,7 @@ func TestBootstrapStdioRejectsInspectWithoutCreatingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := bootstrapServe(&out, bytes.NewReader(frame), hostruntime.New(filepath.Join(root, "state"), machine), io.Discard); err != nil {
+	if err := bootstrapServe(&out, bytes.NewReader(frame), hostruntime.New(filepath.Join(root, "state"), machine)); err != nil {
 		t.Fatal(err)
 	}
 	response, err := hostprotocol.DecodeResponse(out.Bytes())
@@ -251,7 +240,7 @@ func TestBootstrapStdioRejectsInspectWithoutCreatingState(t *testing.T) {
 	}
 }
 
-func TestBootstrapServeDoesNotAttestErrorsAndServeCannotAttest(t *testing.T) {
+func TestBootstrapServeReturnsErrorsWithoutAttestationChannel(t *testing.T) {
 	root := t.TempDir()
 	machine := filepath.Join(root, "machine-id")
 	if err := os.WriteFile(machine, []byte("0123456789abcdef0123456789abcdef\n"), 0600); err != nil {
@@ -262,14 +251,14 @@ func TestBootstrapServeDoesNotAttestErrorsAndServeCannotAttest(t *testing.T) {
 		"malformed": []byte("not a request"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			var out, attestation bytes.Buffer
-			err := bootstrapServe(&out, bytes.NewReader(input), hostruntime.New(filepath.Join(root, name), machine), &attestation)
+			var out bytes.Buffer
+			err := bootstrapServe(&out, bytes.NewReader(input), hostruntime.New(filepath.Join(root, name), machine))
 			if name == "malformed" && err == nil {
 				t.Fatal("malformed request returned nil")
 			}
 			response, decodeErr := hostprotocol.DecodeResponse(out.Bytes())
-			if decodeErr != nil || response.Error == nil || attestation.Len() != 0 {
-				t.Fatalf("response = %#v, decode = %v, attestation = %q", response, decodeErr, attestation.Bytes())
+			if decodeErr != nil || response.Error == nil {
+				t.Fatalf("response = %#v, decode = %v", response, decodeErr)
 			}
 		})
 	}

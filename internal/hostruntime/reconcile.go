@@ -231,7 +231,16 @@ func (r *Runtime) Handle(ctx context.Context, q hostprotocol.Request) (hostproto
 		if err != nil {
 			return hostprotocol.Result{}, err
 		}
-		return hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &observation}, nil
+		result := hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &observation}
+		if s.Journal != nil && s.Journal.Key.Action == hostcontract.ActionReconcile && s.Journal.Key.TargetRevision == q.TargetRevision && (s.Journal.Status == journalPending || s.Journal.Status == journalComplete) {
+			evidence := &hostprotocol.OperationEvidence{Key: s.Journal.Key, Status: hostprotocol.OperationStatus(s.Journal.Status)}
+			if s.Journal.Approval != nil {
+				approval := *s.Journal.Approval
+				evidence.Approval = &approval
+			}
+			result.OperationEvidence = evidence
+		}
+		return result, nil
 	case hostcontract.ActionReconcile:
 		return r.Reconcile(ctx, q)
 	case hostcontract.ActionRetirePreserveData:
@@ -247,13 +256,24 @@ func (r *Runtime) Reconcile(ctx context.Context, q hostprotocol.Request) (hostpr
 	if result, ok := r.reconcileTerminalResult(requestKey(q), q); ok {
 		return result, nil
 	}
-	if e := r.admitReconcile(q); e != nil {
+	if e := r.admitReconcile(r.persistedApproval(q)); e != nil {
 		return hostprotocol.Result{}, e
 	}
 	key := requestKey(q)
 	return r.RunOperation(key, q.Approval, func(op *Operation) (hostprotocol.Result, hostcontract.StableObservation, error) {
-		return r.reconcile(ctx, op.state, q)
+		return r.reconcile(ctx, op.state, r.persistedApproval(q))
 	})
+}
+func (r *Runtime) persistedApproval(q hostprotocol.Request) hostprotocol.Request {
+	if q.Approval != nil {
+		return q
+	}
+	state, err := r.readState()
+	if err == nil && state.Journal != nil && state.Journal.Status == journalPending && state.Journal.Key == requestKey(q) && state.Journal.Approval != nil {
+		approval := *state.Journal.Approval
+		q.Approval = &approval
+	}
+	return q
 }
 func (r *Runtime) reconcileTerminalResult(key hostcontract.OperationKey, q hostprotocol.Request) (hostprotocol.Result, bool) {
 	if q.Target == nil || q.Secrets == nil || hostcontract.ValidateTarget(*q.Target, *q.Secrets) != nil {
@@ -261,6 +281,9 @@ func (r *Runtime) reconcileTerminalResult(key hostcontract.OperationKey, q hostp
 	}
 	s, err := r.readState()
 	if err != nil || r.validateLiveState(s, key.Resource) != nil {
+		return hostprotocol.Result{}, false
+	}
+	if s.Journal != nil && s.Journal.Key == key && q.Approval != nil && (s.Journal.Approval == nil || *q.Approval != *s.Journal.Approval) {
 		return hostprotocol.Result{}, false
 	}
 	return r.terminalResult(key)

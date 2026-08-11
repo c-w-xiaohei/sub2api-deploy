@@ -198,6 +198,44 @@ func TestBootstrapReceiverAttestsThenInstallsBeforeFinalPathBootstrap(t *testing
 	assertReceiverCleanup(t, stage)
 }
 
+func TestBootstrapReceiverAttestationCannotReadBootstrapRequest(t *testing.T) {
+	dir := t.TempDir()
+	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+	seen, received := filepath.Join(dir, "attest-seen"), filepath.Join(dir, "received")
+	request := []byte("bootstrap request remains secret until final execution")
+	candidate := phaseCandidate(t, "if IFS= read -r byte; then printf %s \"$byte\" > "+shellQuote(seen)+"; else printf EOF > "+shellQuote(seen)+"; fi", "cat > "+shellQuote(received))
+	stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, request)
+	if err != nil || !bytes.Equal(stdout, successResponse(t)) || len(stderr) != 0 {
+		t.Fatalf("receiver = stdout %q stderr %q err %v", stdout, stderr, err)
+	}
+	if got := string(mustReadFile(t, seen)); got != "EOF" {
+		t.Fatalf("attestation read request byte %q", got)
+	}
+	if got := mustReadFile(t, received); !bytes.Equal(got, request) {
+		t.Fatalf("bootstrap request = %q", got)
+	}
+	assertFinalCandidate(t, final, candidate)
+}
+
+func TestBootstrapReceiverSignalTrapWaitsForBootstrapChildBeforeUnlocking(t *testing.T) {
+	script := bootstrapReceiverScript(stagePath, finalPath)
+	bootstrap := strings.Index(script, `"$final" bootstrap-stdio`)
+	if bootstrap < 0 || !strings.Contains(script, `trap '`) || strings.Contains(script, `trap 'rm -f "$ok"; rmdir "$lock"' EXIT HUP INT TERM`) {
+		t.Fatal("receiver signal trap removes install lock without managing installed bootstrap child")
+	}
+	if !strings.Contains(script[bootstrap:], `wait "$child"`) || !strings.Contains(script[bootstrap:], `[ -z "$interrupted" ] && break`) {
+		t.Fatal("receiver does not retry interrupted waits before releasing lock")
+	}
+	if strings.Contains(script, `kill -TERM "$child"`) || strings.Contains(script, `pid=${child:-${!:-}}`) {
+		t.Fatal("receiver signal trap risks signaling a stale bootstrap pid")
+	}
+	disable := strings.Index(script[bootstrap:], "trap '' HUP INT TERM")
+	clear := strings.Index(script[bootstrap:], "child=\n")
+	if disable < 0 || clear < 0 || disable > clear {
+		t.Fatal("receiver clears the bootstrap pid before disabling signal handlers")
+	}
+}
+
 func TestBootstrapReceiverCleanSameCandidateReplayIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
