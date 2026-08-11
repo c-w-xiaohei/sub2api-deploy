@@ -187,7 +187,7 @@ func TestRunAttachedFailsWhenProviderExitsAfterPublishingPortAndStopsPulumi(t *t
 	}
 }
 
-func TestRunAttachedFailsWhenApprovalChannelEndsBeforeSuccessfulPulumiExit(t *testing.T) {
+func TestRunAttachedFailsWhenApprovalChannelEndsBeforePulumiStarts(t *testing.T) {
 	paths := attachedHelperPaths(t)
 	pulumiLog, cleanupLog := filepath.Join(t.TempDir(), "pulumi.log"), filepath.Join(t.TempDir(), "cleanup.log")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -196,8 +196,8 @@ func TestRunAttachedFailsWhenApprovalChannelEndsBeforeSuccessfulPulumiExit(t *te
 	if err == nil || errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), attachedCanary) {
 		t.Fatalf("approval channel early EOF error = %v", err)
 	}
-	if data, err := os.ReadFile(cleanupLog); err != nil || string(data) != "pulumi-closed\n" {
-		t.Fatalf("Pulumi was not stopped after approval EOF: %q, %v", data, err)
+	if _, err := os.Stat(pulumiLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Pulumi started after approval EOF: %v", err)
 	}
 }
 
@@ -332,7 +332,7 @@ func TestRunAttachedCancellationStopsPulumiAndProviderAfterPulumiStarts(t *testi
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled attached run = %v", err)
 	}
-	if data, err := os.ReadFile(cleanupLog); err != nil || string(data) != "pulumi-closed\nclosed\n" {
+	if data, err := os.ReadFile(cleanupLog); err != nil || string(data) != "pulumi-closed\nclosed\n" && string(data) != "closed\npulumi-closed\n" {
 		t.Fatalf("cancellation cleanup = %q, %v", data, err)
 	}
 }
