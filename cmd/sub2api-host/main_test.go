@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,13 +157,27 @@ exit 1
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out bytes.Buffer
-	if err := bootstrapServe(&out, bytes.NewReader(frame), rt); err != nil {
+	events := []string{}
+	out := orderedBuffer{name: "stdout", events: &events}
+	attestation := orderedBuffer{name: "attestation", events: &events}
+	if err := bootstrapServe(&out, bytes.NewReader(frame), rt, &attestation); err != nil {
 		t.Fatal(err)
 	}
 	response, err := hostprotocol.DecodeResponse(out.Bytes())
 	if err != nil || response.Result == nil || response.Result.Status != hostprotocol.ResultApplied || response.Result.AppliedRevision != request.TargetRevision || response.Result.Observation != nil {
 		t.Fatalf("bootstrap response = %#v, %v", response, err)
+	}
+	if got := attestation.String(); got != "sub2api-bootstrap-attested-v1" {
+		t.Fatalf("bootstrap attestation = %q", got)
+	}
+	if len(events) != 2 || events[0] != "attestation" || events[1] != "stdout" {
+		t.Fatalf("bootstrap writes = %v, want attestation then stdout", events)
+	}
+	if err := bootstrapServe(io.Discard, bytes.NewReader(frame), rt, errWriter{}); err == nil {
+		t.Fatal("bootstrap accepted failed attestation write")
+	}
+	if err := bootstrapServe(errWriter{}, bytes.NewReader(frame), rt, io.Discard); err == nil {
+		t.Fatal("bootstrap accepted failed response write")
 	}
 	_, err = os.ReadFile(filepath.Join(root, "state", "state.json"))
 	if err != nil {
@@ -170,11 +185,15 @@ exit 1
 	}
 
 	out.Reset()
-	if err := bootstrapServe(&out, bytes.NewReader(append(frame, frame...)), rt); err == nil {
+	attestation.Reset()
+	if err := bootstrapServe(&out, bytes.NewReader(append(frame, frame...)), rt, &attestation); err == nil {
 		t.Fatal("bootstrap accepted two frames")
 	}
 	if response, err := hostprotocol.DecodeResponse(out.Bytes()); err != nil || response.Error == nil || response.Error.Category != hostprotocol.ErrorProtocol || response.Error.Code != hostprotocol.CodeMalformedFrame {
 		t.Fatalf("two bootstrap frames = %#v, %v", response, err)
+	}
+	if attestation.Len() != 0 {
+		t.Fatalf("malformed bootstrap attestation = %q", attestation.Bytes())
 	}
 }
 
@@ -190,7 +209,7 @@ func TestBootstrapStdioRejectsInspectWithoutCreatingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := bootstrapServe(&out, bytes.NewReader(frame), hostruntime.New(filepath.Join(root, "state"), machine)); err != nil {
+	if err := bootstrapServe(&out, bytes.NewReader(frame), hostruntime.New(filepath.Join(root, "state"), machine), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	response, err := hostprotocol.DecodeResponse(out.Bytes())
@@ -201,6 +220,70 @@ func TestBootstrapStdioRejectsInspectWithoutCreatingState(t *testing.T) {
 		t.Fatalf("inspect bootstrap created state: %v", err)
 	}
 }
+
+func TestBootstrapServeDoesNotAttestErrorsAndServeCannotAttest(t *testing.T) {
+	root := t.TempDir()
+	machine := filepath.Join(root, "machine-id")
+	if err := os.WriteFile(machine, []byte("0123456789abcdef0123456789abcdef\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for name, input := range map[string][]byte{
+		"operation": mustRequest(t, hostprotocol.Request{Action: hostcontract.ActionInspect, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}, TargetRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}),
+		"malformed": []byte("not a request"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out, attestation bytes.Buffer
+			err := bootstrapServe(&out, bytes.NewReader(input), hostruntime.New(filepath.Join(root, name), machine), &attestation)
+			if name == "malformed" && err == nil {
+				t.Fatal("malformed request returned nil")
+			}
+			response, decodeErr := hostprotocol.DecodeResponse(out.Bytes())
+			if decodeErr != nil || response.Error == nil || attestation.Len() != 0 {
+				t.Fatalf("response = %#v, decode = %v, attestation = %q", response, decodeErr, attestation.Bytes())
+			}
+		})
+	}
+	var out bytes.Buffer
+	if err := serve(&out, bytes.NewReader(mustRequest(t, bootstrapReconcileRequest())), hostruntime.New(filepath.Join(root, "ordinary"), machine)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func bootstrapReconcileRequest() hostprotocol.Request {
+	return hostprotocol.Request{
+		Action:               hostcontract.ActionReconcile,
+		Server:               hostcontract.ServerTarget{SSHAlias: "edge"},
+		Resource:             hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"},
+		TargetRevision:       "tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PriorAppliedRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Target:               &hostcontract.Target{ReleaseArtifact: "release"},
+		Secrets:              &hostcontract.Secrets{},
+	}
+}
+
+func mustRequest(t *testing.T, request hostprotocol.Request) []byte {
+	t.Helper()
+	frame, err := hostprotocol.EncodeRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frame
+}
+
+type orderedBuffer struct {
+	bytes.Buffer
+	name   string
+	events *[]string
+}
+
+func (b *orderedBuffer) Write(p []byte) (int, error) {
+	*b.events = append(*b.events, b.name)
+	return b.Buffer.Write(p)
+}
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
 
 func mustResponse(t *testing.T, response hostprotocol.Response) []byte {
 	t.Helper()
