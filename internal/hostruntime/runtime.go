@@ -212,6 +212,18 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 	if err != nil {
 		return hostprotocol.Result{}, recovery()
 	}
+	root, err := r.rootFD(false)
+	rootAbsent := errors.Is(err, os.ErrNotExist)
+	if err == nil {
+		_ = syscall.Close(root)
+	} else if !rootAbsent {
+		return hostprotocol.Result{}, recovery()
+	}
+	if rootAbsent {
+		if err := r.bootstrapDiscovery(ctx); err != nil {
+			return hostprotocol.Result{}, err
+		}
+	}
 	lock, err := r.lock()
 	if err != nil {
 		return hostprotocol.Result{}, recovery()
@@ -227,6 +239,11 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 
 	state, err := r.readState()
 	if errors.Is(err, os.ErrNotExist) {
+		if !rootAbsent {
+			return hostprotocol.Result{}, recovery()
+		}
+		// A racer may have created only writer.lock after our clean discovery;
+		// holding it now makes this the sole initializer for that snapshot.
 		ownership, err := bootstrapOwnership()
 		if err != nil {
 			return hostprotocol.Result{}, recovery()
@@ -268,6 +285,50 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 		return hostprotocol.Result{}, err
 	}
 	return result, nil
+}
+
+func (r *Runtime) bootstrapDiscovery(ctx context.Context) error {
+	for _, argv := range [][]string{
+		{"container", "ls", "--all", "--filter", "label=sub2api.host", "--format", "{{.Names}}\t{{index .Labels \"sub2api.host\"}}"},
+		{"network", "ls", "--filter", "label=sub2api.host", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}"},
+	} {
+		out, err := r.runner.Run(ctx, argv, nil)
+		if err != nil {
+			return recovery()
+		}
+		if err := validateBootstrapDiscovery(out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateBootstrapDiscovery(out []byte) error {
+	if len(out) > maxCommandOutput || bytes.IndexByte(out, '\r') >= 0 {
+		return recovery()
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(out), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 || len(lines) > 1024 {
+		return recovery()
+	}
+	seen := map[string]bool{}
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 2 || fields[0] == "" || !utf8.ValidString(fields[0]) || !utf8.ValidString(fields[1]) || seen[fields[0]] {
+			return recovery()
+		}
+		seen[fields[0]] = true
+		if fields[1] != "" {
+			return conflict()
+		}
+	}
+	return nil
 }
 
 func bootstrapOwnership() (hostcontract.OwnershipIdentity, error) {
