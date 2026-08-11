@@ -131,6 +131,30 @@ func TestBootstrapStdioProcessExitsAfterOneRejectedFrame(t *testing.T) {
 	}
 }
 
+func TestInstallAttestProcessUsesOnlyFD3(t *testing.T) {
+	if os.Getenv("SUB2API_HOST_INSTALL_ATTEST_HELPER") == "1" {
+		os.Args = []string{"sub2api-host", "install-attest"}
+		main()
+		os.Exit(0)
+	}
+	attestation, err := os.CreateTemp(t.TempDir(), "attestation")
+	if err != nil { t.Fatal(err) }
+	defer attestation.Close()
+	cmd := exec.Command(os.Args[0], "-test.run=TestInstallAttestProcessUsesOnlyFD3")
+	cmd.Env = append(os.Environ(), "SUB2API_HOST_INSTALL_ATTEST_HELPER=1")
+	cmd.ExtraFiles = []*os.File{attestation}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil || len(stdout) != 0 || stderr.Len() != 0 { t.Fatalf("install attest output=%q stderr=%q err=%v", stdout, stderr.Bytes(), err) }
+	if _, err := attestation.Seek(0, io.SeekStart); err != nil { t.Fatal(err) }
+	got, err := io.ReadAll(attestation)
+	if err != nil || string(got) != bootstrapAttestation { t.Fatalf("attestation=%q, %v", got, err) }
+	missing := exec.Command(os.Args[0], "-test.run=TestInstallAttestProcessUsesOnlyFD3")
+	missing.Env = append(os.Environ(), "SUB2API_HOST_INSTALL_ATTEST_HELPER=1")
+	if err := missing.Run(); err == nil { t.Fatal("install attest accepted missing fd3") }
+}
+
 func TestBootstrapStdioServesOneReconcileFrameAndReturnsAppliedResult(t *testing.T) {
 	root := t.TempDir()
 	fakeDocker := filepath.Join(t.TempDir(), "docker")

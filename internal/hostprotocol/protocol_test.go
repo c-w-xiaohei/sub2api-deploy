@@ -70,6 +70,26 @@ func TestResponseIsARealUnion(t *testing.T) {
 	}
 }
 
+func TestInspectOperationEvidenceIsBoundedAndStrict(t *testing.T) {
+	resource := hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}
+	key := hostcontract.OperationKey{Resource: resource, Action: hostcontract.ActionReconcile, TargetRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", PriorAppliedRevision: "tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	observation := hostcontract.StableObservation{Machine: hostcontract.MachineIdentity{Value: "machine"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner"}, HostRelease: "release", AppliedRevision: key.PriorAppliedRevision, Ready: true}
+	evidence := &OperationEvidence{Key: key, Status: OperationPending}
+	valid := Response{Result: &Result{Status: ResultInspected, Observation: &observation, OperationEvidence: evidence}}
+	if _, err := EncodeResponse(valid); err != nil { t.Fatalf("bounded inspect evidence rejected: %v", err) }
+	for _, response := range []Response{
+		{Result: &Result{Status: ResultApplied, AppliedRevision: key.TargetRevision, OperationEvidence: evidence}},
+		{Result: &Result{Status: ResultInspected, Observation: &observation, OperationEvidence: &OperationEvidence{Key: key, Status: "unknown"}}},
+		{Result: &Result{Status: ResultInspected, Observation: &observation, OperationEvidence: &OperationEvidence{Key: hostcontract.OperationKey{}, Status: OperationPending}}},
+		{Result: &Result{Status: ResultInspected, Observation: &observation, OperationEvidence: &OperationEvidence{Key: key, Status: OperationComplete, Approval: &hostcontract.ApprovalSubject{}}}},
+	} { if _, err := EncodeResponse(response); err == nil { t.Fatal("invalid operation evidence encoded") } }
+	for _, body := range []string{
+		`{"version":1,"result":{"status":"inspected","observation":{"machine":{"value":"machine"},"ownership":{"value":"owner"},"hostRelease":"release","appliedRevision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ready":true},"operationEvidence":"pending"}}`,
+		`{"version":1,"result":{"status":"inspected","observation":{"machine":{"value":"machine"},"ownership":{"value":"owner"},"hostRelease":"release","appliedRevision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ready":true},"operationEvidence":{"unknown":true}}}`,
+		`{"version":1,"result":{"status":"inspected","observation":{"machine":{"value":"machine"},"ownership":{"value":"owner"},"hostRelease":"release","appliedRevision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ready":true},"operationEvidence":{"status":"pending","status":"complete"}}}`,
+	} { if _, err := DecodeResponse(appendFrame([]byte(body))); err == nil { t.Fatal("malformed operation evidence accepted") } }
+}
+
 func TestDecodeFromReaderIsBoundedAndTyped(t *testing.T) {
 	for name, input := range map[string][]byte{"empty": nil, "header too long": append([]byte(Magic), bytes.Repeat([]byte("9"), MaxHeaderSize+1)...), "overflow": []byte(Magic + "999999999999999999999999999999\n"), "leading zero": []byte(Magic + "01\n{}"), "extra": appendFrame([]byte(`{"version":1,"error":{"category":"protocol","code":"malformed-frame"}}`), []byte("x"))} {
 		t.Run(name, func(t *testing.T) {

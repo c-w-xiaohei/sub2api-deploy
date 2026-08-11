@@ -107,6 +107,23 @@ func TestBootstrapAdvancesCompletedManagedHostToNextReleaseWithoutRepeatingRetry
 	}
 }
 
+func TestBootstrapInitializedHostWithoutJournalAcceptsFirstReleaseChange(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	request := requestFor(state, revisionB(), app("one", "image-next"))
+	request.Target.ReleaseArtifact = "release-next"
+	result, err := rt.Bootstrap(t.Context(), request)
+	after := mustState(t, rt)
+	if err != nil || result.Status != hostprotocol.ResultApplied || result.AppliedRevision != request.TargetRevision || runner.mutations() == 0 || after.Resource != state.Resource || after.Machine != state.Machine || after.Ownership != state.Ownership || after.AppliedRevision != request.TargetRevision || after.Observation.HostRelease != request.Target.ReleaseArtifact || after.Observation.AppliedRevision != request.TargetRevision || after.Journal == nil || after.Journal.Status != journalComplete || after.Journal.Key != requestKey(request) || after.Journal.Result == nil || !reflect.DeepEqual(*after.Journal.Result, result) {
+		t.Fatalf("initialized first successor = %#v, %#v, %v", result, after, err)
+	}
+	calls, mutations := len(runner.calls), runner.mutations()
+	retry, err := rt.Bootstrap(t.Context(), request)
+	if err != nil || !reflect.DeepEqual(retry, result) || len(runner.calls) != calls || runner.mutations() != mutations { t.Fatalf("initialized successor retry = %#v, %v", retry, err) }
+}
+
+
 func TestBootstrapRejectsUnsafeNextOperationWithoutMutation(t *testing.T) {
 	for _, scenario := range []func(*State, *hostprotocol.Request){
 		func(state *State, request *hostprotocol.Request) { request.Resource.ServerKey = "other" },
@@ -473,6 +490,57 @@ func TestPendingResumeConflictAndCompletionAdvancesState(t *testing.T) {
 	if err != nil || got.AppliedRevision != key.TargetRevision || got.Observation.AppliedRevision != key.TargetRevision || got.Journal == nil || got.Journal.Status != journalComplete {
 		t.Fatalf("completion state = %#v, %v", got, err)
 	}
+}
+
+func TestInspectExposesOnlyMatchingReconcileJournalEvidence(t *testing.T) {
+	rt, state := initialized(t)
+	rt.runner = &recordingRunner{}
+	key := reconcileKey(state, revisionB())
+	approval := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: state.Resource.Environment, Resource: state.Resource, AppID: "api", DataKind: "postgres", OldData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old", Endpoint: "old", Port: 5432, Database: "app", TLSServerName: "old"}, NewData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new", Endpoint: "new", Port: 5432, Database: "app", TLSServerName: "new"}, TargetRevision: key.TargetRevision}
+	state.Journal = &Journal{Key: key, Status: journalPending, Approval: &approval}
+	raw, err := json.Marshal(state)
+	if err != nil { t.Fatal(err) }
+	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil { t.Fatal(err) }
+	inspect := hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource, TargetRevision: key.TargetRevision}
+	result, err := rt.Handle(t.Context(), inspect)
+	if err != nil || result.Status != hostprotocol.ResultInspected || result.OperationEvidence == nil || result.OperationEvidence.Key != key || result.OperationEvidence.Status != hostprotocol.OperationPending || !reflect.DeepEqual(result.OperationEvidence.Approval, &approval) || result.Observation == nil || result.Observation.Ready {
+		t.Fatalf("pending inspect evidence = %#v, %v", result, err)
+	}
+	inspect.TargetRevision = revisionC()
+	result, err = rt.Handle(t.Context(), inspect)
+	if err != nil || result.OperationEvidence != nil { t.Fatalf("mismatched inspect evidence = %#v, %v", result, err) }
+}
+
+
+func TestInspectExposesCompleteCurrentReconcileEvidence(t *testing.T) {
+	rt, state := initialized(t)
+	rt.runner = &recordingRunner{}
+	key := reconcileKey(state, revisionB())
+	state.AppliedRevision, state.Observation.AppliedRevision = key.TargetRevision, key.TargetRevision
+	complete := applied(key, state)
+	state.Journal = &Journal{Key: key, Status: journalComplete, Result: &complete}
+	raw, err := json.Marshal(state)
+	if err != nil { t.Fatal(err) }
+	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil { t.Fatal(err) }
+	result, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource, TargetRevision: key.TargetRevision})
+	if err != nil || result.OperationEvidence == nil || result.OperationEvidence.Key != key || result.OperationEvidence.Status != hostprotocol.OperationComplete || result.OperationEvidence.Approval != nil {
+		t.Fatalf("current complete evidence = %#v, %v", result, err)
+	}
+}
+
+func TestInspectNeverUsesRetireJournalAsOperationEvidence(t *testing.T) {
+	rt, state := initialized(t)
+	rt.runner = &recordingRunner{}
+	key := retireKey(state)
+	approval := retireApproval(key, state)
+	result := hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &state.Machine, Ownership: &state.Ownership, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}
+	state.Journal = &Journal{Key: key, Status: journalComplete, Approval: &approval, Result: &result}
+	state.Retirement = &Retirement{Machine: state.Machine, Ownership: state.Ownership, PreserveData: true}
+	raw, err := json.Marshal(state)
+	if err != nil { t.Fatal(err) }
+	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil { t.Fatal(err) }
+	got, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource, TargetRevision: key.TargetRevision})
+	if err != nil || got.Status != hostprotocol.ResultRetired || got.OperationEvidence != nil { t.Fatalf("retire inspect evidence = %#v, %v", got, err) }
 }
 
 func TestNextOperationReplacesTerminalAndRetireIsDurable(t *testing.T) {

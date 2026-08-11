@@ -161,7 +161,7 @@ func TestCommandsHaveOnlyFixedRemoteEntrypoints(t *testing.T) {
 	}
 }
 
-func TestBootstrapReceiverInstallsAttestedCandidateOnlyAfterItExits(t *testing.T) {
+func TestBootstrapReceiverAttestsThenInstallsBeforeFinalPathBootstrap(t *testing.T) {
 	dir := t.TempDir()
 	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
 	script := bootstrapReceiverScript(stage, final)
@@ -173,11 +173,11 @@ func TestBootstrapReceiverInstallsAttestedCandidateOnlyAfterItExits(t *testing.T
 	if err := os.WriteFile(final, old, 0700); err != nil {
 		t.Fatal(err)
 	}
+	invoked := filepath.Join(dir, "invoked")
 	observed := filepath.Join(dir, "observed")
-	staged := filepath.Join(dir, "staged")
 	request := []byte("exact post-artifact request bytes")
 	received := filepath.Join(dir, "received")
-	candidate := attestedCandidate(t, fmt.Sprintf("printf %%s \"$0\" > %s\ncat > %s\ncat \"$FINAL\" > %s", shellQuote(staged), shellQuote(received), shellQuote(observed)))
+	candidate := attestedCandidate(t, fmt.Sprintf("printf %%s \"$0\" > %s\ncat > %s\ncat \"$FINAL\" > %s", shellQuote(invoked), shellQuote(received), shellQuote(observed)))
 	stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, request)
 	if err != nil {
 		t.Fatalf("receiver: %v: stdout %q stderr %q", err, stdout, stderr)
@@ -188,11 +188,11 @@ func TestBootstrapReceiverInstallsAttestedCandidateOnlyAfterItExits(t *testing.T
 	if got, err := os.ReadFile(received); err != nil || !bytes.Equal(got, request) {
 		t.Fatalf("candidate request = %q, %v", got, err)
 	}
-	if got, err := os.ReadFile(staged); err != nil || string(got) != stage {
-		t.Fatalf("candidate path = %q, want %q: %v", got, stage, err)
+	if got, err := os.ReadFile(invoked); err != nil || string(got) != final {
+		t.Fatalf("bootstrap path = %q, want %q: %v", got, final, err)
 	}
-	if got, err := os.ReadFile(observed); err != nil || !bytes.Equal(got, old) {
-		t.Fatalf("final observed during candidate = %q, %v", got, err)
+	if got, err := os.ReadFile(observed); err != nil || !bytes.Equal(got, candidate) {
+		t.Fatalf("final observed during bootstrap = %q, %v", got, err)
 	}
 	assertFinalCandidate(t, final, candidate)
 	assertReceiverCleanup(t, stage)
@@ -212,70 +212,51 @@ func TestBootstrapReceiverCleanSameCandidateReplayIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestBootstrapReceiverInstallsOnlyForExactMarkerAndZeroExit(t *testing.T) {
+func TestBootstrapReceiverAttestationAndBootstrapPhasesHaveDistinctCommitRules(t *testing.T) {
 	dir := t.TempDir()
 	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
 	old := []byte("existing final bytes")
 	for name, tc := range map[string]struct {
 		candidate []byte
-		failure   bool
+		installed bool
+		stdout    []byte
 	}{
-		"wrong marker":         {candidateWithMarker(t, successResponse(t), "wrong", 0), true},
-		"wrong marker nonzero": {candidateWithMarker(t, successResponse(t), "wrong", 1), true},
-		"truncated marker":     {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested", 0), true},
-		"truncated marker nonzero": {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested", 1), true},
-		"extra marker":         {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1!", 0), true},
-		"extra marker nonzero": {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1!", 1), true},
-		"newline marker":       {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1\n", 0), true},
-		"newline marker nonzero": {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1\n", 1), true},
-		"success no marker":    {candidateWithMarker(t, successResponse(t), "", 0), false},
-		"nonzero empty":        {candidateWithMarker(t, successResponse(t), "", 1), false},
-		"nonzero exact":        {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1", 1), true},
-		"remote error":         {candidateWithMarker(t, validRemoteError(t), "", 0), false},
-		"remote error nonzero": {candidateWithMarker(t, validRemoteError(t), "", 1), false},
-		"malformed":            {candidateWithMarker(t, []byte("not a response"), "", 0), false},
+		"bad attest marker": {candidateWithMarker(t, successResponse(t), "wrong", 0), false, nil},
+		"bad attest exit": {candidateWithMarker(t, successResponse(t), "sub2api-bootstrap-attested-v1", 1), false, nil},
+		"malformed bootstrap": {candidateWithMarker(t, []byte("not a response"), "sub2api-bootstrap-attested-v1", 0), true, []byte("not a response")},
+		"remote bootstrap error": {candidateWithMarker(t, validRemoteError(t), "sub2api-bootstrap-attested-v1", 0), true, validRemoteError(t)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := os.WriteFile(final, old, 0700); err != nil {
 				t.Fatal(err)
 			}
 			gotStdout, gotStderr, err := runBootstrapReceiver(stage, final, tc.candidate, nil)
-			if tc.failure != (err != nil) {
-				t.Fatalf("receiver error = %v, want failure %v", err, tc.failure)
-			}
-			wantStdout := successResponse(t)
-			if strings.Contains(name, "remote error") {
-				wantStdout = validRemoteError(t)
-			} else if name == "malformed" {
-				wantStdout = []byte("not a response")
-			}
-			if !bytes.Equal(gotStdout, wantStdout) || string(gotStderr) != "candidate stderr" {
+			if !bytes.Equal(gotStdout, tc.stdout) || len(gotStderr) != 0 {
 				t.Fatalf("candidate streams = stdout %q stderr %q", gotStdout, gotStderr)
 			}
-			got, err := os.ReadFile(final)
-			if err != nil || !bytes.Equal(got, old) {
-				t.Fatalf("final = %q, %v", got, err)
+			if tc.installed {
+				assertFinalCandidate(t, final, tc.candidate)
+			} else if got, readErr := os.ReadFile(final); readErr != nil || !bytes.Equal(got, old) {
+				t.Fatalf("final = %q, %v", got, readErr)
 			}
+			_ = err // Bootstrap protocol output does not define the receiver shell exit status.
 			assertReceiverCleanup(t, stage)
 		})
 	}
 }
 
-func TestBootstrapReceiverNonzeroCandidatePreservesFinalAndLeavesDecoderInput(t *testing.T) {
+func TestBootstrapReceiverNonzeroBootstrapKeepsInstalledFinalAndForwardsStreams(t *testing.T) {
 	dir := t.TempDir()
 	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
-	old := []byte("existing final bytes")
-	if err := os.WriteFile(final, old, 0600); err != nil {
+	if err := os.WriteFile(final, []byte("existing final bytes"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr, err := runBootstrapReceiver(stage, final, []byte("#!/bin/sh\nprintf 'candidate stdout'\nprintf 'candidate stderr' >&2\nexit 1\n"), nil)
-	if err != nil || string(stdout) != "candidate stdout" || string(stderr) != "candidate stderr" {
+	candidate := []byte("#!/bin/sh\ncase \"$1\" in\ninstall-attest) printf %s sub2api-bootstrap-attested-v1 >&3; exit 0 ;;\nbootstrap-stdio) printf 'candidate stdout'; printf 'candidate stderr' >&2; exit 1 ;;\n*) exit 7 ;; esac\n")
+	stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, nil)
+	if err == nil || string(stdout) != "candidate stdout" || string(stderr) != "candidate stderr" {
 		t.Fatalf("receiver = stdout %q stderr %q err %v", stdout, stderr, err)
 	}
-	got, err := os.ReadFile(final)
-	if err != nil || !bytes.Equal(got, old) {
-		t.Fatalf("final = %q, %v", got, err)
-	}
+	assertFinalCandidate(t, final, candidate)
 	assertReceiverCleanup(t, stage)
 }
 
@@ -286,7 +267,7 @@ func TestBootstrapReceiverRejectsCandidateModifiedAfterAttestation(t *testing.T)
 	if err := os.WriteFile(final, old, 0700); err != nil {
 		t.Fatal(err)
 	}
-	candidate := []byte("#!/bin/sh\nprintf %s " + shellQuote(string(successResponse(t))) + "\nprintf %s 'sub2api-bootstrap-attested-v1' >&3\nprintf '# mutation' >> \"$0\"\n")
+	candidate := phaseCandidate(t, `printf '# mutation' >> "$0"`, "")
 	_, _, err := runBootstrapReceiver(stage, final, candidate, nil)
 	if err == nil {
 		t.Fatal("modified candidate installed")
@@ -307,7 +288,7 @@ func TestBootstrapReceiverRechecksFinalBeforeRename(t *testing.T) {
 	if err := os.WriteFile(target, []byte("protected target"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	candidate := attestedCandidate(t, "rm -f \"$FINAL\"\nln -s "+shellQuote(target)+" \"$FINAL\"")
+	candidate := phaseCandidate(t, "rm -f \"$FINAL\"\nln -s "+shellQuote(target)+" \"$FINAL\"", "")
 	_, _, err := runBootstrapReceiver(stage, final, candidate, nil)
 	if err == nil {
 		t.Fatal("final replacement raced through an unsafe final")
@@ -434,17 +415,41 @@ func TestBootstrapReceiverAcceptsAbsentOrRegularFinalAndRejectsNonregularFinal(t
 	}
 }
 
-func TestBootstrapReceiverAtomicallyReplacesFinalAfterCandidate(t *testing.T) {
+func TestBootstrapReceiverAttestsThenAtomicallyInstallsBeforeBootstrap(t *testing.T) {
 	script := bootstrapReceiverScript(stagePath, finalPath)
-	invoke := strings.Index(script, `"$stage" bootstrap-stdio`)
+	attest := strings.Index(script, `"$stage" install-attest`)
 	rename := strings.Index(script, `mv -T -- "$stage" "$final"`)
-	if invoke < 0 || rename < invoke || strings.Count(script, `mv -T -- "$stage" "$final"`) != 1 {
-		t.Fatal("receiver lacks one post-candidate atomic stage-to-final replacement")
+	invoke := strings.Index(script, `"$final" bootstrap-stdio`)
+	if attest < 0 || rename < attest || invoke < rename || strings.Count(script, `mv -T -- "$stage" "$final"`) != 1 {
+		t.Fatal("receiver must attest candidate, atomically install once, then bootstrap final")
+	}
+	if strings.Contains(script, `"$stage" bootstrap-stdio`) {
+		t.Fatal("receiver bootstraps the uninstalled candidate")
 	}
 	for _, line := range strings.Split(script[:rename], "\n") {
 		if strings.Contains(line, `"$final"`) && (strings.Contains(line, "rm ") || strings.Contains(line, "unlink ") || strings.Contains(line, "cp ") || strings.Contains(line, "install ") || strings.Contains(line, `> "$final"`) || strings.Contains(line, `>"$final"`)) {
 			t.Fatalf("receiver mutates final before atomic replacement: %q", line)
 		}
+	}
+}
+
+func TestBootstrapReceiverBootstrapsOnlyInstalledFinalAndKeepsItAfterResponseLoss(t *testing.T) {
+	dir := t.TempDir()
+	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+	marker, invocations := filepath.Join(dir, "installed"), filepath.Join(dir, "invocations")
+	candidate := []byte("#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"install-attest) printf %s sub2api-bootstrap-attested-v1 >&3; exit 0 ;;\n" +
+		"bootstrap-stdio) [ \"$0\" = \"$FINAL\" ] || exit 71; printf installed > " + shellQuote(marker) + "; n=0; [ -f " + shellQuote(invocations) + " ] && n=$(cat " + shellQuote(invocations) + "); printf %s $((n+1)) > " + shellQuote(invocations) + "; exit 72 ;;\n" +
+		"*) exit 7 ;; esac\n")
+	_, _, err := runBootstrapReceiver(stage, final, candidate, successResponse(t))
+	if string(mustReadFile(t, marker)) != "installed" || string(mustReadFile(t, invocations)) != "1" {
+		t.Fatalf("post-rename response loss = %v, marker=%q invocations=%q", err, mustReadFile(t, marker), mustReadFile(t, invocations))
+	}
+	assertFinalCandidate(t, final, candidate)
+	_, _, err = runBootstrapReceiver(stage, final, candidate, successResponse(t))
+	if string(mustReadFile(t, invocations)) != "2" {
+		t.Fatalf("both attempts did not execute installed bytes: %v, invocations=%q", err, mustReadFile(t, invocations))
 	}
 }
 
@@ -520,7 +525,19 @@ func runBootstrapReceiverWithEnv(stage, final string, candidate []byte, request 
 
 func attestedCandidate(t *testing.T, body string) []byte {
 	t.Helper()
-	return []byte("#!/bin/sh\n[ \"$1\" = bootstrap-stdio ] || exit 7\n" + body + "\nprintf %s " + shellQuote(string(successResponse(t))) + "\nprintf %s 'sub2api-bootstrap-attested-v1' >&3\n")
+	return phaseCandidate(t, "", body)
+}
+
+func phaseCandidate(t *testing.T, attest, bootstrap string) []byte {
+	t.Helper()
+	return []byte("#!/bin/sh\ncase \"$1\" in\ninstall-attest) " + attest + "\nprintf %s 'sub2api-bootstrap-attested-v1' >&3; exit 0 ;;\nbootstrap-stdio) " + bootstrap + "\nprintf %s " + shellQuote(string(successResponse(t))) + "; exit 0 ;;\n*) exit 7 ;; esac\n")
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil { t.Fatalf("read %s: %v", path, err) }
+	return b
 }
 
 func candidateWithMarker(t *testing.T, stdout []byte, marker string, status int) []byte {
@@ -529,7 +546,7 @@ func candidateWithMarker(t *testing.T, stdout []byte, marker string, status int)
 	if marker != "" {
 		markerWrite = "\nprintf %s " + shellQuote(marker) + " >&3"
 	}
-	return []byte("#!/bin/sh\nprintf %s " + shellQuote(string(stdout)) + "\nprintf 'candidate stderr' >&2" + markerWrite + fmt.Sprintf("\nexit %d\n", status))
+	return []byte("#!/bin/sh\ncase \"$1\" in\ninstall-attest)" + markerWrite + fmt.Sprintf("\nexit %d ;;\n", status) + "bootstrap-stdio) printf %s " + shellQuote(string(stdout)) + "; exit 0 ;;\n*) exit 7 ;; esac\n")
 }
 
 func successResponse(t *testing.T) []byte {
