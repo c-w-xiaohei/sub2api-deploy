@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,17 +63,22 @@ func runAttached(ctx context.Context, paths attachedExecutables, args, env []str
 	if err != nil {
 		return fmt.Errorf("attached execution failed")
 	}
-	defer parent.Close()
 	defer child.Close()
+	approval, err := net.FileConn(parent)
+	_ = parent.Close()
+	if err != nil {
+		return fmt.Errorf("attached execution failed")
+	}
+	defer approval.Close()
 	server := &attachedCompletion{done: make(chan struct{})}
 	go func() {
-		server.err = hostapproval.NewServer(decide).Serve(ctx, parent)
+		server.err = hostapproval.NewServer(decide).Serve(ctx, approval)
 		close(server.done)
 	}()
 
 	output, outputWriter, err := os.Pipe()
 	if err != nil {
-		_ = parent.Close()
+		_ = approval.Close()
 		<-server.done
 		return fmt.Errorf("attached execution failed")
 	}
@@ -82,7 +88,7 @@ func runAttached(ctx context.Context, paths attachedExecutables, args, env []str
 	provider.ExtraFiles = []*os.File{child}
 	if err := provider.Start(); err != nil {
 		_ = outputWriter.Close()
-		_ = parent.Close()
+		_ = approval.Close()
 		<-server.done
 		return fmt.Errorf("attached provider failed to start")
 	}
@@ -109,17 +115,17 @@ func runAttached(ctx context.Context, paths attachedExecutables, args, env []str
 	var port string
 	for {
 		if terminal := attachedTerminal(ctx, providerDone, server); terminal != nil {
-			cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+			cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 			return terminal
 		}
 		select {
 		case result := <-portReady:
 			if terminal := attachedTerminal(ctx, providerDone, server); terminal != nil {
-				cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+				cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 				return terminal
 			}
 			if result.err != nil {
-				cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+				cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 				return fmt.Errorf("attached provider failed to start")
 			}
 			port = result.port
@@ -132,23 +138,23 @@ func runAttached(ctx context.Context, paths attachedExecutables, args, env []str
 		}
 	}
 	if terminal := attachedTerminal(ctx, providerDone, server); terminal != nil {
-		cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+		cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 		return terminal
 	}
 	pulumi := exec.Command(paths.pulumi, args...)
 	pulumi.Env, pulumi.Stdout, pulumi.Stderr = attachedPulumiEnv(env, port), stdout, stderr
 	if err := pulumi.Start(); err != nil {
-		cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+		cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 		return fmt.Errorf("pulumi failed")
 	}
 	pulumiDone := waitAttached(pulumi)
 	select {
 	case <-pulumiDone.done:
 		if terminal := attachedTerminal(ctx, providerDone, server); terminal != nil {
-			cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+			cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 			return terminal
 		}
-		cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+		cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 		if cause := context.Cause(ctx); cause != nil {
 			return cause
 		}
@@ -161,7 +167,7 @@ func runAttached(ctx context.Context, paths attachedExecutables, args, env []str
 	case <-ctx.Done():
 	}
 	stopAttachedProcess(pulumi, pulumiDone)
-	cleanupAttached(provider, providerDone, parent, output, readerDone, server)
+	cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 	return attachedTerminal(ctx, providerDone, server)
 }
 
@@ -191,8 +197,8 @@ func waitAttached(command *exec.Cmd) *attachedCompletion {
 	return result
 }
 
-func cleanupAttached(provider *exec.Cmd, providerDone *attachedCompletion, parent, output *os.File, readerDone <-chan struct{}, server *attachedCompletion) {
-	_ = parent.Close()
+func cleanupAttached(provider *exec.Cmd, providerDone *attachedCompletion, approval io.Closer, output *os.File, readerDone <-chan struct{}, server *attachedCompletion) {
+	_ = approval.Close()
 	stopAttachedProcess(provider, providerDone)
 	_ = output.Close()
 	<-readerDone
