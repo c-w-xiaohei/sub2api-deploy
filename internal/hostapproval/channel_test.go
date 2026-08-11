@@ -146,6 +146,7 @@ func TestApproveRejectsInvalidSubjectBeforeWriting(t *testing.T) {
 		"data link machine":   func() hostcontract.ApprovalSubject { s := dataSubject(); s.Machine.Value = "machine-a"; return s }(),
 		"data link ownership": func() hostcontract.ApprovalSubject { s := dataSubject(); s.Ownership.Value = "owner-a"; return s }(),
 		"data link preserve":  func() hostcontract.ApprovalSubject { s := dataSubject(); s.PreserveData = true; return s }(),
+		"uppercase revision":  func() hostcontract.ApprovalSubject { s := dataSubject(); s.TargetRevision = strings.Replace(s.TargetRevision, "abcdef", "ABCDEF", 1); return s }(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn := &recordingConn{}
@@ -159,10 +160,125 @@ func TestApproveRejectsInvalidSubjectBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestApproveSuccessDoesNotLeaveStaleCancellationWatcher(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close(); _ = serverConn.Close() })
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	server := NewServer(func(_ context.Context, subject hostcontract.ApprovalSubject) bool {
+		if subject == retireSubject() {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		}
+		return true
+	})
+	serveDone := startServe(server, serverConn)
+	client := NewClient(clientConn)
+	firstCtx, cancelFirst := context.WithCancel(testContext(t))
+	t.Cleanup(cancelFirst)
+	if got, err := client.Approve(firstCtx, dataSubject()); err != nil || got == nil {
+		t.Fatalf("first Approve = %#v, %v", got, err)
+	}
+	secondResult := make(chan *hostcontract.ApprovalSubject, 1)
+	secondError := make(chan error, 1)
+	secondCtx := testContext(t)
+	go func() {
+		got, err := client.Approve(secondCtx, retireSubject())
+		secondResult <- got
+		secondError <- err
+	}()
+	awaitSignal(t, entered)
+	cancelFirst()
+	releaseOnce.Do(func() { close(release) })
+	got, err := receiveApproval(t, secondResult, secondError)
+	_ = clientConn.Close()
+	serveErr := await(t, serveDone)
+	if err != nil || got == nil || serveErr != nil {
+		t.Fatalf("second Approve after stale cancellation = %#v, %v; Serve = %v", got, err, serveErr)
+	}
+}
+
+func TestWatchCancellationFinishedWinsWhenCancellationAndCompletionRace(t *testing.T) {
+	invalidated := make(chan struct{}, 1)
+	for range 256 {
+		ctx, cancel := context.WithCancel(testContext(t))
+		finished := make(chan struct{})
+		cancel()
+		close(finished)
+		done := watchCancellation(ctx, finished, func() { invalidated <- struct{}{} })
+		select {
+		case <-done:
+		case <-time.After(testTimeout):
+			t.Fatal("watchCancellation did not complete")
+		}
+	}
+	select {
+	case <-invalidated:
+		t.Fatal("completed request cancellation invalidated a later request")
+	default:
+	}
+}
+
+func TestApproveInvalidatesClientAfterSentRequestFailure(t *testing.T) {
+	for name, reply := range map[string]func(t *testing.T, request approvalRequest) []byte{
+		"correlation mismatch": func(t *testing.T, request approvalRequest) []byte { return decisionBody(t, approvalDecision{Version: 1, ID: strings.Repeat("0", 32), Subject: request.Subject, Approved: true}) },
+		"truncated decision":  func(t *testing.T, _ approvalRequest) []byte { return []byte(`{"version":1`) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			clientConn, peerConn := net.Pipe()
+			counting := &writeCountingConn{ReadWriteCloser: clientConn}
+			t.Cleanup(func() { _ = counting.Close(); _ = peerConn.Close() })
+			peer := make(chan error, 1)
+			go func() {
+				request, err := readRequest(peerConn)
+				if err == nil {
+					err = writeBody(peerConn, reply(t, request))
+				}
+				peer <- err
+			}()
+			client := NewClient(counting)
+			got, err := client.Approve(testContext(t), dataSubject())
+			_ = counting.Close()
+			_ = peerConn.Close()
+			peerErr := await(t, peer)
+			assertProtocolFailure(t, got, err)
+			if peerErr != nil {
+				t.Fatalf("peer: %v", peerErr)
+			}
+			writes := counting.writes.Load()
+			if next, nextErr := client.Approve(testContext(t), retireSubject()); next != nil || nextErr == nil || counting.writes.Load() != writes {
+				t.Fatalf("invalidated client = %#v, %v; writes %d -> %d", next, nextErr, writes, counting.writes.Load())
+			}
+		})
+	}
+}
+
+func TestApproveInvalidatesClientAfterPostWriteIOFailure(t *testing.T) {
+	for name, conn := range map[string]*postWriteFailureConn{
+		"partial write": {writeN: 1, writeErr: io.ErrUnexpectedEOF},
+		"read error":   {readErr: errors.New("peer read failed")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := NewClient(conn)
+			got, err := client.Approve(testContext(t), dataSubject())
+			if got != nil || err == nil || conn.writes.Load() != 1 {
+				t.Fatalf("first Approve = %#v, %v; writes = %d", got, err, conn.writes.Load())
+			}
+			writes := conn.writes.Load()
+			if got, err := client.Approve(testContext(t), retireSubject()); got != nil || err == nil || conn.writes.Load() != writes {
+				t.Fatalf("invalidated client = %#v, %v; writes %d -> %d", got, err, writes, conn.writes.Load())
+			}
+		})
+	}
+}
+
 func TestDecodeDecisionRejectsSemanticallyInvalidCorrelatedSubject(t *testing.T) {
 	subject := dataSubject()
 	subject.Machine.Value = "forbidden"
-	_, err := decodeDecision(bytes.NewReader(frame(decisionBody(t, approvalDecision{Version: 1, ID: "0123456789abcdef0123456789abcdef", Subject: subject, Approved: true}))))
+	_, err := decodeDecision(bytes.NewReader(mustFrame(decisionBody(t, approvalDecision{Version: 1, ID: "0123456789abcdef0123456789abcdef", Subject: subject, Approved: true}))))
 	assertProtocolError(t, err)
 }
 
@@ -202,6 +318,38 @@ func TestApproveRejectsMalformedAndMismatchedDecisions(t *testing.T) {
 			}
 			assertProtocolFailure(t, got, err)
 		})
+	}
+}
+
+func TestStrictJSONRejectsCaseFoldAliasesAndNullApproved(t *testing.T) {
+	valid := decisionBody(t, approvalDecision{Version: 1, ID: "0123456789abcdef0123456789abcdef", Subject: dataSubject(), Approved: true})
+	for name, body := range map[string][]byte{
+		"top-level alias": append(append([]byte(nil), valid[:len(valid)-1]...), []byte(`,"Approved":false}`)...),
+		"nested alias": bytes.Replace(valid, []byte(`"serverKey":"edge-a"`), []byte(`"serverKey":"edge-a","ServerKey":"edge-a"`), 1),
+		"approved null": bytes.Replace(valid, []byte(`"approved":true`), []byte(`"approved":null`), 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := decodeDecision(bytes.NewReader(mustFrame(body)))
+			assertProtocolError(t, err)
+		})
+	}
+}
+
+func TestNilBoundariesFailClosed(t *testing.T) {
+	if panicValue, _, err := capturePanic(func() (*hostcontract.ApprovalSubject, error) { return NewClient(nil).Approve(testContext(t), dataSubject()) }); panicValue != nil || err == nil {
+		t.Fatalf("NewClient(nil).Approve panic = %v, error = %v", panicValue, err)
+	}
+	if panicValue, err := captureServePanic(func() error { return NewServer(func(context.Context, hostcontract.ApprovalSubject) bool { return true }).Serve(testContext(t), nil) }); panicValue != nil || err == nil {
+		t.Fatalf("valid decider nil conn panic = %v, error = %v", panicValue, err)
+	}
+	request := mustFrame(requestBody(t, approvalRequest{Version: 1, ID: "0123456789abcdef0123456789abcdef", Subject: dataSubject()}))
+	conn := &scriptConn{Reader: bytes.NewReader(request)}
+	nilDeciderServer := NewServer(nil)
+	if panicValue, err := captureServePanic(func() error { return nilDeciderServer.Serve(testContext(t), conn) }); panicValue != nil || err == nil || conn.writes != 0 {
+		t.Fatalf("NewServer(nil) request panic = %v, error = %v, writes = %d", panicValue, err, conn.writes)
+	}
+	if len(nilDeciderServer.consumed) != 0 {
+		t.Fatalf("nil decider consumed subjects: %#v", nilDeciderServer.consumed)
 	}
 }
 
@@ -248,11 +396,14 @@ func TestFrameBoundsAndCanonicalHeaders(t *testing.T) {
 		"non-numeric":     append([]byte(frameMagic+"x\n"), valid...),
 		"header too long": append(append(append([]byte(frameMagic), bytes.Repeat([]byte("1"), maxHeaderSize+1)...), '\n'), valid...),
 		"declared over max": []byte(frameMagic + fmt.Sprintf("%d\n", maxFrameSize+1)),
+		"plus signed length": append([]byte(frameMagic+"+"+fmt.Sprintf("%d\n", len(valid))), valid...),
+		"truncated body":     append([]byte(frameMagic+fmt.Sprintf("%d\n", len(valid))), valid[:len(valid)-1]...),
 	} {
 		t.Run(name, func(t *testing.T) {
 			clientConn, serverConn := net.Pipe()
 			t.Cleanup(func() { _ = clientConn.Close(); _ = serverConn.Close() })
-			done := startServe(NewServer(func(context.Context, hostcontract.ApprovalSubject) bool { return true }), serverConn)
+			var calls atomic.Int32
+			done := startServe(NewServer(func(context.Context, hostcontract.ApprovalSubject) bool { calls.Add(1); return true }), serverConn)
 			writeErr := writeRaw(clientConn, input)
 			_ = clientConn.Close()
 			serveErr := await(t, done)
@@ -261,6 +412,9 @@ func TestFrameBoundsAndCanonicalHeaders(t *testing.T) {
 				t.Fatalf("write invalid header: %v", writeErr)
 			}
 			assertProtocolError(t, serveErr)
+			if calls.Load() != 0 {
+				t.Fatalf("invalid header reached decider %d times", calls.Load())
+			}
 		})
 	}
 	if _, err := encodeFrame(bytes.Repeat([]byte("x"), maxFrameSize+1)); err == nil {
@@ -273,6 +427,36 @@ func TestFrameBoundsAndCanonicalHeaders(t *testing.T) {
 	}
 	if _, err := decodeFrame(bytes.NewReader([]byte(frameMagic + "0\n"))); !errors.Is(err, errProtocol) {
 		t.Fatalf("zero-length frame = %v", err)
+	}
+}
+
+func TestServeRejectsUnencodableResponseBeforeDecisionOrConsumption(t *testing.T) {
+	subject := responseTooLargeSubject(t)
+	request := approvalRequest{Version: 1, ID: "0123456789abcdef0123456789abcdef", Subject: subject}
+	if body := requestBody(t, request); len(body) != maxFrameSize {
+		t.Fatalf("request body size = %d, want %d", len(body), maxFrameSize)
+	}
+	if body := decisionBody(t, approvalDecision{Version: 1, ID: request.ID, Subject: subject, Approved: false}); len(body) <= maxFrameSize {
+		t.Fatalf("decision body size = %d, want over %d", len(body), maxFrameSize)
+	}
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close(); _ = serverConn.Close() })
+	var calls atomic.Int32
+	server := NewServer(func(context.Context, hostcontract.ApprovalSubject) bool { calls.Add(1); return true })
+	done := startServe(server, serverConn)
+	writeErr := writeBody(clientConn, requestBody(t, request))
+	_ = clientConn.Close()
+	serveErr := await(t, done)
+	_ = serverConn.Close()
+	if writeErr != nil {
+		t.Fatalf("write maximal request: %v", writeErr)
+	}
+	assertProtocolError(t, serveErr)
+	if calls.Load() != 0 {
+		t.Fatalf("unencodable response reached decider %d times", calls.Load())
+	}
+	if _, consumed := server.consumed[subject]; consumed {
+		t.Fatal("unencodable response consumed the subject")
 	}
 }
 
@@ -395,8 +579,16 @@ func retireSubject() hostcontract.ApprovalSubject {
 	return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: "production", Resource: hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge-a"}, Machine: hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner-a"}, TargetRevision: testRevision, PreserveData: true}
 }
 
-const testRevision = "tr1:0000000000000000:0000000000000000000000000000000000000000000000000000000000000000"
+const testRevision = "tr1:0000000000000000:abcdef0000000000000000000000000000000000000000000000000000000000"
 const otherRevision = "tr1:0000000000000000:1111111111111111111111111111111111111111111111111111111111111111"
+
+func responseTooLargeSubject(t *testing.T) hostcontract.ApprovalSubject {
+	t.Helper()
+	subject := dataSubject()
+	base := len(requestBody(t, approvalRequest{Version: 1, ID: "0123456789abcdef0123456789abcdef", Subject: subject}))
+	subject.AppID = strings.Repeat("a", maxFrameSize-base+len(subject.AppID))
+	return subject
+}
 
 func testContext(t *testing.T) context.Context {
 	t.Helper()
@@ -421,6 +613,14 @@ func writeDecision(conn net.Conn, id string, subject hostcontract.ApprovalSubjec
 	return writeBody(conn, decisionBody(nil, approvalDecision{Version: 1, ID: id, Subject: subject, Approved: approved}))
 }
 
+func mustFrame(body []byte) []byte {
+	frame, err := encodeFrame(body)
+	if err != nil {
+		panic(err)
+	}
+	return frame
+}
+
 func requestBody(t *testing.T, request approvalRequest) []byte { return marshal(t, request) }
 func decisionBody(t *testing.T, decision approvalDecision) []byte { return marshal(t, decision) }
 func subjectJSON(t *testing.T, subject hostcontract.ApprovalSubject) string { return string(marshal(t, subject)) }
@@ -434,7 +634,7 @@ func marshal(t *testing.T, value any) []byte {
 	}
 	return body
 }
-func writeBody(conn net.Conn, body []byte) error { return writeRaw(conn, frame(body)) }
+func writeBody(conn net.Conn, body []byte) error { return writeRaw(conn, mustFrame(body)) }
 func writeRaw(conn net.Conn, input []byte) error {
 	_ = conn.SetWriteDeadline(time.Now().Add(testTimeout))
 	_, err := conn.Write(input)
@@ -522,6 +722,53 @@ type recordingConn struct{ writes int }
 func (*recordingConn) Read([]byte) (int, error) { return 0, errors.New("unexpected read") }
 func (c *recordingConn) Write(p []byte) (int, error) { c.writes++; return len(p), nil }
 func (*recordingConn) Close() error { return nil }
+
+type writeCountingConn struct {
+	io.ReadWriteCloser
+	writes atomic.Int32
+}
+
+type postWriteFailureConn struct {
+	writeN   int
+	writeErr error
+	readErr  error
+	writes   atomic.Int32
+}
+
+func (c *postWriteFailureConn) Read([]byte) (int, error) { return 0, c.readErr }
+func (c *postWriteFailureConn) Write(body []byte) (int, error) {
+	c.writes.Add(1)
+	if c.writeErr != nil {
+		return c.writeN, c.writeErr
+	}
+	return len(body), nil
+}
+func (*postWriteFailureConn) Close() error { return nil }
+
+func (c *writeCountingConn) Write(body []byte) (int, error) {
+	c.writes.Add(1)
+	return c.ReadWriteCloser.Write(body)
+}
+
+type scriptConn struct {
+	io.Reader
+	writes int
+}
+
+func (c *scriptConn) Write(body []byte) (int, error) { c.writes++; return len(body), nil }
+func (*scriptConn) Close() error { return nil }
+
+func capturePanic(call func() (*hostcontract.ApprovalSubject, error)) (panicValue any, subject *hostcontract.ApprovalSubject, err error) {
+	defer func() { panicValue = recover() }()
+	subject, err = call()
+	return nil, subject, err
+}
+
+func captureServePanic(call func() error) (panicValue any, err error) {
+	defer func() { panicValue = recover() }()
+	err = call()
+	return nil, err
+}
 
 type readErrorConn struct{ err error }
 
