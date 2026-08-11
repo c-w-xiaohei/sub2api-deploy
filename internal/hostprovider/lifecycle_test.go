@@ -512,7 +512,7 @@ func TestLifecycleUpdateRequestsOnlyExactSingleDataLinkApproval(t *testing.T) {
 
 func TestLifecycleUpdateDangerousTerminalRequiresExactCompleteEvidence(t *testing.T) {
 	old, next := dangerousChange(t)
-	for _, mutate := range []func(*hostprotocol.OperationEvidence){nil, func(e *hostprotocol.OperationEvidence) { e.Key.PriorAppliedRevision = revisionC() }, func(e *hostprotocol.OperationEvidence) { e.Status = hostprotocol.OperationPending }, func(e *hostprotocol.OperationEvidence) { e.Approval.NewData.Endpoint = "wrong" }} {
+	for _, mutate := range []func(*hostprotocol.OperationEvidence){nil, func(e *hostprotocol.OperationEvidence) { e.Key.PriorAppliedRevision = mismatchedRevision() }, func(e *hostprotocol.OperationEvidence) { e.Status = hostprotocol.OperationPending }, func(e *hostprotocol.OperationEvidence) { e.Approval.NewData.Endpoint = "wrong" }} {
 		r := &recordingLifecycleTransport{}
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
 		oldRevision, desired := revision(t, h, old), revision(t, h, next)
@@ -557,7 +557,7 @@ func TestLifecycleUpdateDangerousMismatchedPendingEvidenceFailsClosed(t *testing
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { approvals++; return &subject, nil }})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
 	approval := dangerousApprovalFixture(t, old, next, desired)
-	wrong := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: revisionC()}, Status: hostprotocol.OperationPending, Approval: &approval}
+	wrong := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: mismatchedRevision()}, Status: hostprotocol.OperationPending, Approval: &approval}
 	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(observation(oldRevision), wrong))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 	if err == nil || got.Properties.Len() != 0 || approvals != 0 || !onlyInspect(r) || hasWrite(r) {
@@ -1127,7 +1127,8 @@ func wrongMachine(value hostcontract.StableObservation) hostcontract.StableObser
 func wrongOwner(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ownership.Value = "owner-b"; return value }
 func emptyOwner(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ownership.Value = ""; return value }
 func wrongRelease(value hostcontract.StableObservation) hostcontract.StableObservation { value.HostRelease = "other"; return value }
-func wrongRevision(value hostcontract.StableObservation) hostcontract.StableObservation { value.AppliedRevision = "tr1:0000000000000000:0000000000000000000000000000000000000000000000000000000000000000"; return value }
+func wrongRevision(value hostcontract.StableObservation) hostcontract.StableObservation { value.AppliedRevision = mismatchedRevision(); return value }
+func mismatchedRevision() string { return "tr1:0000000000000000:0000000000000000000000000000000000000000000000000000000000000000" }
 func notReady(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ready = false; return value }
 func drifted(value hostcontract.StableObservation) hostcontract.StableObservation { value.Drifted = true; return value }
 func wrongAppImage(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps[0].ActiveImage = "wrong"; return value }
