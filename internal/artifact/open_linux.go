@@ -12,7 +12,7 @@ import (
 )
 
 func readPinned(root, relative string, size int64) ([]byte, error) {
-	if filepath.IsAbs(relative) || relative == "" {
+	if !validRelativePath(relative) {
 		return nil, fmt.Errorf("artifact escapes bundle root")
 	}
 	root, err := filepath.Abs(root)
@@ -57,6 +57,43 @@ func readPinned(root, relative string, size int64) ([]byte, error) {
 	file := os.NewFile(uintptr(fileFD), "artifact")
 	defer file.Close()
 	return io.ReadAll(io.LimitReader(file, size+1))
+}
+
+func LoadBundle(root string) (Bundle, error) {
+	rootFD, err := openBundleRoot(root)
+	if err != nil {
+		return Bundle{}, fmt.Errorf("invalid artifact bundle")
+	}
+	defer syscall.Close(rootFD)
+
+	fileFD, err := syscall.Openat(rootFD, "manifest.json", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return Bundle{}, fmt.Errorf("invalid artifact bundle")
+	}
+	file := os.NewFile(uintptr(fileFD), "manifest.json")
+	defer file.Close()
+
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fileFD, &stat); err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFREG || stat.Size < 0 || stat.Size > maxManifestSize {
+		return Bundle{}, fmt.Errorf("invalid artifact bundle")
+	}
+	manifest, err := LoadManifest(io.LimitReader(file, maxManifestSize+1))
+	if err != nil {
+		return Bundle{}, fmt.Errorf("invalid artifact bundle")
+	}
+	return Bundle{Root: root, Manifest: manifest}, nil
+}
+
+func openBundleRoot(root string) (int, error) {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return -1, err
+	}
+	base, err := syscall.Open("/", syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return -1, err
+	}
+	return openDirectories(base, strings.Split(strings.TrimPrefix(absolute, "/"), "/"))
 }
 
 func openDirectories(start int, parts []string) (int, error) {

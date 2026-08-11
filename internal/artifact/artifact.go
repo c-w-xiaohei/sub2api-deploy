@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
+	"strings"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
 )
@@ -25,6 +27,10 @@ type Manifest struct {
 	Release       string `json:"release"`
 	LinuxAMD64    Entry  `json:"linux-amd64"`
 	LinuxARM64    Entry  `json:"linux-arm64"`
+}
+type Bundle struct {
+	Root     string
+	Manifest Manifest
 }
 type Pinned struct {
 	bytes  []byte
@@ -45,7 +51,7 @@ func LoadManifest(r io.Reader) (Manifest, error) {
 	if err := decoder.Decode(&manifest); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return Manifest{}, fmt.Errorf("invalid artifact manifest")
 	}
-	if manifest.SchemaVersion != 1 || manifest.Release == "" || !validEntry(manifest.LinuxAMD64) || !validEntry(manifest.LinuxARM64) {
+	if manifest.SchemaVersion != 1 || manifest.Release == "" || !validEntry(manifest.LinuxAMD64) || !validEntry(manifest.LinuxARM64) || manifest.LinuxAMD64.Path == manifest.LinuxARM64.Path {
 		return Manifest{}, fmt.Errorf("invalid artifact manifest")
 	}
 	return manifest, nil
@@ -128,11 +134,23 @@ func EnsurePinned(ctx context.Context, client BootstrapClient, alias, bundleRoot
 func mustHex(value string) []byte { b, _ := hex.DecodeString(value); return b }
 
 func validEntry(entry Entry) bool {
-	if entry.Path == "" || entry.Size < 0 || entry.Size > maxArtifactSize || len(entry.SHA256) != sha256.Size*2 {
+	if !validRelativePath(entry.Path) || entry.Size < 0 || entry.Size > maxArtifactSize || len(entry.SHA256) != sha256.Size*2 {
 		return false
 	}
-	_, err := hex.DecodeString(entry.SHA256)
-	return err == nil
+	decoded, err := hex.DecodeString(entry.SHA256)
+	return err == nil && strings.ToLower(entry.SHA256) == entry.SHA256 && len(decoded) == sha256.Size
+}
+
+func validRelativePath(value string) bool {
+	if value == "" || path.IsAbs(value) {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 const (
