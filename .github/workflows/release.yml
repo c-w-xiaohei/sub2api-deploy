@@ -55,11 +55,19 @@ jobs:
           go-version: "1.25.11"
           cache: true
 
-      - name: Build Pulumi binary
+      - name: Build release components
         env:
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
-        run: scripts/build-pulumi-release.sh "dist/pulumi-program-linux-${{ matrix.arch }}"
+        run: |
+          components="dist/components-linux-${{ matrix.arch }}"
+          mkdir -p "${components}"
+          go build -trimpath -o "${components}/sub2api-deploy" ./cmd/sub2api-deploy
+          scripts/build-pulumi-release.sh "${components}/pulumi-program"
+          go build -trimpath -o "${components}/pulumi-resource-sub2api-host" ./cmd/pulumi-resource-sub2api-host
+          for goarch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" go build -trimpath -o "${components}/sub2api-host-linux-${goarch}" ./cmd/sub2api-host
+          done
 
       - name: Assemble deployment bundle
         env:
@@ -67,9 +75,10 @@ jobs:
         run: |
           archive="sub2api-vps-deploy-${VERSION}-linux-${{ matrix.arch }}"
           bundle="release/${archive}"
+          components="dist/components-linux-${{ matrix.arch }}"
           mkdir -p release
           rm -rf "${bundle}" "release/${archive}.tar.gz" "release/${archive}.tar.gz.sha256"
-          bash scripts/release-bundle.sh assemble "${bundle}" "dist/pulumi-program-linux-${{ matrix.arch }}"
+          bash scripts/release-bundle.sh assemble "${bundle}" "${components}" "${VERSION}"
           tar -C release -czf "release/${archive}.tar.gz" "${archive}"
           bash scripts/release-bundle.sh verify "release/${archive}.tar.gz"
           (cd release && sha256sum "${archive}.tar.gz" > "${archive}.tar.gz.sha256")
