@@ -189,7 +189,7 @@ func (h *host) lifecycleCreate(ctx context.Context, req p.CreateRequest) (p.Crea
 		return p.CreateResponse{}, fmt.Errorf("invalid bootstrap response")
 	}
 
-	observation, err := h.inspect(ctx, in)
+	observation, err := h.inspectObservation(ctx, in)
 	if err != nil {
 		return p.CreateResponse{}, err
 	}
@@ -219,6 +219,9 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 	if old.resource != next.resource {
 		return p.UpdateResponse{}, fmt.Errorf("resource identity changes are not supported")
 	}
+	if req.ID != stableID(old.resource) {
+		return p.UpdateResponse{}, fmt.Errorf("invalid resource ID")
+	}
 	if req.OldInputs.Len() != 0 {
 		oldInputs, err := h.parseInputs(req.OldInputs)
 		if err != nil {
@@ -241,14 +244,14 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 	if checkpointObservation.Machine != machine ||
 		checkpointObservation.Ownership != owner ||
 		checkpointObservation.AppliedRevision != applied ||
-		applied != old.revision {
+		checkpointObservation.HostRelease != old.target.ReleaseArtifact {
 		return p.UpdateResponse{}, fmt.Errorf("invalid checkpoint")
 	}
 	if _, err := hostcontract.ParseRevision(applied); err != nil {
 		return p.UpdateResponse{}, fmt.Errorf("invalid checkpoint")
 	}
 
-	initial, err := h.inspect(ctx, next)
+	initial, err := h.inspectObservation(ctx, next)
 	if err != nil {
 		return p.UpdateResponse{}, err
 	}
@@ -285,7 +288,7 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 		return p.UpdateResponse{}, fmt.Errorf("invalid reconcile response")
 	}
 
-	final, err := h.inspect(ctx, next)
+	final, err := h.inspectObservation(ctx, next)
 	if err != nil {
 		return p.UpdateResponse{}, err
 	}
@@ -299,9 +302,131 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 	return p.UpdateResponse{Properties: state}, nil
 }
 
-func (h *host) inspect(ctx context.Context, in lifecycleInput) (hostcontract.StableObservation, error) {
+func (h *host) lifecycleRead(ctx context.Context, req p.ReadRequest) (p.ReadResponse, error) {
+	if req.ID == "" || req.Inputs.Len() == 0 || req.Properties.Len() == 0 {
+		return p.ReadResponse{}, fmt.Errorf("import read requires registered input and checkpoint context")
+	}
+	in, err := h.parseInputs(req.Inputs)
+	if err != nil {
+		return p.ReadResponse{}, err
+	}
+	if req.ID != stableID(in.resource) {
+		return p.ReadResponse{}, fmt.Errorf("invalid resource ID")
+	}
+	checkpointInputs, err := h.parseInputs(inputProperties(req.Properties))
+	if err != nil || !reflect.DeepEqual(checkpointInputs, in) {
+		return p.ReadResponse{}, fmt.Errorf("checkpoint inputs do not match")
+	}
+	machine, owner, applied, checkpointObservation, err := parseCheckpoint(req.Properties)
+	if err != nil || checkpointObservation.Machine != machine || checkpointObservation.Ownership != owner || checkpointObservation.AppliedRevision != applied || checkpointObservation.HostRelease != in.target.ReleaseArtifact {
+		return p.ReadResponse{}, fmt.Errorf("invalid checkpoint")
+	}
+	if _, err := hostcontract.ParseRevision(applied); err != nil {
+		return p.ReadResponse{}, fmt.Errorf("invalid checkpoint")
+	}
+	result, err := h.inspect(ctx, in)
+	if err != nil {
+		return p.ReadResponse{}, err
+	}
+	if result.Status == hostprotocol.ResultRetired {
+		if validRetirement(result, machine, owner) {
+			return p.ReadResponse{}, nil
+		}
+		return p.ReadResponse{}, fmt.Errorf("invalid retirement evidence")
+	}
+	if result.Status != hostprotocol.ResultInspected || result.Observation == nil {
+		return p.ReadResponse{}, fmt.Errorf("invalid inspect response")
+	}
+	observation := *result.Observation
+	if observation.Machine != machine || observation.Ownership != owner || observation.HostRelease != in.target.ReleaseArtifact {
+		return p.ReadResponse{}, fmt.Errorf("unsafe remote observation")
+	}
+	if _, err := hostcontract.ParseRevision(observation.AppliedRevision); err != nil {
+		return p.ReadResponse{}, fmt.Errorf("unsafe remote observation")
+	}
+	state, err := checkpointState(req.Inputs, observation, observation.AppliedRevision)
+	if err != nil {
+		return p.ReadResponse{}, err
+	}
+	return p.ReadResponse{ID: req.ID, Properties: state, Inputs: req.Inputs}, nil
+}
+
+func (h *host) lifecycleDelete(ctx context.Context, req p.DeleteRequest) error {
+	if req.ID == "" || req.Properties.Len() == 0 || req.OldInputs.Len() == 0 {
+		return fmt.Errorf("delete requires checkpoint context")
+	}
+	in, err := h.parseInputs(inputProperties(req.Properties))
+	if err != nil {
+		return fmt.Errorf("invalid checkpoint")
+	}
+	old, err := h.parseInputs(req.OldInputs)
+	if err != nil || !reflect.DeepEqual(old, in) {
+		return fmt.Errorf("checkpoint inputs do not match")
+	}
+	if req.ID != stableID(in.resource) {
+		return fmt.Errorf("invalid resource ID")
+	}
+	if !drained(in.target) {
+		return fmt.Errorf("host target still has runtime references")
+	}
+	machine, owner, applied, checkpointObservation, err := parseCheckpoint(req.Properties)
+	if err != nil || applied != in.revision || checkpointObservation.Machine != machine || checkpointObservation.Ownership != owner || checkpointObservation.AppliedRevision != applied || checkpointObservation.HostRelease != in.target.ReleaseArtifact {
+		return fmt.Errorf("invalid checkpoint")
+	}
+	result, err := h.inspect(ctx, in)
+	if err != nil {
+		return err
+	}
+	if result.Status == hostprotocol.ResultRetired {
+		if validRetirement(result, machine, owner) {
+			return nil
+		}
+		return fmt.Errorf("invalid retirement evidence")
+	}
+	if result.Status != hostprotocol.ResultInspected || result.Observation == nil {
+		return fmt.Errorf("invalid inspect response")
+	}
+	observation := *result.Observation
+	if observation.Machine != machine || observation.Ownership != owner || observation.HostRelease != in.target.ReleaseArtifact || observation.AppliedRevision != applied {
+		return fmt.Errorf("unsafe remote observation")
+	}
+	subject := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: in.resource.Environment, Resource: in.resource, Machine: machine, Ownership: owner, TargetRevision: applied, PreserveData: true}
+	if h.deps.approve == nil {
+		return fmt.Errorf("approval required")
+	}
+	approval, err := h.deps.approve(ctx, subject)
+	if err != nil || approval == nil || !reflect.DeepEqual(*approval, subject) {
+		return fmt.Errorf("approval required")
+	}
+	request := hostprotocol.Request{Action: hostcontract.ActionRetirePreserveData, Server: in.server, Resource: in.resource, TargetRevision: applied, PriorAppliedRevision: applied, Approval: approval}
+	frame, err := hostprotocol.EncodeRequest(request)
+	if err != nil {
+		return fmt.Errorf("invalid lifecycle request")
+	}
 	if h.deps.transport == nil {
-		return hostcontract.StableObservation{}, fmt.Errorf("transport unavailable")
+		return fmt.Errorf("transport unavailable")
+	}
+	response, err := h.deps.transport.Run(ctx, in.server.SSHAlias, openssh.Host, frame)
+	if err != nil {
+		return fmt.Errorf("transport failed")
+	}
+	if _, err := hostprotocol.EncodeResponse(response); err != nil || response.Error != nil || response.Result == nil || !validRetirement(*response.Result, machine, owner) {
+		return fmt.Errorf("invalid retire response")
+	}
+	return nil
+}
+
+func validRetirement(result hostprotocol.Result, machine hostcontract.MachineIdentity, owner hostcontract.OwnershipIdentity) bool {
+	return result.Status == hostprotocol.ResultRetired && result.Machine != nil && result.Ownership != nil && result.Retirement != nil && result.Retirement.PreserveData && *result.Machine == machine && *result.Ownership == owner
+}
+
+func drained(target hostcontract.Target) bool {
+	return len(target.Apps) == 0 && len(target.DataServices) == 0 && target.ReverseProxy == nil && len(target.Connectors) == 0 && (target.MicroSocks == nil || !target.MicroSocks.Server && len(target.MicroSocks.Clients) == 0)
+}
+
+func (h *host) inspect(ctx context.Context, in lifecycleInput) (hostprotocol.Result, error) {
+	if h.deps.transport == nil {
+		return hostprotocol.Result{}, fmt.Errorf("transport unavailable")
 	}
 
 	request := hostprotocol.Request{
@@ -312,16 +437,27 @@ func (h *host) inspect(ctx context.Context, in lifecycleInput) (hostcontract.Sta
 	}
 	frame, err := hostprotocol.EncodeRequest(request)
 	if err != nil {
-		return hostcontract.StableObservation{}, fmt.Errorf("invalid lifecycle request")
+		return hostprotocol.Result{}, fmt.Errorf("invalid lifecycle request")
 	}
 	response, err := h.deps.transport.Run(ctx, in.server.SSHAlias, openssh.Host, frame)
 	if err != nil {
-		return hostcontract.StableObservation{}, fmt.Errorf("transport failed")
+		return hostprotocol.Result{}, fmt.Errorf("transport failed")
 	}
-	if err := expectedResponse(response, hostprotocol.ResultInspected, "inspect"); err != nil {
+	if _, err := hostprotocol.EncodeResponse(response); err != nil || response.Error != nil || response.Result == nil || (response.Result.Status != hostprotocol.ResultInspected && response.Result.Status != hostprotocol.ResultRetired) {
+		return hostprotocol.Result{}, fmt.Errorf("invalid inspect response")
+	}
+	return *response.Result, nil
+}
+
+func (h *host) inspectObservation(ctx context.Context, in lifecycleInput) (hostcontract.StableObservation, error) {
+	result, err := h.inspect(ctx, in)
+	if err != nil {
 		return hostcontract.StableObservation{}, err
 	}
-	return *response.Result.Observation, nil
+	if result.Status != hostprotocol.ResultInspected || result.Observation == nil {
+		return hostcontract.StableObservation{}, fmt.Errorf("invalid inspect response")
+	}
+	return *result.Observation, nil
 }
 
 func expectedResponse(response hostprotocol.Response, status hostprotocol.ResultStatus, stage string) error {

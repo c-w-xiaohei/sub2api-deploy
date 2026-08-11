@@ -154,6 +154,24 @@ func (h *host) diff(_ context.Context, req p.DiffRequest) (p.DiffResponse, error
 	if changed(old, next, "server") {
 		d["server.sshAlias"] = p.PropertyDiff{Kind: p.Update, InputDiff: true}
 	}
+	if hasCheckpointOutputs(req.State) {
+		_, _, applied, observation, err := parseCheckpoint(req.State)
+		if err != nil {
+			return p.DiffResponse{}, fmt.Errorf("invalid checkpoint")
+		}
+		if observation.Drifted || applied != observation.AppliedRevision {
+			d["observation"] = p.PropertyDiff{Kind: p.Update}
+		}
+		if _, configured := h.configuredKey(); configured {
+			previous, err := h.parseInputs(old)
+			if err != nil {
+				return p.DiffResponse{}, fmt.Errorf("invalid checkpoint inputs")
+			}
+			if applied != previous.revision || observation.AppliedRevision != previous.revision {
+				d["observation"] = p.PropertyDiff{Kind: p.Update}
+			}
+		}
+	}
 	return p.DiffResponse{HasChanges: len(d) > 0, DetailedDiff: d}, nil
 }
 
@@ -161,16 +179,16 @@ func (h *host) create(ctx context.Context, req p.CreateRequest) (p.CreateRespons
 	return h.lifecycleCreate(ctx, req)
 }
 
-func (h *host) read(context.Context, p.ReadRequest) (p.ReadResponse, error) {
-	return p.ReadResponse{}, fmt.Errorf("Host Read is not implemented")
+func (h *host) read(ctx context.Context, req p.ReadRequest) (p.ReadResponse, error) {
+	return h.lifecycleRead(ctx, req)
 }
 
 func (h *host) update(ctx context.Context, req p.UpdateRequest) (p.UpdateResponse, error) {
 	return h.lifecycleUpdate(ctx, req)
 }
 
-func (h *host) delete(context.Context, p.DeleteRequest) error {
-	return fmt.Errorf("Host Delete is not implemented")
+func (h *host) delete(ctx context.Context, req p.DeleteRequest) error {
+	return h.lifecycleDelete(ctx, req)
 }
 
 func changed(old, next property.Map, key string) bool {
@@ -196,6 +214,15 @@ func hasComputed(m property.Map) bool {
 	computed := false
 	m.All(func(_ string, v property.Value) bool { computed = v.HasComputed(); return !computed })
 	return computed
+}
+
+func hasCheckpointOutputs(state property.Map) bool {
+	for _, name := range []string{"machine", "ownership", "appliedRevision", "observation"} {
+		if _, ok := state.GetOk(name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // property.Value keeps its secret marker alongside its payload; unlike the legacy
