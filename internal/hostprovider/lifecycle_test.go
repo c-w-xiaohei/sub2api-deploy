@@ -224,7 +224,7 @@ func TestLifecycleUpdateReconcilesWithOldCheckpointRevision(t *testing.T) {
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
 	prior := observation(oldRevision)
 	r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), response(applied(desired)), response(inspected(observation(desired)))}
-	got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, prior, oldRevision), OldInputs: old, Inputs: next})
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, prior, oldRevision), OldInputs: old, Inputs: next})
 	if err != nil {
 		t.Fatal("Update returned an error")
 	}
@@ -243,7 +243,7 @@ func TestLifecycleUpdateReplaysOldCheckpointKeyAfterResponseLoss(t *testing.T) {
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
 	r.outcomes = []lifecycleOutcome{response(inspected(observation(desired))), response(applied(desired)), response(inspected(observation(desired)))}
-	got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 	if err != nil || len(r.calls) != 3 || len(r.outcomes) != 0 {
 		t.Fatal("response-loss retry did not complete with three Host calls")
 	}
@@ -274,7 +274,7 @@ func TestLifecycleUpdateRequestsOnlyExactSingleDataLinkApproval(t *testing.T) {
 	prior := observation(oldRevision)
 	expected = hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: "prod", Resource: lifecycleResource(t, old), AppID: "api", DataKind: "postgres", OldData: oldTarget.Apps[0].DataLinks[0].Identity, NewData: decodeTarget(t, next).Apps[0].DataLinks[0].Identity, TargetRevision: desired}
 	r.outcomes = []lifecycleOutcome{response(inspected(prior)), response(applied(desired)), response(inspected(observation(desired)))}
-	if _, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, prior, oldRevision), OldInputs: old, Inputs: next}); err != nil {
+	if _, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, prior, oldRevision), OldInputs: old, Inputs: next}); err != nil {
 		t.Fatal("approved Update returned an error")
 	}
 	if approvals != 1 || len(r.events) != 4 || strings.Join(r.events, ",") != "inspect,approve,reconcile,inspect" {
@@ -306,7 +306,7 @@ func TestLifecycleUpdateRequestsApprovalForRenamedExactSingleDataLink(t *testing
 	oldObservation := observationFor(oldTarget, oldRevision)
 	expected = hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: "prod", Resource: lifecycleResource(t, old), AppID: "api", DataKind: "postgres", OldData: oldIdentity, NewData: newIdentity, TargetRevision: desired}
 	r.outcomes = []lifecycleOutcome{response(inspected(oldObservation)), response(applied(desired)), response(inspected(observationFor(nextTarget, desired)))}
-	got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
 	if err != nil || got.Properties.Len() == 0 || approvals != 1 || strings.Join(r.events, ",") != "inspect,approve,reconcile,inspect" {
 		t.Fatal("renamed exact single data-link did not use inspect, approve, reconcile, inspect")
 	}
@@ -325,7 +325,7 @@ func TestLifecycleUpdateApprovalFailuresAndMultipleChangesDoNotWrite(t *testing.
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: approval})
 		oldRevision := revision(t, h, old)
 		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision)))}
-		got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 		if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) {
 			t.Fatal("unapproved data-link change wrote or fabricated state")
 		}
@@ -337,7 +337,7 @@ func TestLifecycleUpdateApprovalFailuresAndMultipleChangesDoNotWrite(t *testing.
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 	oldRevision := revision(t, h, multipleOld)
 	r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision)))}
-	_, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, multipleOld, observation(oldRevision), oldRevision), OldInputs: multipleOld, Inputs: multipleNext})
+	_, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, multipleOld)), State: checkpoint(t, multipleOld, observation(oldRevision), oldRevision), OldInputs: multipleOld, Inputs: multipleNext})
 	if err == nil || !onlyInspect(r) {
 		t.Fatal("multiple dangerous changes reached write path")
 	}
@@ -360,7 +360,7 @@ func TestLifecycleUpdateRejectsUnsafeInitialObservations(t *testing.T) {
 			oldRevision := revision(t, h, old)
 			initial := observation(oldRevision)
 			if scenario.mutate != nil { r.outcomes = []lifecycleOutcome{response(inspected(scenario.mutate(initial)))} } else if scenario.outcome.err != nil || scenario.outcome.response.Result != nil { r.outcomes = []lifecycleOutcome{scenario.outcome} }
-			got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+			got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 			if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) {
 				t.Fatal("unsafe initial observation reached reconciliation")
 			}
@@ -376,7 +376,7 @@ func TestLifecycleUpdateRejectsInvalidFinalObservation(t *testing.T) {
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 		oldRevision, desired := revision(t, h, old), revision(t, h, next)
 		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), response(applied(desired)), response(inspected(mutate(observation(desired))))}
-		got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 		if err == nil || got.Properties.Len() != 0 || len(r.calls) != 3 {
 			t.Fatal("invalid final observation fabricated a checkpoint")
 		}
@@ -392,7 +392,7 @@ func TestLifecycleUpdateRejectsInvalidFinalLocalDataObservation(t *testing.T) {
 		oldRevision, desired := revision(t, h, old), revision(t, h, next)
 		oldObservation := observationFor(decodeTarget(t, old), oldRevision)
 		r.outcomes = []lifecycleOutcome{response(inspected(oldObservation)), response(applied(desired)), response(inspected(mutate(observationFor(decodeTarget(t, next), desired))))}
-		got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
 		if err == nil || got.Properties.Len() != 0 || len(r.calls) != 3 {
 			t.Fatal("invalid final local-data observation fabricated a checkpoint")
 		}
@@ -410,7 +410,7 @@ func TestLifecycleUpdateAcceptsOwnershipScopedLocalDataIdentity(t *testing.T) {
 		t.Fatal("local data fixture did not contain two distinct opaque managed identities")
 	}
 	r.outcomes = []lifecycleOutcome{response(inspected(oldObservation)), response(applied(desired)), response(inspected(nextObservation))}
-	got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
 	if err != nil || len(r.calls) != 3 { t.Fatal("Update rejected an ownership-scoped local data identity") }
 	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
 }
@@ -422,7 +422,7 @@ func TestLifecycleUpdateOrdinaryChangesAndUnknownInputs(t *testing.T) {
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t), artifact: fatalArtifact(t)})
 		oldRevision := revision(t, h, old)
 		if hasComputed(next) {
-			if _, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next}); err == nil {
+			if _, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next}); err == nil {
 				t.Fatal("unknown Update input was accepted")
 			} else {
 				assertNoCanary(t, errString(err))
@@ -432,7 +432,7 @@ func TestLifecycleUpdateOrdinaryChangesAndUnknownInputs(t *testing.T) {
 		}
 		desired := revision(t, h, next)
 		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), response(applied(desired)), response(inspected(observationFor(decodeTarget(t, next), desired)))}
-		if _, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next}); err != nil {
+		if _, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next}); err != nil {
 			t.Fatal("ordinary Update returned an error")
 		}
 		if len(r.calls) != 3 || strings.Join(r.events, ",") != "inspect,reconcile,inspect" {
@@ -450,7 +450,7 @@ func TestLifecycleUpdateRejectsReleaseUpgradeWithoutWrite(t *testing.T) {
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
 	oldRevision := revision(t, h, old)
 	r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision)))}
-	got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 	if err == nil || got.Properties.Len() != 0 || !strings.Contains(err.Error(), "unsupported upgrade") || hasWrite(r) {
 		t.Fatal("release upgrade was not rejected before write")
 	}
@@ -460,22 +460,23 @@ func TestLifecycleUpdateRejectsReleaseUpgradeWithoutWrite(t *testing.T) {
 func TestLifecycleUpdateDirectGuardsFailBeforeTransport(t *testing.T) {
 	old := lifecycleInputs("edge")
 	for _, scenario := range []struct { name string; id string; state, oldInputs, inputs property.Map }{
-		{"environment", "stable", checkpointFor(t, old), old, old.Set("resource", object("environment", property.New("other"), "serverKey", property.New("edge")))},
-		{"server key", "stable", checkpointFor(t, old), old, old.Set("resource", object("environment", property.New("prod"), "serverKey", property.New("other")))},
-		{"hostile alias", "stable", checkpointFor(t, old), old, old.Set("server", object("sshAlias", property.New("host; unsafe")))},
-		{"missing machine", "stable", checkpointFor(t, old).Delete("machine"), old, old},
-		{"missing ownership", "stable", checkpointFor(t, old).Delete("ownership"), old, old},
-		{"missing revision", "stable", checkpointFor(t, old).Delete("appliedRevision"), old, old},
-		{"missing observation", "stable", checkpointFor(t, old).Delete("observation"), old, old},
-		{"malformed machine", "stable", checkpointFor(t, old).Set("machine", property.New("bad")), old, old},
-		{"malformed ownership", "stable", checkpointFor(t, old).Set("ownership", property.New("bad")), old, old},
-		{"malformed revision", "stable", checkpointFor(t, old).Set("appliedRevision", property.New("bad")), old, old},
-		{"malformed observation", "stable", checkpointFor(t, old).Set("observation", property.New("bad")), old, old},
-		{"computed old inputs", "stable", checkpointFor(t, old), old.Set("target", property.New(property.Computed)), old},
-		{"missing old inputs field", "stable", checkpointFor(t, old), old.Delete("target"), old},
-		{"malformed old inputs", "stable", checkpointFor(t, old), old.Set("server", property.New("bad")), old},
-		{"unsecret old inputs", "stable", checkpointFor(t, old), old.Set("secrets", encodeValue(t, decodeSecrets(t, old))), old},
-		{"unsecret next inputs", "stable", checkpointFor(t, old), old, old.Set("secrets", encodeValue(t, decodeSecrets(t, old)))},
+		{"wrong physical ID", "other", checkpointFor(t, old), old, old},
+		{"environment", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old, old.Set("resource", object("environment", property.New("other"), "serverKey", property.New("edge")))},
+		{"server key", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old, old.Set("resource", object("environment", property.New("prod"), "serverKey", property.New("other")))},
+		{"hostile alias", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old, old.Set("server", object("sshAlias", property.New("host; unsafe")))},
+		{"missing machine", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Delete("machine"), old, old},
+		{"missing ownership", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Delete("ownership"), old, old},
+		{"missing revision", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Delete("appliedRevision"), old, old},
+		{"missing observation", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Delete("observation"), old, old},
+		{"malformed machine", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Set("machine", property.New("bad")), old, old},
+		{"malformed ownership", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Set("ownership", property.New("bad")), old, old},
+		{"malformed revision", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Set("appliedRevision", property.New("bad")), old, old},
+		{"malformed observation", stableID(lifecycleResource(t, old)), checkpointFor(t, old).Set("observation", property.New("bad")), old, old},
+		{"computed old inputs", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old.Set("target", property.New(property.Computed)), old},
+		{"missing old inputs field", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old.Delete("target"), old},
+		{"malformed old inputs", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old.Set("server", property.New("bad")), old},
+		{"unsecret old inputs", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old.Set("secrets", encodeValue(t, decodeSecrets(t, old))), old},
+		{"unsecret next inputs", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old, old.Set("secrets", encodeValue(t, decodeSecrets(t, old)))},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			r := &recordingLifecycleTransport{}
@@ -506,7 +507,7 @@ func TestLifecycleRemoteErrorsReturnEmptyResponsesWithoutPanic(t *testing.T) {
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
 		oldRevision := revision(t, h, old)
 		assertNoPanic(t, func() {
-			got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+			got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 			if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) { t.Fatal("Update remote recovery error did not return a bounded empty response") }
 			assertNoCanary(t, errString(err))
 		})
@@ -518,7 +519,7 @@ func TestLifecycleRemoteErrorsReturnEmptyResponsesWithoutPanic(t *testing.T) {
 		oldRevision := revision(t, h, old)
 		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), remoteError(hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict)}
 		assertNoPanic(t, func() {
-			got, err := h.update(t.Context(), p.UpdateRequest{ID: "stable", State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+			got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 			if err == nil || got.Properties.Len() != 0 || len(r.calls) != 2 || !onlyInspectThenReconcile(r) { t.Fatal("Update reconcile remote conflict did not return a bounded empty response") }
 			assertNoCanary(t, errString(err))
 		})
@@ -546,7 +547,8 @@ func TestLifecycleReadRefreshesTrustedObservationWithOneInspect(t *testing.T) {
 			}
 			assertInspect(t, r.calls[0], inputs, revision)
 			assertInputsPreserved(t, got.Properties, inputs)
-			if !valueAt(t, got.Properties, "secrets").Secret() || !valueAt(t, got.Properties, "observation").Equals(encodeValue(t, scenario.observed)) {
+			assertInputsPreserved(t, got.Inputs, inputs)
+			if !valueAt(t, got.Properties, "secrets").Secret() || !valueAt(t, got.Inputs, "secrets").Secret() || !valueAt(t, got.Properties, "observation").Equals(encodeValue(t, scenario.observed)) {
 				t.Fatal("Read did not preserve input property classes or refresh observation")
 			}
 		})
@@ -602,6 +604,39 @@ func TestLifecycleReadRetirementEvidenceMustMatchManagedCheckpoint(t *testing.T)
 			assertInspect(t, r.calls[0], inputs, revision)
 		})
 	}
+}
+
+func TestLifecycleReadRefreshDriftDiffAndUpdateRepairChain(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	r := &recordingLifecycleTransport{}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
+	desired := revision(t, h, inputs)
+	refreshed := observation(revision(t, h, rotateSecret(t, inputs)))
+	if refreshed.AppliedRevision == desired { t.Fatal("drift fixture revision did not differ from desired") }
+	r.outcomes = []lifecycleOutcome{response(inspected(refreshed))}
+	read, err := h.read(t.Context(), p.ReadRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint(t, inputs, observation(desired), desired), Inputs: inputs})
+	if err != nil || read.ID != stableID(lifecycleResource(t, inputs)) || !onlyInspect(r) {
+		t.Fatal("Read did not refresh a trusted drift checkpoint")
+	}
+	assertInspect(t, r.calls[0], inputs, desired)
+	assertInputsPreserved(t, read.Properties, inputs)
+	assertInputsPreserved(t, read.Inputs, inputs)
+	if !valueAt(t, read.Inputs, "secrets").Secret() || !valueAt(t, read.Properties, "appliedRevision").Equals(property.New(refreshed.AppliedRevision)) || !valueAt(t, read.Properties, "observation").Equals(encodeValue(t, refreshed)) {
+		t.Fatal("Read did not preserve inputs separately from refreshed drift state")
+	}
+	diff, err := h.diff(t.Context(), p.DiffRequest{OldInputs: inputs, State: read.Properties, Inputs: inputs})
+	if err != nil || !diff.HasChanges {
+		t.Fatal("Diff did not report a refreshed applied-revision mismatch")
+	}
+	r.outcomes = []lifecycleOutcome{response(inspected(refreshed)), response(applied(desired)), response(inspected(observation(desired)))}
+	updated, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, inputs)), State: read.Properties, OldInputs: inputs, Inputs: inputs})
+	if err != nil || len(r.calls) != 4 || r.calls[1].request.Action != hostcontract.ActionInspect || r.calls[2].request.Action != hostcontract.ActionReconcile || r.calls[3].request.Action != hostcontract.ActionInspect {
+		t.Fatal("Update did not repair the refreshed drift checkpoint")
+	}
+	assertInspect(t, r.calls[1], inputs, desired)
+	assertReconcile(t, r.calls[2].request, inputs, desired, refreshed.AppliedRevision, nil)
+	assertInspect(t, r.calls[3], inputs, desired)
+	assertCheckpoint(t, updated.Properties, inputs, observation(desired), desired)
 }
 
 func TestLifecycleUpdateRepairsValidatedDriftCheckpoint(t *testing.T) {
