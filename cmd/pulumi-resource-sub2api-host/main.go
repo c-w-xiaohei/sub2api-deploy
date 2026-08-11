@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"syscall"
 
@@ -58,6 +59,11 @@ func approvalFromFD3() (func(context.Context, hostcontract.ApprovalSubject) (*ho
 	if _, _, errno = syscall.Syscall(syscall.SYS_FCNTL, 3, syscall.F_SETFD, flags|syscall.FD_CLOEXEC); errno != 0 {
 		return rejectApproval()
 	}
-	client := hostapproval.NewClient(file)
-	return client.Approve, func() { _ = file.Close() }
+	conn, err := net.FileConn(file)
+	_ = file.Close()
+	if err != nil {
+		return unavailable, nil
+	}
+	client := hostapproval.NewClient(conn)
+	return client.Approve, func() { _ = conn.Close() }
 }
