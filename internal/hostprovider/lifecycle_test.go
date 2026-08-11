@@ -165,7 +165,8 @@ func TestReleaseBundleLocatorFailsClosedForMissingMalformedAndSymlinkedArtifacts
 func TestLifecycleCreateBootstrapsThenInspectsAndCheckpoints(t *testing.T) {
 	inputs := lifecycleInputs("edge")
 	bundle, binary := lifecycleBundle(t, release(t, inputs))
-	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}}
+	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
 	desired := revision(t, h, inputs)
 	prior := baselineRevision(t, h, inputs)
@@ -179,16 +180,33 @@ func TestLifecycleCreateBootstrapsThenInspectsAndCheckpoints(t *testing.T) {
 		t.Fatal("Create returned an empty ID")
 	}
 	assertNoCanary(t, got.ID)
-	if len(r.calls) != 3 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver || r.calls[2].command != openssh.Host {
-		t.Fatal("Create transport sequence was not Probe, BootstrapReceiver, Host")
+	if len(r.calls) != 4 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver || r.calls[2].kind != "probe" || r.calls[3].command != openssh.Host {
+		t.Fatal("Create transport sequence was Probe(old), BootstrapReceiver, Probe(new), Host")
 	}
-	if r.calls[0].alias != "edge" || r.calls[1].alias != "edge" || r.calls[2].alias != "edge" {
+	if r.calls[0].alias != "edge" || r.calls[1].alias != "edge" || r.calls[2].alias != "edge" || r.calls[3].alias != "edge" {
 		t.Fatal("Create transport did not use the configured alias")
 	}
 	bootstrap := decodeBootstrapRequest(t, r.calls[1].stdin, binary)
 	assertReconcile(t, bootstrap, inputs, desired, prior, nil)
-	assertInspect(t, r.calls[2], inputs, desired)
+	assertInspect(t, r.calls[3], inputs, desired)
 	assertCheckpoint(t, got.Properties, inputs, observation(desired), desired)
+}
+
+func TestLifecycleCreateRejectsBadPostBootstrapInstalledDigest(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	bundle, binary := lifecycleBundle(t, release(t, inputs))
+	for _, digest := range []string{"missing", strings.Repeat("0", 64)} {
+		r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
+		desired, prior := revision(t, h, inputs), baselineRevision(t, h, inputs)
+		r.outcomes = []lifecycleOutcome{response(applied(desired))}
+		got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
+		if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 3 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver || r.calls[2].kind != "probe" || len(r.outcomes) != 0 {
+			t.Fatalf("bad post-bootstrap digest checkpointed or inspected final: %#v, %v, %#v", got, err, r.calls)
+		}
+		assertReconcile(t, decodeBootstrapRequest(t, r.calls[1].stdin, binary), inputs, desired, prior, nil)
+		assertNoCanary(t, errString(err))
+	}
 }
 
 func TestLifecycleCreateIDIsStableAcrossAliasAndTargetChanges(t *testing.T) {
@@ -218,18 +236,20 @@ func TestLifecycleCreateRejectsInvalidBootstrapAndFinalObservation(t *testing.T)
 		calls    int
 	}{
 		{"bootstrap status", []lifecycleOutcome{response(inspected(observation(revisionForInputs(t, inputs))))}, 2},
-		{"final machine", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongMachine(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final empty owner", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(emptyOwner(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final revision", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongRevision(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final ready", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(notReady(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final drift", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(drifted(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final app image", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongAppImage(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final app coverage", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(missingApps(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final release", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongRelease(observation(revisionForInputs(t, inputs)))))}, 3},
+		{"final machine", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongMachine(observation(revisionForInputs(t, inputs)))))}, 4},
+		{"final empty owner", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(emptyOwner(observation(revisionForInputs(t, inputs)))))}, 4},
+		{"final revision", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongRevision(observation(revisionForInputs(t, inputs)))))}, 4},
+		{"final ready", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(notReady(observation(revisionForInputs(t, inputs)))))}, 4},
+		{"final drift", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(drifted(observation(revisionForInputs(t, inputs)))))}, 4},
+		{"final app image", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongAppImage(observation(revisionForInputs(t, inputs)))))}, 4},
+		{"final app coverage", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(missingApps(observation(revisionForInputs(t, inputs)))))}, 4},
+		{"final release", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongRelease(observation(revisionForInputs(t, inputs)))))}, 4},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			bundle, _ := lifecycleBundle(t, release(t, inputs))
-			r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, outcomes: scenario.outcomes}
+			bundle, binary := lifecycleBundle(t, release(t, inputs))
+			digest := fmt.Sprintf("%x", sha256.Sum256(binary))
+			r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, outcomes: scenario.outcomes}
+			if scenario.calls == 4 { r.probes = []artifact.ProbeInfo{r.probe, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}} }
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
 			got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
 			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != scenario.calls || len(r.outcomes) != 0 {
@@ -240,10 +260,10 @@ func TestLifecycleCreateRejectsInvalidBootstrapAndFinalObservation(t *testing.T)
 					t.Fatal("invalid bootstrap response did not stop after Probe and Bootstrap")
 				}
 			} else {
-				if r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver {
-					t.Fatal("invalid final observation did not follow Probe and Bootstrap")
+				if r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver || r.calls[2].kind != "probe" {
+					t.Fatal("invalid final observation did not follow post-install Probe")
 				}
-				assertInspect(t, r.calls[2], inputs, revisionForInputs(t, inputs))
+				assertInspect(t, r.calls[3], inputs, revisionForInputs(t, inputs))
 			}
 			assertNoCanary(t, errString(err))
 		})
@@ -347,22 +367,82 @@ func TestLifecycleUpdateReconcilesWithOldCheckpointRevision(t *testing.T) {
 	assertCheckpoint(t, got.Properties, next, observation(desired), desired)
 }
 
-func TestLifecycleUpdateResponseLossWithVerifiedNextReleaseDoesNotRepeatBootstrapOrReconcile(t *testing.T) {
+func TestLifecycleUpdateResponseLossWithTerminalNextReleaseReplaysPinnedBootstrapUntilDigestVerified(t *testing.T) {
 	old := lifecycleInputs("edge")
 	nextTarget := decodeTarget(t, old)
 	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	next := old.Set("target", encodeValue(t, nextTarget))
-	r := &recordingLifecycleTransport{}
-	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+	bundle, binary := lifecycleBundle(t, nextTarget.ReleaseArtifact)
+	oldDigest := strings.Repeat("0", 64)
+	newDigest := fmt.Sprintf("%x", sha256.Sum256(binary))
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: oldDigest}}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }, approve: fatalApproval(t)})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
 	nextObservation := observationFor(nextTarget, desired)
-	r.outcomes = []lifecycleOutcome{response(inspected(nextObservation))}
+	r.outcomes = []lifecycleOutcome{response(inspected(nextObservation)), response(applied(desired)), response(inspected(nextObservation))}
+	r.probes = []artifact.ProbeInfo{r.probe, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: newDigest}}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || !onlyInspect(r) || len(r.outcomes) != 0 {
-		t.Fatal("verified response-loss retry did not complete from its first final observation")
+	if err != nil || len(r.calls) != 5 || len(r.outcomes) != 0 {
+		t.Fatalf("response-loss recovery = %#v, calls=%#v err=%v", got, r.calls, err)
 	}
 	assertInspect(t, r.calls[0], next, desired)
+	if r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver || r.calls[3].kind != "probe" || r.calls[4].command != openssh.Host {
+		t.Fatalf("release recovery sequence = %#v, want inspect, probe(old), bootstrap, probe(new), inspect", r.calls)
+	}
+	bootstrap := decodeBootstrapRequest(t, r.calls[2].stdin, binary)
+	assertReconcile(t, bootstrap, next, desired, oldRevision, nil)
+	assertInspect(t, r.calls[4], next, desired)
+	if newDigest == oldDigest { t.Fatal("digest fixture is not distinct") }
 	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
+}
+
+func TestLifecycleUpdateTerminalNextReleaseWithPinnedInstalledDigestCheckpointsWithoutReplay(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old); nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
+	bundle, binary := lifecycleBundle(t, nextTarget.ReleaseArtifact)
+	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }, approve: fatalApproval(t)})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	final := observationFor(nextTarget, desired)
+	r.outcomes = []lifecycleOutcome{response(inspected(final))}
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	if err != nil || len(r.calls) != 2 || r.calls[0].request.Action != hostcontract.ActionInspect || r.calls[1].kind != "probe" || hasWrite(r) { t.Fatalf("terminal pinned digest shortcut = %#v, %v, %#v", got, err, r.calls) }
+	assertCheckpoint(t, got.Properties, next, final, desired)
+}
+
+func TestLifecycleUpdateTerminalNextReleaseWithMissingInstalledDigestReplaysPinnedBootstrap(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old); nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
+	bundle, binary := lifecycleBundle(t, nextTarget.ReleaseArtifact)
+	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }, approve: fatalApproval(t)})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	final := observationFor(nextTarget, desired)
+	r.outcomes = []lifecycleOutcome{response(inspected(final)), response(applied(desired)), response(inspected(final))}
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	if err != nil || len(r.calls) != 5 || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver || r.calls[3].kind != "probe" || r.calls[4].command != openssh.Host { t.Fatalf("missing digest terminal recovery = %#v, %v, %#v", got, err, r.calls) }
+	assertReconcile(t, decodeBootstrapRequest(t, r.calls[2].stdin, binary), next, desired, oldRevision, nil)
+	assertCheckpoint(t, got.Properties, next, final, desired)
+}
+
+func TestLifecycleUpdateRejectsWrongPostBootstrapInstalledDigestBeforeFinalInspect(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old); nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
+	bundle, _ := lifecycleBundle(t, nextTarget.ReleaseArtifact)
+	for _, digest := range []string{"missing", strings.Repeat("0", 64)} {
+		r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }, approve: fatalApproval(t)})
+		oldRevision, desired := revision(t, h, old), revision(t, h, next)
+		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), response(applied(desired))}
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+		if err == nil || got.Properties.Len() != 0 || len(r.calls) != 4 || r.calls[3].kind != "probe" || len(r.outcomes) != 0 { t.Fatalf("wrong post-bootstrap digest checkpointed or inspected final: %#v, %v, %#v", got, err, r.calls) }
+		_ = desired
+	}
 }
 
 func TestLifecycleUpdateTerminalShortcutValidatesCompleteNextObservation(t *testing.T) {
@@ -427,6 +507,61 @@ func TestLifecycleUpdateRequestsOnlyExactSingleDataLinkApproval(t *testing.T) {
 	}
 	if r.calls[1].request.Approval == nil || !reflect.DeepEqual(*r.calls[1].request.Approval, expected) {
 		t.Fatal("reconcile did not include the exact approval")
+	}
+}
+
+func TestLifecycleUpdateDangerousTerminalRequiresExactCompleteEvidence(t *testing.T) {
+	old, next := dangerousChange(t)
+	for _, mutate := range []func(*hostprotocol.OperationEvidence){nil, func(e *hostprotocol.OperationEvidence) { e.Key.PriorAppliedRevision = revisionC() }, func(e *hostprotocol.OperationEvidence) { e.Status = hostprotocol.OperationPending }, func(e *hostprotocol.OperationEvidence) { e.Approval.NewData.Endpoint = "wrong" }} {
+		r := &recordingLifecycleTransport{}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		oldRevision, desired := revision(t, h, old), revision(t, h, next)
+		approval := dangerousApprovalSubject(t, old, next, desired)
+		var evidence *hostprotocol.OperationEvidence
+		if mutate != nil { evidence = &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationComplete, Approval: &approval}; mutate(evidence) }
+		r.outcomes = []lifecycleOutcome{response(inspectedEvidence(observationFor(decodeTarget(t, next), desired), evidence))}
+		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+		if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) || hasWrite(r) { t.Fatal("unproven dangerous terminal state was checkpointed") }
+	}
+	r := &recordingLifecycleTransport{}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	approval := dangerousApprovalSubject(t, old, next, desired)
+	evidence := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationComplete, Approval: &approval}
+	nextObservation := observationFor(decodeTarget(t, next), desired)
+	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(nextObservation, evidence))}
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	if err != nil || !onlyInspect(r) { t.Fatalf("exact dangerous completion = %#v, %v", got, err) }
+	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
+}
+
+func TestLifecycleUpdateDangerousPendingEvidenceResumesWithoutApprovalReplay(t *testing.T) {
+	old, next := dangerousChange(t)
+	r := &recordingLifecycleTransport{}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	approval := dangerousApprovalSubject(t, old, next, desired)
+	evidence := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationPending, Approval: &approval}
+	nextObservation := observationFor(decodeTarget(t, next), desired)
+	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(pendingObservation(oldRevision), evidence)), response(applied(desired)), response(inspected(nextObservation))}
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	if err != nil || len(r.calls) != 3 || r.calls[1].request.Approval != nil { t.Fatalf("dangerous pending resume = %#v, %v, %#v", got, err, r.calls) }
+	assertReconcile(t, r.calls[1].request, next, desired, oldRevision, nil)
+	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
+}
+
+func TestLifecycleUpdateDangerousMismatchedPendingEvidenceFailsClosed(t *testing.T) {
+	old, next := dangerousChange(t)
+	r := &recordingLifecycleTransport{}
+	approvals := 0
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { approvals++; return &subject, nil }})
+	oldRevision, desired := revision(t, h, old), revision(t, h, next)
+	approval := dangerousApprovalSubject(t, old, next, desired)
+	wrong := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: revisionC()}, Status: hostprotocol.OperationPending, Approval: &approval}
+	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(observation(oldRevision), wrong))}
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	if err == nil || got.Properties.Len() != 0 || approvals != 0 || !onlyInspect(r) || hasWrite(r) {
+		t.Fatalf("mismatched pending evidence was accepted: %v, approvals=%d, calls=%#v", err, approvals, r.calls)
 	}
 }
 
@@ -610,19 +745,20 @@ func TestLifecycleUpdateUpgradesReleasedHostArtifactInPlace(t *testing.T) {
 	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	next := old.Set("target", encodeValue(t, nextTarget))
 	bundle, binary := lifecycleBundle(t, nextTarget.ReleaseArtifact)
-	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}}
+	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}
 	artifactCalls := 0
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return bundle, nil }, approve: fatalApproval(t)})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
 	r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), response(applied(desired)), response(inspected(observationFor(nextTarget, desired)))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || artifactCalls != 1 || len(r.calls) != 4 || r.calls[0].request.Action != hostcontract.ActionInspect || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver || r.calls[3].request.Action != hostcontract.ActionInspect {
-		t.Fatal("release upgrade did not use inspect, probe, BootstrapReceiver, inspect")
+	if err != nil || artifactCalls != 1 || len(r.calls) != 5 || r.calls[0].request.Action != hostcontract.ActionInspect || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver || r.calls[3].kind != "probe" || r.calls[4].request.Action != hostcontract.ActionInspect {
+		t.Fatal("release upgrade did not use inspect, probe(old), BootstrapReceiver, probe(new), inspect")
 	}
 	assertInspect(t, r.calls[0], next, desired)
 	bootstrap := decodeBootstrapRequest(t, r.calls[2].stdin, binary)
 	assertReconcile(t, bootstrap, next, desired, oldRevision, nil)
-	assertInspect(t, r.calls[3], next, desired)
+	assertInspect(t, r.calls[4], next, desired)
 	assertCheckpoint(t, got.Properties, next, observationFor(nextTarget, desired), desired)
 }
 
@@ -646,10 +782,11 @@ func TestLifecycleUpdateReleaseUpgradeGuardsAndPostBootstrapFailures(t *testing.
 		{"probe machine mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-b"}, 2, false},
 		{"bootstrap invalid response", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
 		{"bootstrap transport failure", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
-		{"final observation mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 4, true},
+		{"final observation mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, 5, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			r := &recordingLifecycleTransport{probe: scenario.probe}
+			if scenario.calls == 5 { r.probes = []artifact.ProbeInfo{scenario.probe, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: pinnedTestDigest()}} }
 			artifactCalls := 0
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return scenario.bundle(t) }, approve: fatalApproval(t)})
 			oldRevision, desired := revision(t, h, old), revision(t, h, next)
@@ -658,7 +795,7 @@ func TestLifecycleUpdateReleaseUpgradeGuardsAndPostBootstrapFailures(t *testing.
 				if scenario.calls == 3 {
 					r.outcomes = append(r.outcomes, failure(openssh.ErrTransport))
 				}
-				if scenario.calls == 4 {
+				if scenario.calls == 5 {
 					r.outcomes = append(r.outcomes, response(applied(desired)), response(inspected(wrongRelease(observationFor(nextTarget, desired)))))
 				}
 			}
@@ -953,11 +1090,11 @@ func TestLifecycleDeleteResponseLossRetriesTheSameRetirementOperation(t *testing
 
 type lifecycleCall struct { kind, alias string; command openssh.Command; stdin []byte; request hostprotocol.Request; hostAttempted, decoded bool }
 type lifecycleOutcome struct { response hostprotocol.Response; err error }
-type recordingLifecycleTransport struct { probe artifact.ProbeInfo; probeErr error; outcomes []lifecycleOutcome; calls []lifecycleCall; events []string }
+type recordingLifecycleTransport struct { probe artifact.ProbeInfo; probes []artifact.ProbeInfo; probeErr error; outcomes []lifecycleOutcome; calls []lifecycleCall; events []string }
 func response(value hostprotocol.Response) lifecycleOutcome { return lifecycleOutcome{response: value} }
 func failure(err error) lifecycleOutcome { return lifecycleOutcome{err: err} }
 func remoteError(category hostprotocol.ErrorCategory, code hostprotocol.ErrorCode) lifecycleOutcome { return response(hostprotocol.Response{Version: hostprotocol.Version, Error: &hostprotocol.RemoteError{Category: category, Code: code}}) }
-func (r *recordingLifecycleTransport) Probe(_ context.Context, alias string) (artifact.ProbeInfo, error) { r.calls = append(r.calls, lifecycleCall{kind: "probe", alias: alias}); return r.probe, r.probeErr }
+func (r *recordingLifecycleTransport) Probe(_ context.Context, alias string) (artifact.ProbeInfo, error) { r.calls = append(r.calls, lifecycleCall{kind: "probe", alias: alias}); if len(r.probes) != 0 { probe := r.probes[0]; r.probes = r.probes[1:]; return probe, r.probeErr }; return r.probe, r.probeErr }
 func (r *recordingLifecycleTransport) Bootstrap(ctx context.Context, alias string, stdin []byte) (hostprotocol.Response, error) { return r.Run(ctx, alias, openssh.BootstrapReceiver, stdin) }
 func (r *recordingLifecycleTransport) Run(_ context.Context, alias string, command openssh.Command, stdin []byte) (hostprotocol.Response, error) {
 	call := lifecycleCall{kind: "run", alias: alias, command: command, stdin: append([]byte(nil), stdin...)}
@@ -984,6 +1121,7 @@ func pendingObservation(revision string) hostcontract.StableObservation { value 
 func observationFor(target hostcontract.Target, revision string) hostcontract.StableObservation { observation := hostcontract.StableObservation{Machine: hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner-a"}, HostRelease: target.ReleaseArtifact, AppliedRevision: revision, Ready: true}; for _, app := range target.Apps { observation.Apps = append(observation.Apps, hostcontract.AppObservation{ID: app.ID, ActiveImage: app.Image, Ready: true}) }; for _, service := range target.DataServices { observation.Data = append(observation.Data, hostcontract.DataObservation{Identity: localDataIdentity(service), Ready: true}) }; return observation }
 func applied(revision string) hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: revision}} }
 func inspected(value hostcontract.StableObservation) hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &value}} }
+func inspectedEvidence(value hostcontract.StableObservation, evidence *hostprotocol.OperationEvidence) hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &value, OperationEvidence: evidence}} }
 func retired() hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: &hostcontract.OwnershipIdentity{Value: "owner-a"}, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}} }
 func wrongMachine(value hostcontract.StableObservation) hostcontract.StableObservation { value.Machine.Value = "machine-b"; return value }
 func wrongOwner(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ownership.Value = "owner-b"; return value }
@@ -1010,6 +1148,7 @@ func rotateSecret(t *testing.T, inputs property.Map) property.Map { secrets := d
 func changeImage(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Image = "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; return inputs.Set("target", encodeValue(t, target)) }
 func changeHostname(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Hostname = "other.example"; return inputs.Set("target", encodeValue(t, target)) }
 func dangerousChange(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); target := decodeTarget(t, old); target.Apps[0].DataLinks[0].Identity.Endpoint = "old-db.example"; return old.Set("target", encodeValue(t, target)), next }
+func dangerousApprovalSubject(t *testing.T, old, next property.Map, revision string) hostcontract.ApprovalSubject { t.Helper(); return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: lifecycleResource(t, next).Environment, Resource: lifecycleResource(t, next), AppID: "api", DataKind: "postgres", OldData: decodeTarget(t, old).Apps[0].DataLinks[0].Identity, NewData: decodeTarget(t, next).Apps[0].DataLinks[0].Identity, TargetRevision: revision} }
 func twoDangerousChanges(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next); secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSServerName: "old-two.example"}; secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSServerName: "new-two.example"}; oldTarget.Apps[0].DataLinks = append(oldTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondOld}); nextTarget.Apps[0].DataLinks = append(nextTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondNew}); oldTarget.Apps[0].DataLinks[0].Identity.Endpoint = "old-one.example"; nextTarget.Apps[0].DataLinks[0].Identity.Endpoint = "new-one.example"; return old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget)) }
 func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity { database, tls := "sub2api", ""; managed := "owner-scoped-" + service.Type + "-" + service.ID + "-managed"; if service.Type == "redis" { database = "0" } else { tls = managed }; return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSServerName: tls} }
 func lifecycleBundle(t *testing.T, release string) (artifactBundle, []byte) { t.Helper(); root := t.TempDir(); amd64, arm64 := []byte("pinned-host-amd64"), []byte("pinned-host-arm64"); write := func(name string, contents []byte) { if err := os.WriteFile(filepath.Join(root, name), contents, 0o600); err != nil { t.Fatal("artifact fixture write failed") } }; write("host-amd64", amd64); write("host-arm64", arm64); sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }; return artifactBundle{Root: root, Manifest: artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "host-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "host-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}}, amd64 }
@@ -1030,7 +1169,8 @@ func decodeTarget(t *testing.T, values property.Map) hostcontract.Target { t.Hel
 func decodeSecrets(t *testing.T, values property.Map) hostcontract.Secrets { t.Helper(); var secrets hostcontract.Secrets; if err := decode(valueAt(t, values, "secrets"), &secrets); err != nil { t.Fatal("secret fixture decode failed") }; return secrets }
 func encodeValue(t *testing.T, value any) property.Value { t.Helper(); encoded, err := json.Marshal(value); if err != nil { t.Fatal("fixture encode failed") }; var raw any; if err := json.Unmarshal(encoded, &raw); err != nil { t.Fatal("fixture decode failed") }; return propertyFromRaw(t, raw) }
 func propertyFromRaw(t *testing.T, raw any) property.Value { t.Helper(); switch value := raw.(type) { case nil: return property.New(property.Null); case string: return property.New(value); case bool: return property.New(value); case float64: return property.New(value); case []any: values := make([]property.Value, len(value)); for i := range value { values[i] = propertyFromRaw(t, value[i]) }; return property.New(property.NewArray(values)); case map[string]any: values := map[string]property.Value{}; for key, nested := range value { values[key] = propertyFromRaw(t, nested) }; return property.New(property.NewMap(values)); default: t.Fatal("unsupported fixture value"); return property.New(property.Null) } }
-func createWithReadyHost(t *testing.T, inputs property.Map) string { t.Helper(); bundle, _ := lifecycleBundle(t, release(t, inputs)); r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}}; h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }}); desired := revision(t, h, inputs); r.outcomes = []lifecycleOutcome{response(applied(desired)), response(inspected(observationFor(decodeTarget(t, inputs), desired)))}; got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs}); if err != nil { t.Fatal("Create failed") }; return got.ID }
+func createWithReadyHost(t *testing.T, inputs property.Map) string { t.Helper(); bundle, binary := lifecycleBundle(t, release(t, inputs)); digest := fmt.Sprintf("%x", sha256.Sum256(binary)); r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}; h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }}); desired := revision(t, h, inputs); r.outcomes = []lifecycleOutcome{response(applied(desired)), response(inspected(observationFor(decodeTarget(t, inputs), desired)))}; got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs}); if err != nil { t.Fatal("Create failed") }; return got.ID }
+func pinnedTestDigest() string { return fmt.Sprintf("%x", sha256.Sum256([]byte("pinned-host-amd64"))) }
 func fatalArtifact(t *testing.T) func() (artifactBundle, error) { return func() (artifactBundle, error) { t.Fatal("artifact source was called"); return artifactBundle{}, nil } }
 func fatalApproval(t *testing.T) func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { return func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { t.Fatal("approval source was called"); return nil, nil } }
 func assertNoCalls(t *testing.T, r *recordingLifecycleTransport) { t.Helper(); if len(r.calls) != 0 { t.Fatal("transport was called") } }

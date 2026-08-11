@@ -974,6 +974,35 @@ func TestReconcileRestoredAppDataRequiresExactApproval(t *testing.T) {
 	}
 }
 
+func TestReconcilePendingDataLinkApprovalResumesWithoutResubmission(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	old := dataIdentity("old")
+	new := dataIdentity("new")
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionB(), appWithData("one", "one", old))); err != nil { t.Fatal(err) }
+	state, _ = rt.readState()
+	request := requestFor(state, revisionC(), appWithData("one", "one", new))
+	key := requestKey(request)
+	approval := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: state.Resource.Environment, Resource: state.Resource, AppID: "one", DataKind: "postgres", OldData: old, NewData: new, TargetRevision: request.TargetRevision}
+	// Persisted intent represents a completed approval followed by process/response loss.
+	op, err := rt.Begin(key, &approval)
+	if err != nil { t.Fatal(err) }
+	if err := op.Close(); err != nil { t.Fatal(err) }
+	before, mutations := mustFile(t, rt.statePath()), runner.mutations()
+	wrong := approval
+	wrong.NewData.Endpoint = "wrong"
+	request.Approval = &wrong
+	if _, err := rt.Reconcile(t.Context(), request); err == nil || !bytes.Equal(before, mustFile(t, rt.statePath())) || runner.mutations() != mutations {
+		t.Fatalf("wrong persisted approval retry mutated: %v", err)
+	}
+	request.Approval = nil
+	result, err := rt.Reconcile(t.Context(), request)
+	if err != nil || result.Status != hostprotocol.ResultApplied || result.AppliedRevision != key.TargetRevision || runner.mutations() == mutations {
+		t.Fatalf("nil-approval pending resume = %#v, %v", result, err)
+	}
+}
+
 func TestReconcileRestoredRenamedDataRejectsWrongApprovalBeforeMutation(t *testing.T) {
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
