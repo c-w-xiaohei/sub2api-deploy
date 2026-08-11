@@ -112,6 +112,7 @@ func TestBootstrapInitializedHostWithoutJournalAcceptsFirstReleaseChange(t *test
 	runner := &recordingRunner{}
 	rt.runner = runner
 	request := requestFor(state, revisionB(), app("one", "image-next"))
+	request.Server = hostcontract.ServerTarget{SSHAlias: "edge"}
 	request.Target.ReleaseArtifact = "release-next"
 	result, err := rt.Bootstrap(t.Context(), request)
 	after := mustState(t, rt)

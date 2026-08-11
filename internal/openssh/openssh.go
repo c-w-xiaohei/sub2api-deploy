@@ -93,11 +93,12 @@ case "$digest" in *[!0123456789abcdef]*|????????????????????????????????????????
 dd of="$stage" bs=1 count="$size" status=none
 [ "$(wc -c < "$stage")" -eq "$size" ]
 [ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
+exec 4<&0
 chmod 700 "$stage"
 if [ -L "$final" ]; then exit 64; fi
 if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
 set +e
-"$stage" install-attest </dev/null 3>"$ok" >/dev/null 2>/dev/null
+"$stage" install-attest </dev/null 3>"$ok" 4<&- >/dev/null 2>/dev/null
 status=$?
 set -e
 [ "$status" -eq 0 ]
@@ -108,8 +109,9 @@ printf %%s 'sub2api-bootstrap-attested-v1' | cmp -s "$ok" -
 if [ -L "$final" ]; then exit 64; fi
 if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
 mv -T -- "$stage" "$final"
-"$final" bootstrap-stdio <&0 &
+"$final" bootstrap-stdio <&4 4<&- &
 child=$!
+exec 4<&-
 set +e
 while :; do
   interrupted=
