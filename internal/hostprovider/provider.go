@@ -11,24 +11,33 @@ import (
 	"fmt"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
 const hostToken = "sub2api-host:index:Host"
 
-// New creates the schema-only Task 3 provider. Lifecycle mutations fail closed until Task 7.
+// New creates the Host provider with deliberately unavailable release artifacts.
 func New(version string) p.Provider {
 	h := newHost(version)
 	return p.Provider{GetSchema: h.schema, CheckConfig: h.checkConfig, Configure: h.configure, Check: h.check, Diff: h.diff, Create: h.create, Read: h.read, Update: h.update, Delete: h.delete}
 }
 
-func newHost(version string) *host { return &host{version: version} }
+func newHost(version string) *host {
+	return newHostWithDependencies(version, lifecycleDependencies{
+		transport: openssh.New(),
+		artifact: func() (artifactBundle, error) {
+			return artifactBundle{}, errArtifactUnavailable
+		},
+	})
+}
 
 type host struct {
 	version string
 	key     hostcontract.RevisionKey
 	keyID   string
+	deps    lifecycleDependencies
 }
 
 func (h *host) schema(context.Context, p.GetSchemaRequest) (p.GetSchemaResponse, error) {
@@ -148,18 +157,18 @@ func (h *host) diff(_ context.Context, req p.DiffRequest) (p.DiffResponse, error
 	return p.DiffResponse{HasChanges: len(d) > 0, DetailedDiff: d}, nil
 }
 
-func (h *host) create(_ context.Context, req p.CreateRequest) (p.CreateResponse, error) {
-	if !req.DryRun {
-		return p.CreateResponse{}, fmt.Errorf("Host Create is not implemented")
-	}
-	return p.CreateResponse{Properties: previewState(req.Properties)}, nil
+func (h *host) create(ctx context.Context, req p.CreateRequest) (p.CreateResponse, error) {
+	return h.lifecycleCreate(ctx, req)
 }
+
 func (h *host) read(context.Context, p.ReadRequest) (p.ReadResponse, error) {
 	return p.ReadResponse{}, fmt.Errorf("Host Read is not implemented")
 }
-func (h *host) update(context.Context, p.UpdateRequest) (p.UpdateResponse, error) {
-	return p.UpdateResponse{}, fmt.Errorf("Host Update is not implemented")
+
+func (h *host) update(ctx context.Context, req p.UpdateRequest) (p.UpdateResponse, error) {
+	return h.lifecycleUpdate(ctx, req)
 }
+
 func (h *host) delete(context.Context, p.DeleteRequest) error {
 	return fmt.Errorf("Host Delete is not implemented")
 }
