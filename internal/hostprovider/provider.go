@@ -25,7 +25,26 @@ var providerExecutable = os.Executable
 
 // New creates the Host provider using only artifacts shipped beside its executable.
 func New(version string) p.Provider {
-	h := newHost(version)
+	return newProvider(newHost(version))
+}
+
+// NewWithApproval creates a provider whose dangerous lifecycle operations may use
+// the supplied process-scoped approval channel.
+func NewWithApproval(version string, approve func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error)) p.Provider {
+	path, err := providerExecutable()
+	if err != nil {
+		return newProvider(newHostWithDependencies(version, lifecycleDependencies{
+			transport: openssh.New(),
+			artifact: func() (artifactBundle, error) {
+				return artifactBundle{}, errArtifactUnavailable
+			},
+			approve: approve,
+		}))
+	}
+	return newProvider(newHostAtExecutableWithApproval(version, path, approve))
+}
+
+func newProvider(h *host) p.Provider {
 	return p.Provider{GetSchema: h.schema, CheckConfig: h.checkConfig, Configure: h.configure, Check: h.check, Diff: h.diff, Create: h.create, Read: h.read, Update: h.update, Delete: h.delete}
 }
 
@@ -38,11 +57,16 @@ func newHost(version string) *host {
 }
 
 func newHostAtExecutable(version, path string) *host {
+	return newHostAtExecutableWithApproval(version, path, nil)
+}
+
+func newHostAtExecutableWithApproval(version, path string, approve func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error)) *host {
 	return newHostWithDependencies(version, lifecycleDependencies{
 		transport: openssh.New(),
 		artifact: func() (artifactBundle, error) {
 			return loadReleaseBundle(path)
 		},
+		approve: approve,
 	})
 }
 
