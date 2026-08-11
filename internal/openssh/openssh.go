@@ -65,6 +65,7 @@ func bootstrapReceiverScript(stage, final string) string {
 umask 077
 stage=%s
 lock=%s
+final=%s
 ok="$stage.ok"
 mkdir "$lock"
 trap 'rm -f "$stage" "$ok"; rmdir "$lock"' EXIT HUP INT TERM
