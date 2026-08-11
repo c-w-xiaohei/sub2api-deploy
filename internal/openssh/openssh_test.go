@@ -437,8 +437,8 @@ func TestBootstrapReceiverAcceptsAbsentOrRegularFinalAndRejectsNonregularFinal(t
 func TestBootstrapReceiverAtomicallyReplacesFinalAfterCandidate(t *testing.T) {
 	script := bootstrapReceiverScript(stagePath, finalPath)
 	invoke := strings.Index(script, `"$stage" bootstrap-stdio`)
-	rename := strings.Index(script, `mv "$stage" "$final"`)
-	if invoke < 0 || rename < invoke || strings.Count(script, `mv "$stage" "$final"`) != 1 {
+	rename := strings.Index(script, `mv -T -- "$stage" "$final"`)
+	if invoke < 0 || rename < invoke || strings.Count(script, `mv -T -- "$stage" "$final"`) != 1 {
 		t.Fatal("receiver lacks one post-candidate atomic stage-to-final replacement")
 	}
 	for _, line := range strings.Split(script[:rename], "\n") {
@@ -446,6 +446,41 @@ func TestBootstrapReceiverAtomicallyReplacesFinalAfterCandidate(t *testing.T) {
 			t.Fatalf("receiver mutates final before atomic replacement: %q", line)
 		}
 	}
+}
+
+func TestBootstrapReceiverRejectsDirectoryRaceAtAtomicCommit(t *testing.T) {
+	dir := t.TempDir()
+	stage, final := filepath.Join(dir, "stage"), filepath.Join(dir, "final")
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeMV := filepath.Join(bin, "mv")
+	if err := os.WriteFile(fakeMV, []byte(`#!/bin/sh
+case "$#:$1:$2:$3:$4" in
+  2:"$STAGE":"$FINAL"::|4:-T:--:"$STAGE":"$FINAL") ;;
+  *) exit 99 ;;
+esac
+mkdir "$FINAL"
+exec /bin/mv "$@"
+`), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runBootstrapReceiverWithEnv(stage, final, attestedCandidate(t, ""), nil, []string{"STAGE=" + stage, "PATH=" + bin + ":" + os.Getenv("PATH")})
+	if err == nil {
+		t.Fatal("receiver accepted directory race at final commit")
+	}
+	info, err := os.Stat(final)
+	if err != nil {
+		t.Fatalf("stat raced final: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("raced final mode = %v, want directory", info.Mode())
+	}
+	if _, err := os.Lstat(filepath.Join(final, filepath.Base(stage))); !os.IsNotExist(err) {
+		t.Fatalf("stage was moved into raced final: %v", err)
+	}
+	assertReceiverCleanup(t, stage)
 }
 
 func TestBootstrapReceiverLockContentionAndFixedProductionPaths(t *testing.T) {
@@ -467,11 +502,15 @@ func TestBootstrapReceiverLockContentionAndFixedProductionPaths(t *testing.T) {
 }
 
 func runBootstrapReceiver(stage, final string, candidate []byte, request []byte) ([]byte, []byte, error) {
+	return runBootstrapReceiverWithEnv(stage, final, candidate, request, nil)
+}
+
+func runBootstrapReceiverWithEnv(stage, final string, candidate []byte, request []byte, extraEnv []string) ([]byte, []byte, error) {
 	digest := sha256.Sum256(candidate)
 	input := []byte(fmt.Sprintf("s2a1:%d:%x\n%s", len(candidate), digest, candidate))
 	input = append(input, request...)
 	cmd := exec.Command("/bin/sh", "-c", bootstrapReceiverScript(stage, final), "fixed-argv0")
-	cmd.Env = append(os.Environ(), "FINAL="+final)
+	cmd.Env = append(append(os.Environ(), "FINAL="+final), extraEnv...)
 	cmd.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

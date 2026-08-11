@@ -115,6 +115,12 @@ func TestBootstrapStdioProcessExitsAfterOneRejectedFrame(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=TestBootstrapStdioProcessExitsAfterOneRejectedFrame")
 	cmd.Env = append(os.Environ(), "SUB2API_HOST_BOOTSTRAP_HELPER=1")
 	cmd.Stdin = bytes.NewReader(frame)
+	attestation, err := os.CreateTemp(t.TempDir(), "attestation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attestation.Close()
+	cmd.ExtraFiles = []*os.File{attestation}
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)
