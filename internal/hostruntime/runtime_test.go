@@ -2,10 +2,13 @@ package hostruntime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -30,6 +33,168 @@ func TestMachineIdentityStrictInputAndGolden(t *testing.T) {
 		if _, err := rt.MachineIdentity(); err == nil || bytes.Contains([]byte(err.Error()), []byte(testMachineID)) {
 			t.Fatalf("accepted or leaked %q: %v", input, err)
 		}
+	}
+}
+
+func TestBootstrapBindsHostGeneratedOwnershipThenReconcilesAndReplaysExactly(t *testing.T) {
+	rt := testRuntime(t)
+	runner := &bootstrapLockRunner{lockPath: rt.lockPath()}
+	rt.runner = runner
+	request := hostprotocol.Request{
+		Action:               hostcontract.ActionReconcile,
+		Server:               hostcontract.ServerTarget{SSHAlias: "edge"},
+		Resource:             resource(),
+		TargetRevision:       revisionB(),
+		PriorAppliedRevision: revision(),
+		Target:               &hostcontract.Target{ReleaseArtifact: "release", Apps: []hostcontract.AppTarget{app("one", "image-one")}},
+		Secrets:              &hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"one": {JWTSecret: "BOOTSTRAP_SECRET_CANARY"}}},
+	}
+
+	result, err := rt.Bootstrap(context.Background(), request)
+	if err != nil || result.Status != hostprotocol.ResultApplied || result.AppliedRevision != request.TargetRevision || result.Observation != nil {
+		t.Fatalf("bootstrap result = %#v, %v", result, err)
+	}
+	state := mustState(t, rt)
+	stateBytes, readErr := os.ReadFile(rt.statePath())
+	resultBytes, marshalErr := json.Marshal(result)
+	inventoryBytes := mustArtifact(t, rt, artifactInventory)
+	artifacts := runtimeArtifactTree(t, filepath.Join(rt.root, "runtime"))
+	if state.Resource != request.Resource || state.Machine != mustMachine(t, rt) || !regexp.MustCompile(`^oid1:[0-9a-f]{64}$`).MatchString(state.Ownership.Value) || !state.Observation.Ready || state.Observation.AppliedRevision != request.TargetRevision || state.Observation.Ownership != state.Ownership || state.Journal == nil || state.Journal.Status != journalComplete || state.Journal.Key != requestKey(request) || state.Journal.Result == nil || !reflect.DeepEqual(*state.Journal.Result, result) || readErr != nil || marshalErr != nil || bytes.Contains(stateBytes, []byte("BOOTSTRAP_SECRET_CANARY")) || bytes.Contains(resultBytes, []byte("BOOTSTRAP_SECRET_CANARY")) || runner.hasSecret("BOOTSTRAP_SECRET_CANARY") || !runner.lockHeld {
+		t.Fatalf("bootstrap state = %#v, result = %#v", state, result)
+	}
+	calls := len(runner.calls)
+	ownership := state.Ownership
+	retry, err := rt.Bootstrap(context.Background(), request)
+	retryStateBytes, retryReadErr := os.ReadFile(rt.statePath())
+	retryInventoryBytes := mustArtifact(t, rt, artifactInventory)
+	retryArtifacts := runtimeArtifactTree(t, filepath.Join(rt.root, "runtime"))
+	if err != nil || !reflect.DeepEqual(retry, result) || retryReadErr != nil || !bytes.Equal(retryStateBytes, stateBytes) || !bytes.Equal(retryInventoryBytes, inventoryBytes) || !reflect.DeepEqual(retryArtifacts, artifacts) || mustState(t, rt).Ownership != ownership || len(runner.calls) != calls {
+		t.Fatalf("exact bootstrap retry = %#v, %v; calls %d -> %d", retry, err, calls, len(runner.calls))
+	}
+	conflict := request
+	conflict.TargetRevision = revisionC()
+	conflict.PriorAppliedRevision = request.TargetRevision
+	if _, err := rt.Bootstrap(context.Background(), conflict); !isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) || len(runner.calls) != calls {
+		t.Fatalf("conflicting bootstrap = %v; calls %d -> %d", err, calls, len(runner.calls))
+	}
+}
+
+func TestBootstrapRejectsInvalidMachineBeforeStateOrMutationWithoutSecretLeak(t *testing.T) {
+	rt := testRuntime(t)
+	if err := os.WriteFile(rt.machinePath, []byte("00000000000000000000000000000000\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	rt.runner = runner
+	request := hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: resource(), TargetRevision: revisionB(), PriorAppliedRevision: revision(), Target: &hostcontract.Target{ReleaseArtifact: "release", Apps: []hostcontract.AppTarget{app("one", "image-one")}}, Secrets: &hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"one": {JWTSecret: "BOOTSTRAP_SECRET_CANARY"}}}}
+	_, err := rt.Bootstrap(context.Background(), request)
+	if err == nil || bytes.Contains([]byte(err.Error()), []byte("BOOTSTRAP_SECRET_CANARY")) || runner.hasSecret("BOOTSTRAP_SECRET_CANARY") || len(runner.calls) != 0 {
+		t.Fatalf("invalid machine bootstrap = %v, calls=%#v", err, runner.calls)
+	}
+	if _, err := os.Lstat(rt.root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid machine bootstrap created state root: %v", err)
+	}
+}
+
+func TestBootstrapPreservesConflictingExistingStateWithoutTakeover(t *testing.T) {
+	for _, name := range []string{"wrong resource", "wrong machine"} {
+		t.Run(name, func(t *testing.T) {
+			rt, state := initialized(t)
+			if name == "wrong resource" {
+				state.Resource.ServerKey = "other"
+			} else {
+				state.Machine.Value = "mid1:other"
+				state.Observation.Machine = state.Machine
+			}
+			raw, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			runner := &recordingRunner{}
+			rt.runner = runner
+			request := hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: resource(), TargetRevision: revisionB(), PriorAppliedRevision: revision(), Target: &hostcontract.Target{ReleaseArtifact: "release"}, Secrets: &hostcontract.Secrets{}}
+			if _, err := rt.Bootstrap(context.Background(), request); !(isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) || isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired)) || len(runner.calls) != 0 {
+				t.Fatalf("conflicting bootstrap = %v, calls=%#v", err, runner.calls)
+			}
+			after, err := os.ReadFile(rt.statePath())
+			if err != nil || !bytes.Equal(after, raw) {
+				t.Fatalf("conflicting state changed = %q, %v", after, err)
+			}
+		})
+	}
+}
+
+type bootstrapLockRunner struct {
+	recordingRunner
+	lockPath string
+	checked  bool
+	lockHeld bool
+}
+
+func (r *bootstrapLockRunner) Run(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+	if !r.checked && bootstrapMutation(argv) {
+		r.checked = true
+		lock, err := os.OpenFile(r.lockPath, os.O_RDWR, 0)
+		if err == nil {
+			err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			r.lockHeld = errors.Is(err, syscall.EWOULDBLOCK)
+			if err == nil {
+				_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			}
+			_ = lock.Close()
+		}
+	}
+	return r.recordingRunner.Run(ctx, argv, stdin)
+}
+
+func bootstrapMutation(argv []string) bool {
+	return len(argv) > 0 && (argv[0] == "run" || argv[0] == "rm" || len(argv) > 1 && argv[0] == "network" && (argv[1] == "create" || argv[1] == "rm"))
+}
+
+func runtimeArtifactTree(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	files := map[string][]byte{}
+	var walk func(string)
+	walk = func(path string) {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			name := filepath.Join(path, entry.Name())
+			if entry.IsDir() {
+				walk(name)
+				continue
+			}
+			contents, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files[name] = contents
+		}
+	}
+	walk(root)
+	return files
+}
+
+func TestBootstrapRejectsNonReconcileWithoutCreatingUsableState(t *testing.T) {
+	rt := testRuntime(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	request := hostprotocol.Request{
+		Action:         hostcontract.ActionInspect,
+		Server:         hostcontract.ServerTarget{SSHAlias: "edge"},
+		Resource:       resource(),
+		TargetRevision: revision(),
+	}
+	if _, err := rt.Bootstrap(context.Background(), request); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("inspect bootstrap = %v", err)
+	}
+	if _, err := os.Lstat(rt.root); !errors.Is(err, os.ErrNotExist) || runner.mutations() != 0 {
+		t.Fatalf("rejected bootstrap created state root or mutated runtime: %v, %#v", err, runner.calls)
 	}
 }
 
