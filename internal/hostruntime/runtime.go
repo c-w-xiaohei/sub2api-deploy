@@ -223,6 +223,12 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 		if err := r.bootstrapDiscovery(ctx); err != nil {
 			return hostprotocol.Result{}, err
 		}
+		if err := r.createRootExclusive(); err != nil {
+			if errors.Is(err, syscall.EEXIST) {
+				return hostprotocol.Result{}, conflict()
+			}
+			return hostprotocol.Result{}, recovery()
+		}
 	}
 	lock, err := r.lock()
 	if err != nil {
@@ -242,8 +248,6 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 		if !rootAbsent {
 			return hostprotocol.Result{}, recovery()
 		}
-		// A racer may have created only writer.lock after our clean discovery;
-		// holding it now makes this the sole initializer for that snapshot.
 		ownership, err := bootstrapOwnership()
 		if err != nil {
 			return hostprotocol.Result{}, recovery()
@@ -435,6 +439,48 @@ func validApproval(k hostcontract.OperationKey, s State, a *hostcontract.Approva
 
 func (r *Runtime) statePath() string { return filepath.Join(r.root, "state.json") }
 func (r *Runtime) lockPath() string  { return filepath.Join(r.root, "writer.lock") }
+func (r *Runtime) createRootExclusive() error {
+	if filepath.Clean(r.root) != r.root || !filepath.IsAbs(r.root) {
+		return errors.New("root must be absolute")
+	}
+	fd, err := syscall.Open("/", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	parts := strings.Split(strings.TrimPrefix(r.root, "/"), "/")
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return errors.New("unsafe root")
+		}
+		if i == len(parts)-1 {
+			if err := syscall.Mkdirat(fd, part, 0700); err != nil {
+				return err
+			}
+			if err := syscall.Fsync(fd); err != nil {
+				return err
+			}
+			next, err := syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+			if err != nil {
+				return err
+			}
+			var stat syscall.Stat_t
+			err = syscall.Fstat(next, &stat)
+			_ = syscall.Close(next)
+			if err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFDIR || stat.Mode&0077 != 0 || int(stat.Uid) != r.expectedRootUID {
+				return errors.New("unsafe root")
+			}
+			return nil
+		}
+		next, err := syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			return err
+		}
+		_ = syscall.Close(fd)
+		fd = next
+	}
+	return errors.New("unsafe root")
+}
 func (r *Runtime) lock() (*os.File, error) {
 	root, e := r.rootFD(true)
 	if e != nil {
