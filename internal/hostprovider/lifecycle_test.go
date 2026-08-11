@@ -109,7 +109,7 @@ func TestLifecycleCreateRejectsInvalidBootstrapAndFinalObservation(t *testing.T)
 	}{
 		{"bootstrap status", []lifecycleOutcome{response(inspected(observation(revisionForInputs(t, inputs))))}, 2},
 		{"final machine", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongMachine(observation(revisionForInputs(t, inputs)))))}, 3},
-		{"final owner", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongOwner(observation(revisionForInputs(t, inputs)))))}, 3},
+		{"final empty owner", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(emptyOwner(observation(revisionForInputs(t, inputs)))))}, 3},
 		{"final revision", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(wrongRevision(observation(revisionForInputs(t, inputs)))))}, 3},
 		{"final ready", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(notReady(observation(revisionForInputs(t, inputs)))))}, 3},
 		{"final drift", []lifecycleOutcome{response(applied(revisionForInputs(t, inputs))), response(inspected(drifted(observation(revisionForInputs(t, inputs)))))}, 3},
@@ -559,6 +559,7 @@ func inspected(value hostcontract.StableObservation) hostprotocol.Response { ret
 func retired() hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: &hostcontract.OwnershipIdentity{Value: "owner-a"}, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}} }
 func wrongMachine(value hostcontract.StableObservation) hostcontract.StableObservation { value.Machine.Value = "machine-b"; return value }
 func wrongOwner(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ownership.Value = "owner-b"; return value }
+func emptyOwner(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ownership.Value = ""; return value }
 func wrongRelease(value hostcontract.StableObservation) hostcontract.StableObservation { value.HostRelease = "other"; return value }
 func wrongRevision(value hostcontract.StableObservation) hostcontract.StableObservation { value.AppliedRevision = "tr1:0000000000000000:0000000000000000000000000000000000000000000000000000000000000000"; return value }
 func notReady(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ready = false; return value }
