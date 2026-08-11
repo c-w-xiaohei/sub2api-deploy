@@ -74,6 +74,31 @@ func TestNewHostAtExecutableWiresOnlyItsReleaseRelativeHostArtifacts(t *testing.
 	}
 }
 
+func TestNewHostAtExecutableWithApprovalWiresExactCallbackAndKeepsReleaseArtifactLookup(t *testing.T) {
+	bundleRoot := t.TempDir()
+	providerPath := releaseBundleProvider(t, bundleRoot)
+	want, _ := releaseBundleHostArtifacts(t, bundleRoot, "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	subject := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: "prod", Resource: hostcontract.ResourceIdentity{Environment: "prod", ServerKey: "edge"}, Machine: hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner-a"}, TargetRevision: "tr1:0123456789abcdef:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", PreserveData: true}
+	called := false
+	approve := func(_ context.Context, got hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+		called = true
+		if got != subject {
+			t.Fatalf("approval subject = %#v, want %#v", got, subject)
+		}
+		return &subject, nil
+	}
+
+	h := newHostAtExecutableWithApproval("1.0.0", providerPath, approve)
+	got, err := h.deps.approve(t.Context(), subject)
+	if err != nil || got == nil || *got != subject || !called {
+		t.Fatalf("wired approval = %#v, %v, called=%t", got, err, called)
+	}
+	artifact, err := h.deps.artifact()
+	if err != nil || artifact.Root != want.Root || !reflect.DeepEqual(artifact.Manifest, want.Manifest) {
+		t.Fatalf("approval constructor changed release-relative artifact lookup: %#v, %v", artifact, err)
+	}
+}
+
 func TestPublicNewUsesResolvedProviderExecutableForReleaseBundle(t *testing.T) {
 	bundleRoot := t.TempDir()
 	providerPath := releaseBundleProvider(t, bundleRoot)
