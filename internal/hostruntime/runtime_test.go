@@ -38,7 +38,7 @@ func TestMachineIdentityStrictInputAndGolden(t *testing.T) {
 
 func TestBootstrapBindsHostGeneratedOwnershipThenReconcilesAndReplaysExactly(t *testing.T) {
 	rt := testRuntime(t)
-	runner := &bootstrapLockRunner{lockPath: rt.lockPath()}
+	runner := &bootstrapLockRunner{lockPath: rt.lockPath(), discovery: map[string]bool{}}
 	rt.runner = runner
 	request := hostprotocol.Request{
 		Action:               hostcontract.ActionReconcile,
@@ -59,7 +59,7 @@ func TestBootstrapBindsHostGeneratedOwnershipThenReconcilesAndReplaysExactly(t *
 	resultBytes, marshalErr := json.Marshal(result)
 	inventoryBytes := mustArtifact(t, rt, artifactInventory)
 	artifacts := runtimeArtifactTree(t, filepath.Join(rt.root, "runtime"))
-	if state.Resource != request.Resource || state.Machine != mustMachine(t, rt) || !regexp.MustCompile(`^oid1:[0-9a-f]{64}$`).MatchString(state.Ownership.Value) || !state.Observation.Ready || state.Observation.AppliedRevision != request.TargetRevision || state.Observation.Ownership != state.Ownership || state.Journal == nil || state.Journal.Status != journalComplete || state.Journal.Key != requestKey(request) || state.Journal.Result == nil || !reflect.DeepEqual(*state.Journal.Result, result) || readErr != nil || marshalErr != nil || bytes.Contains(stateBytes, []byte("BOOTSTRAP_SECRET_CANARY")) || bytes.Contains(resultBytes, []byte("BOOTSTRAP_SECRET_CANARY")) || runner.hasSecret("BOOTSTRAP_SECRET_CANARY") || !runner.lockHeld {
+	if state.Resource != request.Resource || state.Machine != mustMachine(t, rt) || !regexp.MustCompile(`^oid1:[0-9a-f]{64}$`).MatchString(state.Ownership.Value) || !state.Observation.Ready || state.Observation.AppliedRevision != request.TargetRevision || state.Observation.Ownership != state.Ownership || state.Journal == nil || state.Journal.Status != journalComplete || state.Journal.Key != requestKey(request) || state.Journal.Result == nil || !reflect.DeepEqual(*state.Journal.Result, result) || readErr != nil || marshalErr != nil || bytes.Contains(stateBytes, []byte("BOOTSTRAP_SECRET_CANARY")) || bytes.Contains(resultBytes, []byte("BOOTSTRAP_SECRET_CANARY")) || runner.hasSecret("BOOTSTRAP_SECRET_CANARY") || !runner.lockHeld || !runner.discovery["container"] || !runner.discovery["network"] {
 		t.Fatalf("bootstrap state = %#v, result = %#v", state, result)
 	}
 	calls := len(runner.calls)
@@ -96,6 +96,70 @@ func TestBootstrapRejectsInvalidMachineBeforeStateOrMutationWithoutSecretLeak(t 
 	}
 }
 
+func TestBootstrapRejectsExistingSecureRootWithoutStateAsNonFresh(t *testing.T) {
+	rt := testRuntime(t)
+	if err := os.Mkdir(rt.root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	evidence := filepath.Join(rt.root, "runtime-evidence")
+	if err := os.WriteFile(evidence, []byte("pre-existing-runtime-evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	rt.runner = runner
+	if _, err := rt.Bootstrap(context.Background(), bootstrapRequest()); !(isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) || isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired)) {
+		t.Fatalf("existing root bootstrap = %v", err)
+	}
+	if _, err := os.Lstat(rt.statePath()); !errors.Is(err, os.ErrNotExist) || len(runner.calls) != 0 {
+		t.Fatalf("existing root created state or ran docker: %v, %#v", err, runner.calls)
+	}
+	if got, err := os.ReadFile(evidence); err != nil || !bytes.Equal(got, []byte("pre-existing-runtime-evidence")) {
+		t.Fatalf("existing root evidence changed = %q, %v", got, err)
+	}
+}
+
+func TestBootstrapRejectsExistingDockerOwnershipEvidenceBeforeStateOrMutation(t *testing.T) {
+	for _, name := range []string{"container", "network"} {
+		t.Run(name, func(t *testing.T) {
+			rt := testRuntime(t)
+			runner := &bootstrapDiscoveryRunner{kind: name, evidence: true}
+			rt.runner = runner
+			if _, err := rt.Bootstrap(context.Background(), bootstrapRequest()); !(isRemote(err, hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict) || isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired)) {
+				t.Fatalf("existing %s ownership = %v", name, err)
+			}
+			if _, err := os.Lstat(rt.root); !errors.Is(err, os.ErrNotExist) || runner.dockerMutations() != 0 || !runner.discovery[name] || !onlyBootstrapDiscovery(runner.calls) {
+				t.Fatalf("existing %s ownership created state or mutated runtime: %v, %#v", name, err, runner.calls)
+			}
+		})
+	}
+}
+
+func TestBootstrapDiscoveryErrorLeavesAbsentRootUntouched(t *testing.T) {
+	for _, kind := range []string{"container", "network"} {
+		t.Run(kind, func(t *testing.T) {
+			rt := testRuntime(t)
+			runner := &bootstrapDiscoveryRunner{kind: kind, discoveryErr: errors.New("daemon unavailable")}
+			rt.runner = runner
+			if _, err := rt.Bootstrap(context.Background(), bootstrapRequest()); !isRemote(err, hostprotocol.ErrorRecoveryRequired, hostprotocol.CodeRecoveryRequired) {
+				t.Fatalf("%s discovery error = %v", kind, err)
+			}
+			if _, err := os.Lstat(rt.root); !errors.Is(err, os.ErrNotExist) || runner.dockerMutations() != 0 || !runner.discovery[kind] || !onlyBootstrapDiscovery(runner.calls) {
+				t.Fatalf("%s discovery error created root or mutated runtime: %v, %#v", kind, err, runner.calls)
+			}
+		})
+	}
+}
+
+func TestBootstrapIgnoresEmptyDockerOwnershipLabelDuringDiscovery(t *testing.T) {
+	rt := testRuntime(t)
+	runner := &bootstrapDiscoveryRunner{kind: "container", emptyLabel: true}
+	rt.runner = runner
+	result, err := rt.Bootstrap(context.Background(), bootstrapRequest())
+	if err != nil || result.Status != hostprotocol.ResultApplied || !runner.discovery["container"] || !runner.discovery["network"] {
+		t.Fatalf("empty ownership discovery = %#v, %v, %#v", result, err, runner.calls)
+	}
+}
+
 func TestBootstrapPreservesConflictingExistingStateWithoutTakeover(t *testing.T) {
 	for _, name := range []string{"wrong resource", "wrong machine"} {
 		t.Run(name, func(t *testing.T) {
@@ -129,12 +193,20 @@ func TestBootstrapPreservesConflictingExistingStateWithoutTakeover(t *testing.T)
 
 type bootstrapLockRunner struct {
 	recordingRunner
-	lockPath string
-	checked  bool
-	lockHeld bool
+	lockPath  string
+	checked   bool
+	lockHeld  bool
+	discovery map[string]bool
 }
 
 func (r *bootstrapLockRunner) Run(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+	for _, kind := range []string{"container", "network"} {
+		if bootstrapDiscovery(argv, kind) {
+			r.discovery[kind] = true
+			r.calls = append(r.calls, append([]string(nil), argv...))
+			return nil, nil
+		}
+	}
 	if !r.checked && bootstrapMutation(argv) {
 		r.checked = true
 		lock, err := os.OpenFile(r.lockPath, os.O_RDWR, 0)
@@ -152,6 +224,59 @@ func (r *bootstrapLockRunner) Run(ctx context.Context, argv []string, stdin []by
 
 func bootstrapMutation(argv []string) bool {
 	return len(argv) > 0 && (argv[0] == "run" || argv[0] == "rm" || len(argv) > 1 && argv[0] == "network" && (argv[1] == "create" || argv[1] == "rm"))
+}
+
+type bootstrapDiscoveryRunner struct {
+	recordingRunner
+	kind            string
+	evidence        bool
+	emptyLabel      bool
+	discoveryErr    error
+	discovery       map[string]bool
+}
+
+func (r *bootstrapDiscoveryRunner) Run(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+	for _, kind := range []string{"container", "network"} {
+		if !bootstrapDiscovery(argv, kind) {
+			continue
+		}
+		if r.discovery == nil {
+			r.discovery = map[string]bool{}
+		}
+		r.discovery[kind] = true
+		r.calls = append(r.calls, append([]string(nil), argv...))
+		if r.discoveryErr != nil && kind == r.kind {
+			return nil, r.discoveryErr
+		}
+		if r.evidence && kind == r.kind {
+			return []byte("existing\towned\n"), nil
+		}
+		if r.emptyLabel && kind == r.kind {
+			return []byte("existing\t\n"), nil
+		}
+		return nil, nil
+	}
+	return r.recordingRunner.Run(ctx, argv, stdin)
+}
+
+func bootstrapDiscovery(argv []string, kind string) bool {
+	if kind == "container" {
+		return reflect.DeepEqual(argv, []string{"container", "ls", "--all", "--filter", "label=sub2api.host", "--format", "{{.Names}}\t{{index .Labels \"sub2api.host\"}}"})
+	}
+	return kind == "network" && reflect.DeepEqual(argv, []string{"network", "ls", "--filter", "label=sub2api.host", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}"})
+}
+
+func onlyBootstrapDiscovery(calls [][]string) bool {
+	for _, call := range calls {
+		if !bootstrapDiscovery(call, "container") && !bootstrapDiscovery(call, "network") {
+			return false
+		}
+	}
+	return true
+}
+
+func bootstrapRequest() hostprotocol.Request {
+	return hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: resource(), TargetRevision: revisionB(), PriorAppliedRevision: revision(), Target: &hostcontract.Target{ReleaseArtifact: "release"}, Secrets: &hostcontract.Secrets{}}
 }
 
 func runtimeArtifactTree(t *testing.T, root string) map[string][]byte {

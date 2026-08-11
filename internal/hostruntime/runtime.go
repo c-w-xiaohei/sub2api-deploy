@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
@@ -195,6 +197,87 @@ func (r *Runtime) Initialize(resource hostcontract.ResourceIdentity, ownership h
 	}
 	return r.writeState(State{Version: stateVersion, Resource: resource, Machine: machine, Ownership: ownership, AppliedRevision: observation.AppliedRevision, Observation: observation})
 }
+
+// Bootstrap binds a fresh Host to a locally generated ownership identity, then
+// reconciles the request while retaining the single writer lock.
+func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostprotocol.Result, error) {
+	key := requestKey(q)
+	if q.Action != hostcontract.ActionReconcile || q.Server.SSHAlias == "" || !utf8.ValidString(q.Server.SSHAlias) || q.Target == nil || q.Secrets == nil || q.PriorAppliedRevision == "" || q.PriorObservation != "" || key.Validate() != nil || hostcontract.ValidateTarget(*q.Target, *q.Secrets) != nil || q.Approval != nil && !q.Approval.MatchesReconcileTarget(key, *q.Target) {
+		return hostprotocol.Result{}, operationFailed()
+	}
+	if _, err := hostcontract.ParseRevision(q.PriorAppliedRevision); err != nil {
+		return hostprotocol.Result{}, operationFailed()
+	}
+	machine, err := r.MachineIdentity()
+	if err != nil {
+		return hostprotocol.Result{}, recovery()
+	}
+	lock, err := r.lock()
+	if err != nil {
+		return hostprotocol.Result{}, recovery()
+	}
+	var op *Operation
+	defer func() {
+		if op == nil {
+			_ = lock.Close()
+			return
+		}
+		_ = op.Close()
+	}()
+
+	state, err := r.readState()
+	if errors.Is(err, os.ErrNotExist) {
+		ownership, err := bootstrapOwnership()
+		if err != nil {
+			return hostprotocol.Result{}, recovery()
+		}
+		baseline := hostcontract.StableObservation{Machine: machine, Ownership: ownership, HostRelease: q.Target.ReleaseArtifact, AppliedRevision: q.PriorAppliedRevision, Ready: true}
+		state = State{Version: stateVersion, Resource: q.Resource, Machine: machine, Ownership: ownership, AppliedRevision: q.PriorAppliedRevision, Observation: baseline, Journal: &Journal{Key: key, Status: journalPending}}
+		if err = r.writeState(state); err != nil {
+			return hostprotocol.Result{}, recovery()
+		}
+		op = &Operation{runtime: r, lock: lock, state: state, key: key}
+	} else if err != nil {
+		return hostprotocol.Result{}, recovery()
+	} else {
+		if state.Resource != q.Resource || state.Machine != machine || state.Retirement != nil {
+			return hostprotocol.Result{}, recovery()
+		}
+		if state.Journal == nil || state.Journal.Key != key {
+			return hostprotocol.Result{}, conflict()
+		}
+		if state.Journal.Status == journalComplete {
+			if state.Journal.Result == nil {
+				return hostprotocol.Result{}, recovery()
+			}
+			return *state.Journal.Result, nil
+		}
+		if state.Journal.Status != journalPending || !precondition(state, key) || !validApproval(key, state, state.Journal.Approval) {
+			return hostprotocol.Result{}, conflict()
+		}
+		op = &Operation{runtime: r, lock: lock, state: state, key: key}
+	}
+	if err = r.admitReconcile(q); err != nil {
+		return hostprotocol.Result{}, err
+	}
+	result, observation, err := r.reconcile(ctx, op.state, q)
+	if err != nil {
+		return hostprotocol.Result{}, err
+	}
+	if err = op.Complete(result, observation); err != nil {
+		return hostprotocol.Result{}, err
+	}
+	return result, nil
+}
+
+func bootstrapOwnership() (hostcontract.OwnershipIdentity, error) {
+	b := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return hostcontract.OwnershipIdentity{}, err
+	}
+	return hostcontract.OwnershipIdentity{Value: "oid1:" + hex.EncodeToString(b)}, nil
+}
+
 func (r *Runtime) Begin(key hostcontract.OperationKey, approval *hostcontract.ApprovalSubject) (*Operation, error) {
 	if key.Validate() != nil {
 		return nil, recovery()

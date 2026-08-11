@@ -10,20 +10,35 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 || os.Args[1] != "stdio" {
+	if len(os.Args) != 2 || (os.Args[1] != "stdio" && os.Args[1] != "bootstrap-stdio") {
 		os.Exit(2)
 	}
-	if err := serve(os.Stdout, os.Stdin, hostruntime.New("", "")); err != nil {
+	runtime := hostruntime.New("", "")
+	var err error
+	if os.Args[1] == "bootstrap-stdio" {
+		err = bootstrapServe(os.Stdout, os.Stdin, runtime)
+	} else {
+		err = serve(os.Stdout, os.Stdin, runtime)
+	}
+	if err != nil {
 		os.Exit(1)
 	}
 }
 
 func serve(out io.Writer, in io.Reader, runtime *hostruntime.Runtime) error {
+	return serveRequest(out, in, runtime.Handle)
+}
+
+func bootstrapServe(out io.Writer, in io.Reader, runtime *hostruntime.Runtime) error {
+	return serveRequest(out, in, runtime.Bootstrap)
+}
+
+func serveRequest(out io.Writer, in io.Reader, handle func(context.Context, hostprotocol.Request) (hostprotocol.Result, error)) error {
 	request, err := hostprotocol.DecodeRequestFrom(in)
 	if err != nil {
 		return writeResponse(out, hostprotocol.Response{Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorProtocol, Code: hostprotocol.CodeMalformedFrame}}, err)
 	}
-	result, operationErr := runtime.Handle(context.Background(), request)
+	result, operationErr := handle(context.Background(), request)
 	response := hostprotocol.Response{Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorRemoteOperation, Code: hostprotocol.CodeOperationFailed}}
 	if operationErr == nil {
 		response = hostprotocol.Response{Result: &result}
