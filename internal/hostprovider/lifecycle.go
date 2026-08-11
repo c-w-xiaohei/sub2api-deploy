@@ -188,6 +188,10 @@ func (h *host) lifecycleCreate(ctx context.Context, req p.CreateRequest) (p.Crea
 	if result.Result.AppliedRevision != in.revision {
 		return p.CreateResponse{}, fmt.Errorf("invalid bootstrap response")
 	}
+	installed, err := h.deps.transport.Probe(ctx, in.server.SSHAlias)
+	if err != nil || !matchesPinnedProbe(installed, probe, pinned.SHA256) {
+		return p.CreateResponse{}, fmt.Errorf("host artifact unavailable")
+	}
 
 	observation, err := h.inspectObservation(ctx, in)
 	if err != nil {
@@ -251,27 +255,51 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 		return p.UpdateResponse{}, fmt.Errorf("invalid checkpoint")
 	}
 
-	initial, err := h.inspectObservation(ctx, next)
+	initial, evidence, err := h.inspectObservationEvidence(ctx, next)
 	if err != nil {
 		return p.UpdateResponse{}, err
 	}
 	if initial.Machine != machine || initial.Ownership != owner {
 		return p.UpdateResponse{}, fmt.Errorf("unsafe remote observation")
 	}
-	if err := validateObservation(initial, machine.Value, owner.Value, next.target, next.revision); err == nil {
+	expected, err := dangerousApprovalSubject(old, next)
+	if err != nil {
+		return p.UpdateResponse{}, err
+	}
+	terminal := validateObservation(initial, machine.Value, owner.Value, next.target, next.revision) == nil
+	persisted := false
+	if expected != nil && evidence != nil {
+		if terminal {
+			persisted = matchesEvidence(evidence, next.resource, next.revision, applied, hostprotocol.OperationComplete, expected)
+		} else {
+			persisted = matchesEvidence(evidence, next.resource, next.revision, applied, hostprotocol.OperationPending, expected)
+		}
+		if !persisted {
+			return p.UpdateResponse{}, fmt.Errorf("approval required")
+		}
+	}
+	if terminal && expected != nil && !persisted {
+		return p.UpdateResponse{}, fmt.Errorf("approval required")
+	}
+	if terminal && next.target.ReleaseArtifact == old.target.ReleaseArtifact {
 		state, err := checkpointState(next.original, initial, next.revision)
 		if err != nil {
 			return p.UpdateResponse{}, err
 		}
 		return p.UpdateResponse{Properties: state}, nil
 	}
-	if initial.HostRelease != old.target.ReleaseArtifact || initial.AppliedRevision != applied {
+	if !terminal && (initial.HostRelease != old.target.ReleaseArtifact || initial.AppliedRevision != applied) {
 		return p.UpdateResponse{}, fmt.Errorf("unsafe remote observation")
 	}
 
-	approval, err := dangerousApproval(ctx, h.deps.approve, old, next)
-	if err != nil {
-		return p.UpdateResponse{}, err
+	var approval *hostcontract.ApprovalSubject
+	if expected != nil {
+		if !persisted {
+			approval, err = dangerousApproval(ctx, h.deps.approve, old, next)
+			if err != nil {
+				return p.UpdateResponse{}, err
+			}
+		}
 	}
 	reconcile := hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: next.server, Resource: next.resource, TargetRevision: next.revision, PriorAppliedRevision: applied, Target: &next.target, Secrets: &next.secrets, Approval: approval}
 	frame, err := hostprotocol.EncodeRequest(reconcile)
@@ -297,6 +325,13 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 		if err != nil {
 			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
 		}
+		if terminal && probe.InstalledDigest == pinned.SHA256 {
+			state, err := checkpointState(next.original, initial, next.revision)
+			if err != nil {
+				return p.UpdateResponse{}, err
+			}
+			return p.UpdateResponse{Properties: state}, nil
+		}
 		stdin, err := artifact.BootstrapInput(pinned, frame)
 		if err != nil {
 			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
@@ -310,6 +345,10 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 				return p.UpdateResponse{}, err
 			}
 			return p.UpdateResponse{}, fmt.Errorf("invalid bootstrap response")
+		}
+		installed, err := h.deps.transport.Probe(ctx, next.server.SSHAlias)
+		if err != nil || !matchesPinnedProbe(installed, probe, pinned.SHA256) {
+			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
 		}
 		final, err := h.inspectObservation(ctx, next)
 		if err != nil {
@@ -497,14 +536,24 @@ func (h *host) inspect(ctx context.Context, in lifecycleInput) (hostprotocol.Res
 }
 
 func (h *host) inspectObservation(ctx context.Context, in lifecycleInput) (hostcontract.StableObservation, error) {
+	observation, _, err := h.inspectObservationEvidence(ctx, in)
+	return observation, err
+}
+func (h *host) inspectObservationEvidence(ctx context.Context, in lifecycleInput) (hostcontract.StableObservation, *hostprotocol.OperationEvidence, error) {
 	result, err := h.inspect(ctx, in)
 	if err != nil {
-		return hostcontract.StableObservation{}, err
+		return hostcontract.StableObservation{}, nil, err
 	}
 	if result.Status != hostprotocol.ResultInspected || result.Observation == nil {
-		return hostcontract.StableObservation{}, fmt.Errorf("invalid inspect response")
+		return hostcontract.StableObservation{}, nil, fmt.Errorf("invalid inspect response")
 	}
-	return *result.Observation, nil
+	return *result.Observation, result.OperationEvidence, nil
+}
+func matchesPinnedProbe(got, initial artifact.ProbeInfo, digest string) bool {
+	return got.OS == "Linux" && got.Machine == initial.Machine && got.Arch == initial.Arch && got.InstalledDigest == digest
+}
+func matchesEvidence(evidence *hostprotocol.OperationEvidence, resource hostcontract.ResourceIdentity, revision, prior string, status hostprotocol.OperationStatus, approval *hostcontract.ApprovalSubject) bool {
+	return evidence != nil && evidence.Status == status && evidence.Key == (hostcontract.OperationKey{Resource: resource, Action: hostcontract.ActionReconcile, TargetRevision: revision, PriorAppliedRevision: prior}) && ((approval == nil && evidence.Approval == nil) || (approval != nil && evidence.Approval != nil && reflect.DeepEqual(*approval, *evidence.Approval)))
 }
 
 func expectedResponse(response hostprotocol.Response, status hostprotocol.ResultStatus, stage string) error {
@@ -697,6 +746,17 @@ func matchesTargetDataServices(observed []hostcontract.DataObservation, target [
 }
 
 func dangerousApproval(ctx context.Context, approve func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error), old, next lifecycleInput) (*hostcontract.ApprovalSubject, error) {
+	expected, err := dangerousApprovalSubject(old, next)
+	if err != nil || expected == nil || approve == nil {
+		return nil, fmt.Errorf("approval required")
+	}
+	approved, err := approve(ctx, *expected)
+	if err != nil || approved == nil || !reflect.DeepEqual(*approved, *expected) {
+		return nil, fmt.Errorf("approval required")
+	}
+	return approved, nil
+}
+func dangerousApprovalSubject(old, next lifecycleInput) (*hostcontract.ApprovalSubject, error) {
 	changes := []hostcontract.ApprovalSubject{}
 	oldApps := map[string]hostcontract.AppTarget{}
 	nextApps := map[string]hostcontract.AppTarget{}
@@ -733,15 +793,10 @@ func dangerousApproval(ctx context.Context, approve func(context.Context, hostco
 	if len(changes) == 0 {
 		return nil, nil
 	}
-	if len(changes) != 1 || approve == nil {
+	if len(changes) != 1 {
 		return nil, fmt.Errorf("approval required")
 	}
-
-	approved, err := approve(ctx, changes[0])
-	if err != nil || approved == nil || !reflect.DeepEqual(*approved, changes[0]) {
-		return nil, fmt.Errorf("approval required")
-	}
-	return approved, nil
+	return &changes[0], nil
 }
 
 type dataLinkChange struct {

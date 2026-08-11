@@ -516,7 +516,7 @@ func TestLifecycleUpdateDangerousTerminalRequiresExactCompleteEvidence(t *testin
 		r := &recordingLifecycleTransport{}
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
 		oldRevision, desired := revision(t, h, old), revision(t, h, next)
-		approval := dangerousApprovalSubject(t, old, next, desired)
+		approval := dangerousApprovalFixture(t, old, next, desired)
 		var evidence *hostprotocol.OperationEvidence
 		if mutate != nil { evidence = &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationComplete, Approval: &approval}; mutate(evidence) }
 		r.outcomes = []lifecycleOutcome{response(inspectedEvidence(observationFor(decodeTarget(t, next), desired), evidence))}
@@ -526,7 +526,7 @@ func TestLifecycleUpdateDangerousTerminalRequiresExactCompleteEvidence(t *testin
 	r := &recordingLifecycleTransport{}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
-	approval := dangerousApprovalSubject(t, old, next, desired)
+	approval := dangerousApprovalFixture(t, old, next, desired)
 	evidence := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationComplete, Approval: &approval}
 	nextObservation := observationFor(decodeTarget(t, next), desired)
 	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(nextObservation, evidence))}
@@ -540,7 +540,7 @@ func TestLifecycleUpdateDangerousPendingEvidenceResumesWithoutApprovalReplay(t *
 	r := &recordingLifecycleTransport{}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
-	approval := dangerousApprovalSubject(t, old, next, desired)
+	approval := dangerousApprovalFixture(t, old, next, desired)
 	evidence := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationPending, Approval: &approval}
 	nextObservation := observationFor(decodeTarget(t, next), desired)
 	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(pendingObservation(oldRevision), evidence)), response(applied(desired)), response(inspected(nextObservation))}
@@ -556,7 +556,7 @@ func TestLifecycleUpdateDangerousMismatchedPendingEvidenceFailsClosed(t *testing
 	approvals := 0
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { approvals++; return &subject, nil }})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
-	approval := dangerousApprovalSubject(t, old, next, desired)
+	approval := dangerousApprovalFixture(t, old, next, desired)
 	wrong := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: revisionC()}, Status: hostprotocol.OperationPending, Approval: &approval}
 	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(observation(oldRevision), wrong))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
@@ -1148,7 +1148,7 @@ func rotateSecret(t *testing.T, inputs property.Map) property.Map { secrets := d
 func changeImage(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Image = "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; return inputs.Set("target", encodeValue(t, target)) }
 func changeHostname(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Hostname = "other.example"; return inputs.Set("target", encodeValue(t, target)) }
 func dangerousChange(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); target := decodeTarget(t, old); target.Apps[0].DataLinks[0].Identity.Endpoint = "old-db.example"; return old.Set("target", encodeValue(t, target)), next }
-func dangerousApprovalSubject(t *testing.T, old, next property.Map, revision string) hostcontract.ApprovalSubject { t.Helper(); return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: lifecycleResource(t, next).Environment, Resource: lifecycleResource(t, next), AppID: "api", DataKind: "postgres", OldData: decodeTarget(t, old).Apps[0].DataLinks[0].Identity, NewData: decodeTarget(t, next).Apps[0].DataLinks[0].Identity, TargetRevision: revision} }
+func dangerousApprovalFixture(t *testing.T, old, next property.Map, revision string) hostcontract.ApprovalSubject { t.Helper(); return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: lifecycleResource(t, next).Environment, Resource: lifecycleResource(t, next), AppID: "api", DataKind: "postgres", OldData: decodeTarget(t, old).Apps[0].DataLinks[0].Identity, NewData: decodeTarget(t, next).Apps[0].DataLinks[0].Identity, TargetRevision: revision} }
 func twoDangerousChanges(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next); secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSServerName: "old-two.example"}; secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSServerName: "new-two.example"}; oldTarget.Apps[0].DataLinks = append(oldTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondOld}); nextTarget.Apps[0].DataLinks = append(nextTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondNew}); oldTarget.Apps[0].DataLinks[0].Identity.Endpoint = "old-one.example"; nextTarget.Apps[0].DataLinks[0].Identity.Endpoint = "new-one.example"; return old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget)) }
 func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity { database, tls := "sub2api", ""; managed := "owner-scoped-" + service.Type + "-" + service.ID + "-managed"; if service.Type == "redis" { database = "0" } else { tls = managed }; return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSServerName: tls} }
 func lifecycleBundle(t *testing.T, release string) (artifactBundle, []byte) { t.Helper(); root := t.TempDir(); amd64, arm64 := []byte("pinned-host-amd64"), []byte("pinned-host-arm64"); write := func(name string, contents []byte) { if err := os.WriteFile(filepath.Join(root, name), contents, 0o600); err != nil { t.Fatal("artifact fixture write failed") } }; write("host-amd64", amd64); write("host-arm64", arm64); sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }; return artifactBundle{Root: root, Manifest: artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "host-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "host-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}}, amd64 }

@@ -12,22 +12,27 @@ import (
 const bootstrapAttestation = "sub2api-bootstrap-attested-v1"
 
 func main() {
-	if len(os.Args) != 2 || (os.Args[1] != "stdio" && os.Args[1] != "bootstrap-stdio") {
+	if len(os.Args) != 2 || (os.Args[1] != "stdio" && os.Args[1] != "bootstrap-stdio" && os.Args[1] != "install-attest") {
 		os.Exit(2)
+	}
+	if os.Args[1] == "install-attest" {
+		attestation := os.NewFile(3, "install-attestation")
+		if attestation == nil {
+			os.Exit(1)
+		}
+		err := writeFull(attestation, []byte(bootstrapAttestation))
+		if closeErr := attestation.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			os.Exit(1)
+		}
+		return
 	}
 	runtime := hostruntime.New("", "")
 	var err error
 	if os.Args[1] == "bootstrap-stdio" {
-		attestation := os.NewFile(3, "bootstrap-attestation")
-		if attestation == nil {
-			os.Exit(1)
-		}
-		if _, err = attestation.Stat(); err == nil {
-			err = bootstrapServe(os.Stdout, os.Stdin, runtime, attestation)
-		}
-		if closeErr := attestation.Close(); err == nil {
-			err = closeErr
-		}
+		err = bootstrapServe(os.Stdout, os.Stdin, runtime)
 	} else {
 		err = serve(os.Stdout, os.Stdin, runtime)
 	}
@@ -40,7 +45,7 @@ func serve(out io.Writer, in io.Reader, runtime *hostruntime.Runtime) error {
 	return serveRequest(out, in, runtime.Handle)
 }
 
-func bootstrapServe(out io.Writer, in io.Reader, runtime *hostruntime.Runtime, attestation io.Writer) error {
+func bootstrapServe(out io.Writer, in io.Reader, runtime *hostruntime.Runtime) error {
 	request, err := hostprotocol.DecodeRequestFrom(in)
 	if err != nil {
 		return writeResponse(out, hostprotocol.Response{Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorProtocol, Code: hostprotocol.CodeMalformedFrame}}, err)
@@ -51,9 +56,6 @@ func bootstrapServe(out io.Writer, in io.Reader, runtime *hostruntime.Runtime, a
 	}
 	frame, err := hostprotocol.EncodeResponse(hostprotocol.Response{Result: &result})
 	if err != nil {
-		return err
-	}
-	if err := writeFull(attestation, []byte(bootstrapAttestation)); err != nil {
 		return err
 	}
 	return writeFull(out, frame)
