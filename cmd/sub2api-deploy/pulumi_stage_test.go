@@ -165,6 +165,8 @@ func TestRenderStagedStackRejectsConfigMergeAliases(t *testing.T) {
 func TestRenderStagedStackPreservesUnrelatedConfigMerge(t *testing.T) {
 	project, source, manager, _ := stagedStackFixture(t)
 	source = addUnrelatedConfigMerge(t, source, stageMergedUnrelated)
+	merged := loadStagedStack(t, project, source)
+	assertStackValue(t, merged, "sub2api-environment:mergedUnrelated", false, stageMergedUnrelated, config.NopDecrypter)
 
 	rendered, err := renderStagedStack(context.Background(), project, source, stageSourcePath, stagePassphrase, stagedStackValues())
 	if err != nil {
@@ -448,7 +450,15 @@ func addUnrelatedConfigMerge(t *testing.T, source []byte, value string) []byte {
 				{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
 			},
 		}
-		setMappingNode(root, "unrelated", unrelated)
+		for index := 0; index < len(root.Content); index += 2 {
+			if root.Content[index].Value == "config" {
+				root.Content = append(root.Content, nil, nil)
+				copy(root.Content[index+2:], root.Content[index:])
+				root.Content[index] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "unrelated"}
+				root.Content[index+1] = unrelated
+				break
+			}
+		}
 		configNode := mappingValue(t, root, "config")
 		configNode.Content = append(configNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!merge", Value: "<<"},
