@@ -76,6 +76,7 @@ jobs:
         run: |
           mkdir -p dist/host-controller
           go build -o "dist/host-controller/sub2api-deploy-linux-${GOARCH}" ./cmd/sub2api-deploy
+          go build -o "dist/host-controller/sub2api-environment-linux-${GOARCH}" ./cmd/sub2api-environment
           go build -o "dist/host-controller/sub2api-host-linux-${GOARCH}" ./cmd/sub2api-host
           go build -o "dist/host-controller/pulumi-resource-sub2api-host-linux-${GOARCH}" ./cmd/pulumi-resource-sub2api-host
 
