@@ -33,6 +33,8 @@ const (
 	stageAliasSecrets     = "STAGE_ALIAS_SECRETS_CANARY"
 	stageAliasRevision    = "STAGE_ALIAS_REVISION_CANARY"
 	stageSecondDocument   = "STAGE_SECOND_DOCUMENT_SECRET_CANARY"
+	stageMergedUnrelated  = "STAGE_MERGED_UNRELATED_CANARY"
+	stageLiteralMergeKey  = "STAGE_LITERAL_MERGE_KEY_CANARY"
 	stageSourcePath       = "Pulumi.staged.yaml"
 )
 
@@ -158,6 +160,41 @@ func TestRenderStagedStackRejectsConfigMergeAliases(t *testing.T) {
 
 	rendered, err := renderStagedStack(context.Background(), project, source, stageSourcePath, stagePassphrase, stagedStackValues())
 	assertStagedStackRejected(t, rendered, err, stagePassphrase, stageSecrets, stageRevision)
+}
+
+func TestRenderStagedStackPreservesUnrelatedConfigMerge(t *testing.T) {
+	project, source, manager, _ := stagedStackFixture(t)
+	source = addUnrelatedConfigMerge(t, source, stageMergedUnrelated)
+
+	rendered, err := renderStagedStack(context.Background(), project, source, stageSourcePath, stagePassphrase, stagedStackValues())
+	if err != nil {
+		t.Fatalf("renderStagedStack() error = %v", err)
+	}
+	stack := loadStagedStack(t, project, rendered)
+	assertStackValue(t, stack, "sub2api-environment:mergedUnrelated", false, stageMergedUnrelated, config.NopDecrypter)
+	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
+	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
+	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+}
+
+func TestRenderStagedStackPreservesQuotedLiteralMergeConfigKey(t *testing.T) {
+	project, source, manager, _ := stagedStackFixture(t)
+	source = editStageConfig(t, source, func(configNode *yaml.Node) {
+		configNode.Content = append(configNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "<<", Style: yaml.DoubleQuotedStyle},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: stageLiteralMergeKey},
+		)
+	})
+
+	rendered, err := renderStagedStack(context.Background(), project, source, stageSourcePath, stagePassphrase, stagedStackValues())
+	if err != nil {
+		t.Fatalf("renderStagedStack() error = %v", err)
+	}
+	stack := loadStagedStack(t, project, rendered)
+	assertStackValue(t, stack, "sub2api-environment:<<", false, stageLiteralMergeKey, config.NopDecrypter)
+	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
+	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
+	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
 }
 
 func TestRenderStagedStackRejectsWrongPassphraseAfterManagerCacheWarms(t *testing.T) {
@@ -398,6 +435,25 @@ func editStageMetadata(t *testing.T, source []byte, edit func(*yaml.Node)) []byt
 func editStageConfig(t *testing.T, source []byte, edit func(*yaml.Node)) []byte {
 	return editStageMetadata(t, source, func(root *yaml.Node) {
 		edit(mappingValue(t, root, "config"))
+	})
+}
+
+func addUnrelatedConfigMerge(t *testing.T, source []byte, value string) []byte {
+	return editStageMetadata(t, source, func(root *yaml.Node) {
+		unrelated := &yaml.Node{
+			Kind:  yaml.MappingNode,
+			Anchor: "unrelated",
+			Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "sub2api-environment:mergedUnrelated"},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+			},
+		}
+		setMappingNode(root, "unrelated", unrelated)
+		configNode := mappingValue(t, root, "config")
+		configNode.Content = append(configNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!merge", Value: "<<"},
+			&yaml.Node{Kind: yaml.AliasNode, Value: "unrelated", Alias: unrelated},
+		)
 	})
 }
 
