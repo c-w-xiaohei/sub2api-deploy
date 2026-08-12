@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/constant"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
@@ -24,6 +28,46 @@ type callerMocks struct {
 	mu        sync.Mutex
 	resources []pulumi.MockResourceArgs
 	calls     []pulumi.MockCallArgs
+}
+
+func TestPulumiPluginDiscovery(t *testing.T) {
+	if os.Getenv("SUB2API_ENVIRONMENT_PLUGIN_DISCOVERY_HELPER") == "1" {
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPulumiPluginDiscovery$")
+	cmd.Env = append(os.Environ(), "SUB2API_ENVIRONMENT_PLUGIN_DISCOVERY_HELPER=1", "PULUMI_PLUGINS=true")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != constant.ExitStatusLoggedError {
+		t.Errorf("plugin discovery exit status = %v, want %d", err, constant.ExitStatusLoggedError)
+	}
+
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Errorf("plugin discovery stdout is not JSON: %v\nstdout: %s", err, stdout.String())
+	} else {
+		plugins, ok := response["plugins"]
+		if !ok {
+			t.Error("plugin discovery JSON has no plugins field")
+		} else if !bytes.HasPrefix(bytes.TrimSpace(plugins), []byte("[")) {
+			t.Error("plugin discovery JSON plugins is not an array")
+		} else {
+			var providers []json.RawMessage
+			if err := json.Unmarshal(plugins, &providers); err != nil {
+				t.Errorf("plugin discovery JSON plugins is not an array: %v", err)
+			}
+		}
+	}
+	if strings.Contains(stderr.String(), "environment program failed") {
+		t.Error("plugin discovery stderr contains generic environment failure")
+	}
+	if strings.Contains(stderr.String(), secretCanary) {
+		t.Error("plugin discovery stderr leaked secret canary")
+	}
 }
 
 func (m *callerMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
