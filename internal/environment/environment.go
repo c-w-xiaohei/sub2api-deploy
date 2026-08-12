@@ -1,6 +1,7 @@
 package environment
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"math"
@@ -134,6 +135,7 @@ type OutboundProxy struct {
 }
 
 type Secrets struct {
+	RevisionKey      string                     `yaml:"revisionKey"`
 	PulumiPassphrase string                     `yaml:"pulumiPassphrase"`
 	Cloudflare       *CloudflareSecrets         `yaml:"cloudflare"`
 	ReverseProxy     *ReverseProxySecrets       `yaml:"reverseProxy"`
@@ -555,6 +557,10 @@ func rejectDuplicateKeys(node *yaml.Node) error {
 }
 
 func Validate(config Config, secrets Secrets) (ValidatedConfig, error) {
+	revisionKey, err := base64.StdEncoding.Strict().DecodeString(secrets.RevisionKey)
+	if err != nil || len(revisionKey) != 32 {
+		return ValidatedConfig{}, fmt.Errorf("revisionKey must be base64-encoded 32-byte key")
+	}
 	if config.Version != 1 {
 		return ValidatedConfig{}, fmt.Errorf("version must be 1")
 	}

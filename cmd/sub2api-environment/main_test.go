@@ -340,7 +340,8 @@ apps:
       type: none
 `
 
-const environmentSecrets = `reverseProxy:
+const environmentSecrets = `revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+reverseProxy:
   dnsChallengeToken: ` + secretCanary + `
 apps:
   app:
