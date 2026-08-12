@@ -58,34 +58,34 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 		return nil, errInvalidStagedStack
 	}
 
-	preferredKeys := []string{"sub2api-environment:environmentConfig", "sub2api-environment:environmentSecrets", "sub2api-host:revisionKey"}
-	preferredTargets := []config.Key{
+	targetKeyNames := []string{"sub2api-environment:environmentConfig", "sub2api-environment:environmentSecrets", "sub2api-host:revisionKey"}
+	targetKeys := []config.Key{
 		config.MustMakeKey("sub2api-environment", "environmentConfig"),
 		config.MustMakeKey("sub2api-environment", "environmentSecrets"),
 		config.MustMakeKey("sub2api-host", "revisionKey"),
 	}
-	content := make([]*yaml.Node, 0, len(configNode.Content)+6)
+	content := make([]*yaml.Node, 0, len(configNode.Content)+2*len(targetKeyNames))
 	for i := 0; i < len(configNode.Content); i += 2 {
 		keyNode := configNode.Content[i]
-		if keyNode.Kind != yaml.ScalarNode || keyNode.Tag == "!!merge" || keyNode.Value == "<<" {
+		if keyNode.Kind != yaml.ScalarNode {
 			return nil, errInvalidStagedStack
+		}
+		if stageMergeKey(keyNode) {
+			if err := stageMergeTargets(project, configNode.Content[i+1], targetKeys, make(map[*yaml.Node]bool)); err != nil {
+				return nil, errInvalidStagedStack
+			}
+			content = append(content, keyNode, configNode.Content[i+1])
+			continue
 		}
 		key, err := stageConfigKey(project, keyNode.Value)
 		if err != nil {
 			return nil, errInvalidStagedStack
 		}
-		isTarget := false
-		for _, target := range preferredTargets {
-			if key == target {
-				isTarget = true
-				break
-			}
-		}
-		if !isTarget {
+		if !isStageTargetKey(key, targetKeys) {
 			content = append(content, keyNode, configNode.Content[i+1])
 		}
 	}
-	for _, key := range preferredKeys {
+	for _, key := range targetKeyNames {
 		content = append(content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "staged"})
 	}
 	configNode.Content = content
@@ -111,28 +111,26 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 	if stack.EncryptionSalt == "" || stack.SecretsProvider != "" || stack.EncryptedKey != "" {
 		return nil, errInvalidStagedStack
 	}
-	state := strings.SplitN(stack.EncryptionSalt, ":", 3)
-	if len(state) != 3 || state[0] != "v1" {
+	passphraseState := strings.SplitN(stack.EncryptionSalt, ":", 3)
+	if len(passphraseState) != 3 || passphraseState[0] != "v1" {
 		return nil, errInvalidStagedStack
 	}
-	salt, err := base64.StdEncoding.Strict().DecodeString(state[1])
-	if err != nil || len(salt) != 8 || base64.StdEncoding.EncodeToString(salt) != state[1] {
+	salt, err := decodeCanonicalStageBase64(passphraseState[1], 8)
+	if err != nil {
 		return nil, errInvalidStagedStack
 	}
-	sentinelState := strings.Split(state[2], ":")
+	sentinelState := strings.Split(passphraseState[2], ":")
 	if len(sentinelState) != 3 || sentinelState[0] != "v1" {
 		return nil, errInvalidStagedStack
 	}
-	nonce, err := base64.StdEncoding.Strict().DecodeString(sentinelState[1])
-	if err != nil || len(nonce) != 12 || base64.StdEncoding.EncodeToString(nonce) != sentinelState[1] {
+	if _, err := decodeCanonicalStageBase64(sentinelState[1], 12); err != nil {
 		return nil, errInvalidStagedStack
 	}
-	ciphertext, err := base64.StdEncoding.Strict().DecodeString(sentinelState[2])
-	if err != nil || len(ciphertext) != 22 || base64.StdEncoding.EncodeToString(ciphertext) != sentinelState[2] {
+	if _, err := decodeCanonicalStageBase64(sentinelState[2], 22); err != nil {
 		return nil, errInvalidStagedStack
 	}
 	crypter := config.NewSymmetricCrypterFromPassphrase(passphrase, salt)
-	sentinel, err := crypter.DecryptValue(ctx, state[2])
+	sentinel, err := crypter.DecryptValue(ctx, passphraseState[2])
 	if err != nil || sentinel != "pulumi" {
 		return nil, errInvalidStagedStack
 	}
@@ -148,14 +146,14 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 		return nil, err
 	}
 
-	targets := map[string]*yaml.Node{
+	targetValues := map[string]*yaml.Node{
 		"sub2api-environment:environmentConfig":  {Kind: yaml.ScalarNode, Tag: "!!str", Value: values.environmentConfig},
 		"sub2api-environment:environmentSecrets": {Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: "secure"}, {Kind: yaml.ScalarNode, Tag: "!!str", Value: ciphertexts[0]}}},
 		"sub2api-host:revisionKey":               {Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: "secure"}, {Kind: yaml.ScalarNode, Tag: "!!str", Value: ciphertexts[1]}}},
 	}
-	content = content[:len(content)-6]
-	for _, key := range preferredKeys {
-		content = append(content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, targets[key])
+	content = content[:len(content)-2*len(targetKeyNames)]
+	for _, key := range targetKeyNames {
+		content = append(content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, targetValues[key])
 	}
 	configNode.Content = content
 
@@ -203,4 +201,82 @@ func stageConfigKey(project *workspace.Project, value string) (config.Key, error
 		value = project.Name.String() + ":" + value
 	}
 	return config.ParseKey(value)
+}
+
+func decodeCanonicalStageBase64(value string, expectedSize int) ([]byte, error) {
+	decoded, err := base64.StdEncoding.Strict().DecodeString(value)
+	if err != nil || len(decoded) != expectedSize || base64.StdEncoding.EncodeToString(decoded) != value {
+		return nil, errInvalidStagedStack
+	}
+	return decoded, nil
+}
+
+func isStageTargetKey(key config.Key, targets []config.Key) bool {
+	for _, target := range targets {
+		if key == target {
+			return true
+		}
+	}
+	return false
+}
+
+func stageMergeKey(node *yaml.Node) bool {
+	return node.Kind == yaml.ScalarNode && node.Value == "<<" && (node.Tag == "" || node.Tag == "!" || node.Tag == "!!merge")
+}
+
+func stageMergeTargets(project *workspace.Project, value *yaml.Node, targets []config.Key, active map[*yaml.Node]bool) error {
+	switch value.Kind {
+	case yaml.MappingNode:
+		return stageMergedMappingTargets(project, value, targets, active)
+	case yaml.AliasNode:
+		if value.Alias == nil || value.Alias.Kind != yaml.MappingNode {
+			return errInvalidStagedStack
+		}
+		return stageMergedMappingTargets(project, value.Alias, targets, active)
+	case yaml.SequenceNode:
+		for _, item := range value.Content {
+			if item.Kind == yaml.MappingNode {
+				if err := stageMergedMappingTargets(project, item, targets, active); err != nil {
+					return err
+				}
+				continue
+			}
+			if item.Kind != yaml.AliasNode || item.Alias == nil || item.Alias.Kind != yaml.MappingNode {
+				return errInvalidStagedStack
+			}
+			if err := stageMergedMappingTargets(project, item.Alias, targets, active); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return errInvalidStagedStack
+}
+
+func stageMergedMappingTargets(project *workspace.Project, mapping *yaml.Node, targets []config.Key, active map[*yaml.Node]bool) error {
+	if len(mapping.Content)%2 != 0 || active[mapping] {
+		return errInvalidStagedStack
+	}
+	active[mapping] = true
+	defer delete(active, mapping)
+	for i := 0; i < len(mapping.Content); i += 2 {
+		keyNode := mapping.Content[i]
+		if keyNode.Kind != yaml.ScalarNode {
+			return errInvalidStagedStack
+		}
+		if stageMergeKey(keyNode) {
+			if err := stageMergeTargets(project, mapping.Content[i+1], targets, active); err != nil {
+				return err
+			}
+			continue
+		}
+		key, err := stageConfigKey(project, keyNode.Value)
+		if err != nil {
+			return errInvalidStagedStack
+		}
+		if isStageTargetKey(key, targets) {
+			return errInvalidStagedStack
+		}
+	}
+	return nil
 }
