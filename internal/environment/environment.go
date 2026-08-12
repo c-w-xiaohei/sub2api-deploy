@@ -1182,8 +1182,9 @@ func contains(values []string, value string) bool {
 	}
 	return false
 }
+func ValidID(value string) bool { return idPattern.MatchString(value) }
 func ResolveEnvironment(workdir, environment string) (EnvironmentPaths, error) {
-	if !idPattern.MatchString(environment) {
+	if !ValidID(environment) {
 		return EnvironmentPaths{}, fmt.Errorf("environment ID %q is invalid", environment)
 	}
 	environmentsRoot, err := filepath.EvalSymlinks(filepath.Join(workdir, "environments"))
