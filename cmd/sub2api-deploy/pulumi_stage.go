@@ -67,7 +67,7 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 	content := make([]*yaml.Node, 0, len(configNode.Content)+6)
 	for i := 0; i < len(configNode.Content); i += 2 {
 		keyNode := configNode.Content[i]
-		if keyNode.Kind != yaml.ScalarNode {
+		if keyNode.Kind != yaml.ScalarNode || keyNode.Tag == "!!merge" || keyNode.Value == "<<" {
 			return nil, errInvalidStagedStack
 		}
 		key, err := stageConfigKey(project, keyNode.Value)
@@ -116,7 +116,7 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 		return nil, errInvalidStagedStack
 	}
 	salt, err := base64.StdEncoding.Strict().DecodeString(state[1])
-	if err != nil || len(salt) != 8 {
+	if err != nil || len(salt) != 8 || base64.StdEncoding.EncodeToString(salt) != state[1] {
 		return nil, errInvalidStagedStack
 	}
 	sentinelState := strings.Split(state[2], ":")
@@ -124,11 +124,11 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 		return nil, errInvalidStagedStack
 	}
 	nonce, err := base64.StdEncoding.Strict().DecodeString(sentinelState[1])
-	if err != nil || len(nonce) != 12 {
+	if err != nil || len(nonce) != 12 || base64.StdEncoding.EncodeToString(nonce) != sentinelState[1] {
 		return nil, errInvalidStagedStack
 	}
 	ciphertext, err := base64.StdEncoding.Strict().DecodeString(sentinelState[2])
-	if err != nil || len(ciphertext) < 16 {
+	if err != nil || len(ciphertext) != 22 || base64.StdEncoding.EncodeToString(ciphertext) != sentinelState[2] {
 		return nil, errInvalidStagedStack
 	}
 	crypter := config.NewSymmetricCrypterFromPassphrase(passphrase, salt)
