@@ -134,6 +134,32 @@ func TestRenderStagedStackReplacesSemanticTargetKeyAliases(t *testing.T) {
 	}
 }
 
+func TestRenderStagedStackRejectsConfigMergeAliases(t *testing.T) {
+	project, _, manager, salt := stagedStackFixture(t)
+	secretsCiphertext, err := manager.Encrypter().EncryptValue(context.Background(), stageSecrets)
+	if err != nil {
+		t.Fatalf("encrypt merged environment secrets: %v", err)
+	}
+	revisionCiphertext, err := manager.Encrypter().EncryptValue(context.Background(), stageRevision)
+	if err != nil {
+		t.Fatalf("encrypt merged revision key: %v", err)
+	}
+	source := []byte("encryptionsalt: " + salt + "\n" +
+		"targetAliases: &targetAliases\n" +
+		"  environmentSecrets:\n" +
+		"    secure: " + secretsCiphertext + "\n" +
+		"  sub2api-host:config:revisionKey:\n" +
+		"    secure: " + revisionCiphertext + "\n" +
+		"config:\n" +
+		"  <<: *targetAliases\n")
+	merged := loadStagedStack(t, project, source)
+	assertStackValue(t, merged, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
+	assertStackValue(t, merged, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+
+	rendered, err := renderStagedStack(context.Background(), project, source, stageSourcePath, stagePassphrase, stagedStackValues())
+	assertStagedStackRejected(t, rendered, err, stagePassphrase, stageSecrets, stageRevision)
+}
+
 func TestRenderStagedStackRejectsWrongPassphraseAfterManagerCacheWarms(t *testing.T) {
 	project, source, _, salt := stagedStackFixture(t)
 	if _, err := passphrase.GetPassphraseSecretsManager(stagePassphrase, salt); err != nil {
@@ -189,6 +215,26 @@ func TestRenderStagedStackRejectsNonCanonicalPassphraseStates(t *testing.T) {
 	nonCanonical := nonCanonicalBase64State(t, state)
 	rendered, err := renderStagedStack(context.Background(), project, setStageEncryptionSalt(t, source, nonCanonical), stageSourcePath, stagePassphrase, stagedStackValues())
 	assertStagedStackRejected(t, rendered, err, stagePassphrase, stageUnrelatedSecret, stageSecrets, stageRevision)
+}
+
+func TestRenderStagedStackRejectsPassphraseStateBase64Whitespace(t *testing.T) {
+	project, source, _, _ := stagedStackFixture(t)
+	state := passphraseState(t, bytes.Repeat([]byte{1}, 8))
+	for _, test := range []struct {
+		name      string
+		component int
+		whitespace string
+	}{
+		{"outer salt CR", 0, "\r"},
+		{"inner nonce LF", 1, "\n"},
+		{"inner ciphertext CR", 2, "\r"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			variant := base64WhitespaceState(t, state, test.component, test.whitespace)
+			rendered, err := renderStagedStack(context.Background(), project, setStageEncryptionSalt(t, source, variant), stageSourcePath, stagePassphrase, stagedStackValues())
+			assertStagedStackRejected(t, rendered, err, stagePassphrase, stageUnrelatedSecret, stageSecrets, stageRevision)
+		})
+	}
 }
 
 func TestRenderStagedStackRejectsMultipleYAMLDocuments(t *testing.T) {
@@ -424,6 +470,39 @@ func nonCanonicalBase64State(t *testing.T, state string) string {
 	}
 	sentinel[2] = mutated
 	return strings.Join([]string{parts[0], parts[1], strings.Join(sentinel, ":")}, ":")
+}
+
+func base64WhitespaceState(t *testing.T, state string, component int, whitespace string) string {
+	t.Helper()
+	parts := strings.SplitN(state, ":", 3)
+	if len(parts) != 3 {
+		t.Fatalf("passphrase state parts = %q", parts)
+	}
+	values := []string{parts[1]}
+	sentinel := strings.Split(parts[2], ":")
+	if len(sentinel) != 3 || sentinel[0] != "v1" {
+		t.Fatalf("passphrase sentinel = %q", parts[2])
+	}
+	values = append(values, sentinel[1], sentinel[2])
+	if component < 0 || component >= len(values) || len(values[component]) < 2 {
+		t.Fatalf("base64 component %d = %q", component, values)
+	}
+	canonical := values[component]
+	variant := canonical[:1] + whitespace + canonical[1:]
+	decoded, err := base64.StdEncoding.DecodeString(canonical)
+	if err != nil {
+		t.Fatalf("decode canonical base64 component: %v", err)
+	}
+	permissive, err := base64.StdEncoding.DecodeString(variant)
+	if err != nil || !bytes.Equal(permissive, decoded) {
+		t.Fatalf("permissive base64 decode = %q, %v; want %q", permissive, err, decoded)
+	}
+	strict, err := base64.StdEncoding.Strict().DecodeString(variant)
+	if err != nil || !bytes.Equal(strict, decoded) {
+		t.Fatalf("strict base64 decode = %q, %v; want %q", strict, err, decoded)
+	}
+	values[component] = variant
+	return strings.Join([]string{parts[0], values[0], strings.Join([]string{sentinel[0], values[1], values[2]}, ":")}, ":")
 }
 
 func loadYAMLNode(t *testing.T, source []byte) *yaml.Node {
