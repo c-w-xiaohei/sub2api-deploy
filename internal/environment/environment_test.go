@@ -1,6 +1,7 @@
 package environment
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,8 @@ apps:
       type: none
 `
 
-const validSecrets = `apps:
+const validSecrets = `revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+apps:
   web-app:
     initialAdminPassword: SENTINEL_ONLY_FOR_REDACTION_TEST
     jwtSecret: jwt-placeholder
@@ -73,6 +75,9 @@ func TestParseAndValidateAcceptsValidEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got, want := secrets.RevisionKey, "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="; got != want {
+		t.Fatalf("revisionKey = %q, want %q", got, want)
+	}
 	validated, err := Validate(config, secrets)
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +87,67 @@ func TestParseAndValidateAcceptsValidEnvironment(t *testing.T) {
 	}
 	if validated.Postgres["main-db"].Port == nil || *validated.Postgres["main-db"].Port != 5432 || validated.Redis["main-cache"].Port == nil || *validated.Redis["main-cache"].Port != 6379 {
 		t.Fatalf("service defaults were not applied")
+	}
+}
+
+func TestValidateRejectsInvalidRevisionKey(t *testing.T) {
+	for name, test := range map[string]struct {
+		key        string
+		leakMarker string
+	}{
+		"missing": {
+			key: "",
+		},
+		"malformed base64": {
+			key:        "NOT_BASE64_CANARY!",
+			leakMarker: "CANARY",
+		},
+		"non-canonical padding bits": {
+			key:        "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWZ=",
+			leakMarker: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWZ=",
+		},
+		"31 decoded bytes": {
+			key:        base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 31))),
+			leakMarker: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 31))),
+		},
+		"33 decoded bytes": {
+			key:        base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 33))),
+			leakMarker: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 33))),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			secretsInput := validSecrets
+			if test.key == "" {
+				secretsInput = strings.Replace(secretsInput, "revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=\n", "", 1)
+			} else {
+				secretsInput = strings.Replace(secretsInput, "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", test.key, 1)
+			}
+
+			_, err := Validate(mustParseConfig(t, validConfig), mustParseSecrets(t, secretsInput))
+			if err == nil {
+				t.Fatal("Validate accepted invalid revisionKey")
+			}
+			if !strings.Contains(err.Error(), "revisionKey") {
+				t.Fatalf("Validate error = %q, want revisionKey context", err)
+			}
+			if test.leakMarker != "" && strings.Contains(err.Error(), test.leakMarker) {
+				t.Fatalf("Validate error leaked revisionKey: %q", err)
+			}
+		})
+	}
+}
+
+func TestParseAndValidateAcceptsStandardAlphabetRevisionKey(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("\xfb", 32)))
+	if !strings.ContainsAny(key, "+/") {
+		t.Fatalf("test revisionKey %q lacks standard base64 alphabet characters", key)
+	}
+	secrets := mustParseSecrets(t, strings.Replace(validSecrets, "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", key, 1))
+	if got := secrets.RevisionKey; got != key {
+		t.Fatalf("revisionKey = %q, want %q", got, key)
+	}
+	if _, err := Validate(mustParseConfig(t, validConfig), secrets); err != nil {
+		t.Fatalf("Validate rejected standard alphabet revisionKey: %v", err)
 	}
 }
 
