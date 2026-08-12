@@ -53,13 +53,15 @@ func TestPulumiPluginDiscovery(t *testing.T) {
 		plugins, ok := response["plugins"]
 		if !ok {
 			t.Error("plugin discovery JSON has no plugins field")
-		} else if !bytes.HasPrefix(bytes.TrimSpace(plugins), []byte("[")) {
-			t.Error("plugin discovery JSON plugins is not an array")
-		} else {
+		} else if trimmedPlugins := bytes.TrimSpace(plugins); bytes.Equal(trimmedPlugins, []byte("null")) {
+			// Pulumi emits null when its package registry is empty.
+		} else if bytes.HasPrefix(trimmedPlugins, []byte("[")) {
 			var providers []json.RawMessage
 			if err := json.Unmarshal(plugins, &providers); err != nil {
 				t.Errorf("plugin discovery JSON plugins is not an array: %v", err)
 			}
+		} else {
+			t.Error("plugin discovery JSON plugins is neither null nor an array")
 		}
 	}
 	if strings.Contains(stderr.String(), "environment program failed") {
