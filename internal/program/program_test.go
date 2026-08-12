@@ -74,9 +74,13 @@ func (m *recordingMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, e
 
 func runRegister(t *testing.T, mocks *recordingMocks, release, config, secrets string) error {
 	t.Helper()
+	options := []pulumi.RunOption{pulumi.WithMocks("sub2api-environment", "canary", mocks)}
+	if mocks.computed {
+		options = append(options, func(info *pulumi.RunInfo) { info.DryRun = true })
+	}
 	return pulumi.RunErr(func(ctx *pulumi.Context) error {
 		return Register(ctx, release, []byte(config), []byte(secrets))
-	}, pulumi.WithMocks("sub2api-environment", "canary", mocks))
+	}, options...)
 }
 
 func TestRegisterFoundationGraph(t *testing.T) {
