@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
@@ -37,7 +38,6 @@ type recordingMocks struct {
 	mu        sync.Mutex
 	resources []pulumi.MockResourceArgs
 	calls     []pulumi.MockCallArgs
-	computed  bool
 }
 
 func (m *recordingMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
@@ -52,15 +52,9 @@ func (m *recordingMocks) NewResource(args pulumi.MockResourceArgs) (string, reso
 		if databaseName == "app-redis-two" {
 			endpoint, password = "redis-two.example.test", upstashTwoPassword
 		}
-		if m.computed {
-			state["endpoint"] = resource.MakeComputed(resource.NewStringProperty(""))
-			state["port"] = resource.MakeComputed(resource.NewNumberProperty(0))
-			state["password"] = resource.MakeSecret(resource.MakeComputed(resource.NewStringProperty("")))
-		} else {
-			state["endpoint"] = resource.NewStringProperty(endpoint)
-			state["port"] = resource.NewNumberProperty(6380)
-			state["password"] = resource.MakeSecret(resource.NewStringProperty(password))
-		}
+		state["endpoint"] = resource.NewStringProperty(endpoint)
+		state["port"] = resource.NewNumberProperty(6380)
+		state["password"] = resource.MakeSecret(resource.NewStringProperty(password))
 	}
 	return args.Name + "-id", state, nil
 }
@@ -74,13 +68,9 @@ func (m *recordingMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, e
 
 func runRegister(t *testing.T, mocks *recordingMocks, release, config, secrets string) error {
 	t.Helper()
-	options := []pulumi.RunOption{pulumi.WithMocks("sub2api-environment", "canary", mocks)}
-	if mocks.computed {
-		options = append(options, func(info *pulumi.RunInfo) { info.DryRun = true })
-	}
 	return pulumi.RunErr(func(ctx *pulumi.Context) error {
 		return Register(ctx, release, []byte(config), []byte(secrets))
-	}, options...)
+	}, pulumi.WithMocks("sub2api-environment", "canary", mocks))
 }
 
 func TestRegisterFoundationGraph(t *testing.T) {
@@ -252,18 +242,41 @@ func TestRegisterMaintenanceKeepsManagedAndLocalData(t *testing.T) {
 }
 
 func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
-	mocks := &recordingMocks{computed: true}
-	if err := runRegister(t, mocks, pinnedRelease, managedConfig(), managedSecrets()); err != nil { t.Fatal(err) }
-	upstash := managedUpstash(t, mocks.resources)
+	mocks := &recordingMocks{}
+	if err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		config, err := environment.ParseConfig([]byte(managedConfig()))
+		if err != nil { return err }
+		secrets, err := environment.ParseSecrets([]byte(managedSecrets()))
+		if err != nil { return err }
+		validated, err := environment.Validate(config, secrets)
+		if err != nil { return err }
+		unknownString := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) string { panic("unknown value must not be resolved") }).(pulumi.StringOutput)
+		unknownInt := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) int { panic("unknown value must not be resolved") }).(pulumi.IntOutput)
+		_, err = registerHosts(ctx, validated, secrets, pinnedRelease, map[string]managedRedisInputs{
+			"app-redis": {
+				ProviderID: unknownString,
+				Endpoint:   unknownString,
+				Port:       unknownInt,
+				Password:   pulumi.ToSecret(unknownString).(pulumi.StringOutput),
+			},
+		})
+		return err
+	}, pulumi.WithMocks("sub2api-environment", "canary", mocks), func(info *pulumi.RunInfo) { info.DryRun = true }); err != nil {
+		t.Fatal(err)
+	}
+	assertNoCalls(t, mocks)
+	assertCount(t, mocks.resources, hostresource.HostToken, 2)
+	for _, token := range []string{"pulumi:providers:cloudflare", "pulumi:providers:upstash", "upstash:index/redisDatabase:RedisDatabase", "cloudflare:index/dnsRecord:DnsRecord"} {
+		assertCount(t, mocks.resources, token, 0)
+	}
 	for _, host := range resourcesOfType(mocks.resources, hostresource.HostToken) {
-		app := appTarget(t, host.Inputs, "app")
-		redis := dataLink(t, app, "app-redis")
+		redis := dataLink(t, appTarget(t, host.Inputs, "app"), "app-redis")
 		identity := object(t, redis, "identity")
-		if !property(identity, "endpoint").IsComputed() || !property(identity, "port").IsComputed() { t.Fatalf("computed endpoint/port lost for %s: %v", host.Name, identity) }
-		if stringValue(t, property(identity, "providerId")) != upstash.Name+"-id" { t.Fatalf("provider ID = %q, want mock ID", stringValue(t, property(identity, "providerId"))) }
-		credentials := appCredentials(t, host.Inputs, "app", "redis")
-		if !credentials["password"].IsSecret() || !credentials["password"].SecretValue().Element.IsComputed() { t.Fatalf("computed secret password lost for %s: %v", host.Name, credentials["password"]) }
-		assertPropertyDependency(t, host, upstash)
+		for _, key := range []string{"providerId", "endpoint", "port"} {
+			if !property(identity, key).IsComputed() { t.Fatalf("computed Redis %s lost for %s: %v", key, host.Name, identity) }
+		}
+		password := property(appCredentials(t, host.Inputs, "app", "redis"), "password")
+		if !password.IsSecret() || !password.SecretValue().Element.IsComputed() { t.Fatalf("computed secret password lost for %s: %v", host.Name, password) }
 	}
 }
 
