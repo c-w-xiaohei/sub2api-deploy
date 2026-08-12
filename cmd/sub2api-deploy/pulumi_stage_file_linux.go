@@ -79,7 +79,11 @@ func withStagedStackSource(ctx context.Context, project *workspace.Project, sour
 		return err
 	}
 
-	directory, err := os.MkdirTemp("", "sub2api-pulumi-stack-")
+	temporaryRoot, err := validatedStagedTempRoot()
+	if err != nil {
+		return errInvalidStagedStack
+	}
+	directory, err := os.MkdirTemp(temporaryRoot, "sub2api-pulumi-stack-")
 	if err != nil {
 		return errInvalidStagedStack
 	}
@@ -143,6 +147,58 @@ func validStagedDirectory(path string) bool {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm() == 0o700 && stat.Uid == uint32(os.Geteuid())
+}
+
+func validatedStagedTempRoot() (string, error) {
+	temporaryRoot := os.TempDir()
+	if temporaryRoot == "" {
+		return "", errInvalidStagedStack
+	}
+	temporaryRoot, err := filepath.Abs(temporaryRoot)
+	if err != nil || !filepath.IsAbs(temporaryRoot) {
+		return "", errInvalidStagedStack
+	}
+	temporaryRoot = filepath.Clean(temporaryRoot)
+
+	components := []string{temporaryRoot}
+	for parent := filepath.Dir(components[len(components)-1]); parent != components[len(components)-1]; parent = filepath.Dir(parent) {
+		components = append(components, parent)
+	}
+	for index := len(components) - 1; index >= 0; index-- {
+		info, err := os.Lstat(components[index])
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", errInvalidStagedStack
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || (stat.Uid != 0 && stat.Uid != uint32(os.Geteuid())) || !validStagedTempDirectoryMode(stat) {
+			return "", errInvalidStagedStack
+		}
+	}
+
+	info, err := os.Lstat(temporaryRoot)
+	if err != nil {
+		return "", errInvalidStagedStack
+	}
+	want, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", errInvalidStagedStack
+	}
+	fd, err := syscall.Open(temporaryRoot, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return "", errInvalidStagedStack
+	}
+	file := os.NewFile(uintptr(fd), temporaryRoot)
+	defer file.Close()
+	var got syscall.Stat_t
+	if err := syscall.Fstat(fd, &got); err != nil || got.Dev != want.Dev || got.Ino != want.Ino {
+		return "", errInvalidStagedStack
+	}
+	return temporaryRoot, nil
+}
+
+func validStagedTempDirectoryMode(stat *syscall.Stat_t) bool {
+	writableByOthers := stat.Mode&0o022 != 0
+	return !writableByOthers || (stat.Uid == 0 && stat.Mode&syscall.S_ISVTX != 0)
 }
 
 func publishStagedStack(directory string, rendered []byte) (string, error) {
