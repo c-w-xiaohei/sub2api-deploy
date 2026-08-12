@@ -22,7 +22,7 @@ func TestValidateCLIUsesFakeSopsAndSSHAndDoesNotPrintSecrets(t *testing.T) {
 	}
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "sops"), `#!/bin/sh
-printf '%s\n' 'apps:' '  web-app:' '    initialAdminPassword: CLI_SECRET_SENTINEL' '    jwtSecret: jwt' '    totpEncryptionKey: totp' '    postgres:' '      username: app' '      password: pass' '    redis:' '      username: default' '      password: pass' 'postgres:' '  main-db:' '    adminPassword: pass' 'redis:' '  main-cache:' '    adminPassword: pass' 'reverseProxy:' '  dnsChallengeToken: dns'
+printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:' '  web-app:' '    initialAdminPassword: CLI_SECRET_SENTINEL' '    jwtSecret: jwt' '    totpEncryptionKey: totp' '    postgres:' '      username: app' '      password: pass' '    redis:' '      username: default' '      password: pass' 'postgres:' '  main-db:' '    adminPassword: pass' 'redis:' '  main-cache:' '    adminPassword: pass' 'reverseProxy:' '  dnsChallengeToken: dns'
 `)
 	sshLog := filepath.Join(root, "ssh.log")
 	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+sshLog+"\"\n")
@@ -61,7 +61,7 @@ func TestValidateCLIFailsAtSSHWithoutPrintingCommandOutputOrSecrets(t *testing.T
 	}
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "sops"), `#!/bin/sh
-printf '%s\n' 'apps:' '  web-app:' '    initialAdminPassword: CLI_SECRET_SENTINEL' '    jwtSecret: jwt' '    totpEncryptionKey: totp' '    postgres:' '      username: app' '      password: pass' '    redis:' '      username: default' '      password: pass' 'postgres:' '  main-db:' '    adminPassword: pass' 'redis:' '  main-cache:' '    adminPassword: pass' 'reverseProxy:' '  dnsChallengeToken: dns'
+printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:' '  web-app:' '    initialAdminPassword: CLI_SECRET_SENTINEL' '    jwtSecret: jwt' '    totpEncryptionKey: totp' '    postgres:' '      username: app' '      password: pass' '    redis:' '      username: default' '      password: pass' 'postgres:' '  main-db:' '    adminPassword: pass' 'redis:' '  main-cache:' '    adminPassword: pass' 'reverseProxy:' '  dnsChallengeToken: dns'
 `)
 	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nprintf '%s\\n' 'fake command output CLI_SECRET_SENTINEL' >&2\nexit 7\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -89,7 +89,7 @@ func TestValidateCLIChecksSSHAliasInsteadOfServerKey(t *testing.T) {
 	}
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "sops"), `#!/bin/sh
-printf '%s\n' 'apps:' '  web-app:' '    initialAdminPassword: password' '    jwtSecret: jwt' '    totpEncryptionKey: totp' '    postgres:' '      username: app' '      password: pass' '    redis:' '      username: default' '      password: pass' 'postgres:' '  main-db:' '    adminPassword: pass' 'redis:' '  main-cache:' '    adminPassword: pass' 'reverseProxy:' '  dnsChallengeToken: dns'
+printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:' '  web-app:' '    initialAdminPassword: password' '    jwtSecret: jwt' '    totpEncryptionKey: totp' '    postgres:' '      username: app' '      password: pass' '    redis:' '      username: default' '      password: pass' 'postgres:' '  main-db:' '    adminPassword: pass' 'redis:' '  main-cache:' '    adminPassword: pass' 'reverseProxy:' '  dnsChallengeToken: dns'
 `)
 	sshLog := filepath.Join(root, "ssh.log")
 	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+sshLog+"\"\n")
