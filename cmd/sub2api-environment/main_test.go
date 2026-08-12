@@ -140,6 +140,22 @@ func TestRegisterRejectsInvalidConfigContractBeforeRegistration(t *testing.T) {
 	}
 }
 
+func TestRegisterDoesNotLeakMalformedSecretConfigInDiagnostics(t *testing.T) {
+	executable := writeBundle(t, validManifest(bundleRelease))
+	mocks := &callerMocks{}
+	err := runCaller(t, mocks, executable, map[string]string{
+		environmentConfigKey:  environmentConfig,
+		environmentSecretsKey: "reverseProxy: *" + secretCanary,
+	}, []string{environmentSecretsKey})
+	if err == nil {
+		t.Fatal("register() error = nil, want malformed secret config rejection")
+	}
+	if strings.Contains(err.Error(), secretCanary) {
+		t.Fatalf("register() error leaked secret canary: %v", err)
+	}
+	assertRejectedWithoutSideEffects(t, mocks)
+}
+
 func TestRegisterRejectsMalformedExecutableRelativeManifestBeforeRegistration(t *testing.T) {
 	installCWDAndPATHDecoy(t, "ghcr.io/example/decoy@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
 	executable := writeBundle(t, fmt.Sprintf(`{"schemaVersion":1,"release":%q,"linux-amd64":{"path":"bin/sub2api-host-amd64","size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, bundleRelease))
