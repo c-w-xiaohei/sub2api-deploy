@@ -257,12 +257,13 @@ func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
 	}
 	unknownString := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) string { panic("unknown value must not be resolved") }).(pulumi.StringOutput)
 	unknownInt := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) int { panic("unknown value must not be resolved") }).(pulumi.IntOutput)
+	unknownPassword := pulumi.ToSecret(unknownString).(pulumi.StringOutput)
 	managed := map[string]managedRedisInputs{
 		"app-redis": {
 			ProviderID: unknownString,
 			Endpoint:   unknownString,
 			Port:       unknownInt,
-			Password:   pulumi.ToSecret(unknownString).(pulumi.StringOutput),
+			Password:   unknownPassword,
 		},
 	}
 	for _, output := range []struct {
@@ -273,7 +274,7 @@ func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
 		{"provider ID", unknownString, false},
 		{"endpoint", unknownString, false},
 		{"port", unknownInt, false},
-		{"password", managed["app-redis"].Password, true},
+		{"password", unknownPassword, true},
 		{"Host target", pulumi.ToOutput(hostTarget(validated.Config, pinnedRelease, "alpha", managed)), false},
 		{"Host secrets", pulumi.ToOutput(hostSecrets(validated.Config, secrets, "alpha", managed)), true},
 	} {
