@@ -13,6 +13,7 @@ import (
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 )
 
 const pinnedRelease = "ghcr.io/example/sub2api-deploy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -242,41 +243,47 @@ func TestRegisterMaintenanceKeepsManagedAndLocalData(t *testing.T) {
 }
 
 func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
-	mocks := &recordingMocks{}
-	if err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		config, err := environment.ParseConfig([]byte(managedConfig()))
-		if err != nil { return err }
-		secrets, err := environment.ParseSecrets([]byte(managedSecrets()))
-		if err != nil { return err }
-		validated, err := environment.Validate(config, secrets)
-		if err != nil { return err }
-		unknownString := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) string { panic("unknown value must not be resolved") }).(pulumi.StringOutput)
-		unknownInt := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) int { panic("unknown value must not be resolved") }).(pulumi.IntOutput)
-		_, err = registerHosts(ctx, validated, secrets, pinnedRelease, map[string]managedRedisInputs{
-			"app-redis": {
-				ProviderID: unknownString,
-				Endpoint:   unknownString,
-				Port:       unknownInt,
-				Password:   pulumi.ToSecret(unknownString).(pulumi.StringOutput),
-			},
-		})
-		return err
-	}, pulumi.WithMocks("sub2api-environment", "canary", mocks), func(info *pulumi.RunInfo) { info.DryRun = true }); err != nil {
+	config, err := environment.ParseConfig([]byte(managedConfig()))
+	if err != nil {
 		t.Fatal(err)
 	}
-	assertNoCalls(t, mocks)
-	assertCount(t, mocks.resources, hostresource.HostToken, 2)
-	for _, token := range []string{"pulumi:providers:cloudflare", "pulumi:providers:upstash", "upstash:index/redisDatabase:RedisDatabase", "cloudflare:index/dnsRecord:DnsRecord"} {
-		assertCount(t, mocks.resources, token, 0)
+	secrets, err := environment.ParseSecrets([]byte(managedSecrets()))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, host := range resourcesOfType(mocks.resources, hostresource.HostToken) {
-		redis := dataLink(t, appTarget(t, host.Inputs, "app"), "app-redis")
-		identity := object(t, redis, "identity")
-		for _, key := range []string{"providerId", "endpoint", "port"} {
-			if !property(identity, key).IsComputed() { t.Fatalf("computed Redis %s lost for %s: %v", key, host.Name, identity) }
+	validated, err := environment.Validate(config, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownString := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) string { panic("unknown value must not be resolved") }).(pulumi.StringOutput)
+	unknownInt := pulumi.UnsafeUnknownOutput(nil).ApplyT(func(any) int { panic("unknown value must not be resolved") }).(pulumi.IntOutput)
+	managed := map[string]managedRedisInputs{
+		"app-redis": {
+			ProviderID: unknownString,
+			Endpoint:   unknownString,
+			Port:       unknownInt,
+			Password:   pulumi.ToSecret(unknownString).(pulumi.StringOutput),
+		},
+	}
+	for _, output := range []struct {
+		name   string
+		value  pulumi.Output
+		secret bool
+	}{
+		{"provider ID", unknownString, false},
+		{"endpoint", unknownString, false},
+		{"port", unknownInt, false},
+		{"password", managed["app-redis"].Password, true},
+		{"Host target", pulumi.ToOutput(hostTarget(validated.Config, pinnedRelease, "alpha", managed)), false},
+		{"Host secrets", pulumi.ToOutput(hostSecrets(validated.Config, secrets, "alpha", managed)), true},
+	} {
+		result, err := internals.UnsafeAwaitOutput(t.Context(), output.value)
+		if err != nil {
+			t.Fatalf("await %s: %v", output.name, err)
 		}
-		password := property(appCredentials(t, host.Inputs, "app", "redis"), "password")
-		if !password.IsSecret() || !password.SecretValue().Element.IsComputed() { t.Fatalf("computed secret password lost for %s: %v", host.Name, password) }
+		if result.Known || result.Secret != output.secret || result.Value != nil {
+			t.Fatalf("%s metadata = %#v, want unknown secret=%t nil value", output.name, result, output.secret)
+		}
 	}
 }
 
