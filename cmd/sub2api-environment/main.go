@@ -11,10 +11,7 @@ import (
 )
 
 func main() {
-	if err := pulumi.RunErr(run); err != nil {
-		fmt.Fprintln(os.Stderr, "environment program failed")
-		os.Exit(1)
-	}
+	pulumi.Run(run)
 }
 
 func run(ctx *pulumi.Context) error {
