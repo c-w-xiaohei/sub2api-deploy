@@ -151,6 +151,40 @@ func TestWithStagedStackRejectsSymlinkSource(t *testing.T) {
 	assertStagedStackTempRootEmpty(t, tmpRoot)
 }
 
+func TestWithStagedStackRejectsWorldWritableNonStickyTempRoot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux filesystem permissions")
+	}
+	project, source, _, _ := stagedStackFixture(t)
+	sourcePath := writeStagedStackSource(t, source)
+	before := stagedStackSourceIdentity(t, sourcePath)
+	tmpRoot := t.TempDir()
+	if err := os.Chmod(tmpRoot, 0o777); err != nil {
+		t.Fatal("could not make temp root world writable")
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(tmpRoot, 0o700); err != nil {
+			t.Fatal("could not restore temp root mode")
+		}
+	})
+	t.Setenv("TMPDIR", tmpRoot)
+
+	called := false
+	err := withStagedStack(context.Background(), project, sourcePath, stagePassphrase, stagedStackValues(), func(string) error {
+		called = true
+		return nil
+	})
+	assertStagedStackErrorRedacted(t, err, stagePassphrase, stageSecrets, stageRevision)
+	if !errors.Is(err, errInvalidStagedStack) {
+		t.Fatal("withStagedStack did not reject hostile temp root")
+	}
+	if called {
+		t.Fatal("operation called with hostile temp root")
+	}
+	assertStagedStackSourceUnchanged(t, sourcePath, source, before)
+	assertStagedStackTempRootEmpty(t, tmpRoot)
+}
+
 func TestWithStagedStackSourceRejectsChangedSnapshot(t *testing.T) {
 	project, source, _, _ := stagedStackFixture(t)
 	sourcePath := writeStagedStackSource(t, source)
