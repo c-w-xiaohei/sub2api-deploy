@@ -18,6 +18,13 @@ var releaseArtifactPattern = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
 
 type hostResource struct{ pulumi.CustomResourceState }
 
+type managedRedisInputs struct {
+	ProviderID pulumi.StringInput
+	Endpoint   pulumi.StringInput
+	Port       pulumi.IntInput
+	Password   pulumi.StringInput
+}
+
 func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYAML []byte) error {
 	config, err := environment.ParseConfig(configYAML)
 	if err != nil {
@@ -38,7 +45,7 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		return err
 	}
 
-	managedRedis := make(map[string]*upstash.RedisDatabase)
+	managedRedis := make(map[string]managedRedisInputs)
 	for _, id := range sortedRedisIDs(validated.Config) {
 		service := validated.Redis[id]
 		if service.Type != "upstash" {
@@ -58,7 +65,12 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		if err != nil {
 			return err
 		}
-		managedRedis[id] = database
+		managedRedis[id] = managedRedisInputs{
+			ProviderID: database.ID().ToStringOutput(),
+			Endpoint:   database.Endpoint,
+			Port:       database.Port,
+			Password:   pulumi.ToSecret(database.Password).(pulumi.StringOutput),
+		}
 	}
 
 	var cloudflareProvider *cloudflare.Provider
@@ -71,26 +83,9 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		}
 	}
 
-	hosts := make(map[string]*hostResource, len(validated.ServerIDs))
-	for _, serverID := range validated.ServerIDs {
-		var host hostResource
-		var options []pulumi.ResourceOption
-		if dependencies := appDependencies(serverID, validated.Config, hosts); len(dependencies) != 0 {
-			options = append(options, pulumi.DependsOn(dependencies))
-		}
-		err := ctx.RegisterResource(hostresource.HostToken, "host-"+serverID, pulumi.Map{
-			"resource": pulumi.Map{
-				"environment": pulumi.String(ctx.Stack()),
-				"serverKey":   pulumi.String(serverID),
-			},
-			"server": pulumi.Map{"sshAlias": pulumi.String(validated.Servers[serverID].SSHAlias)},
-			"target": hostTarget(validated.Config, releaseArtifact, serverID, managedRedis),
-			"secrets": hostSecrets(validated.Config, secrets, serverID, managedRedis),
-		}, &host, options...)
-		if err != nil {
-			return err
-		}
-		hosts[serverID] = &host
+	hosts, err := registerHosts(ctx, validated, secrets, releaseArtifact, managedRedis)
+	if err != nil {
+		return err
 	}
 
 	if cloudflareProvider == nil {
@@ -122,6 +117,31 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		}
 	}
 	return nil
+}
+
+func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, secrets environment.Secrets, release string, managed map[string]managedRedisInputs) (map[string]*hostResource, error) {
+	hosts := make(map[string]*hostResource, len(validated.ServerIDs))
+	for _, serverID := range validated.ServerIDs {
+		var host hostResource
+		var options []pulumi.ResourceOption
+		if dependencies := appDependencies(serverID, validated.Config, hosts); len(dependencies) != 0 {
+			options = append(options, pulumi.DependsOn(dependencies))
+		}
+		err := ctx.RegisterResource(hostresource.HostToken, "host-"+serverID, pulumi.Map{
+			"resource": pulumi.Map{
+				"environment": pulumi.String(ctx.Stack()),
+				"serverKey":   pulumi.String(serverID),
+			},
+			"server": pulumi.Map{"sshAlias": pulumi.String(validated.Servers[serverID].SSHAlias)},
+			"target": hostTarget(validated.Config, release, serverID, managed),
+			"secrets": hostSecrets(validated.Config, secrets, serverID, managed),
+		}, &host, options...)
+		if err != nil {
+			return nil, err
+		}
+		hosts[serverID] = &host
+	}
+	return hosts, nil
 }
 
 func preflight(config environment.ValidatedConfig) error {
@@ -180,7 +200,7 @@ func rejectCrossHostDocker(appID, kind, serviceType, serviceServer string, appSe
 	return nil
 }
 
-func hostTarget(config environment.Config, release, server string, managed map[string]*upstash.RedisDatabase) pulumi.Map {
+func hostTarget(config environment.Config, release, server string, managed map[string]managedRedisInputs) pulumi.Map {
 	apps := pulumi.Array{}
 	for _, id := range sortedAppIDs(config) {
 		app := config.Apps[id]
@@ -249,10 +269,10 @@ func redisLink(id, database string, service environment.Redis) pulumi.Map {
 	}}
 }
 
-func managedRedisLink(id, database string, service *upstash.RedisDatabase) pulumi.Map {
+func managedRedisLink(id, database string, service managedRedisInputs) pulumi.Map {
 	return pulumi.Map{"name": pulumi.String(id), "identity": pulumi.Map{
 		"kind":       pulumi.String("redis"),
-		"providerId": service.ID(),
+		"providerId": service.ProviderID,
 		"endpoint":   service.Endpoint,
 		"port":       service.Port,
 		"database":   pulumi.String(database),
@@ -276,7 +296,7 @@ func localServices(config environment.Config, server string) pulumi.Array {
 	return services
 }
 
-func hostSecrets(config environment.Config, secrets environment.Secrets, server string, managed map[string]*upstash.RedisDatabase) pulumi.Input {
+func hostSecrets(config environment.Config, secrets environment.Secrets, server string, managed map[string]managedRedisInputs) pulumi.Input {
 	apps := pulumi.Map{}
 	for _, id := range sortedAppIDs(config) {
 		app := config.Apps[id]
