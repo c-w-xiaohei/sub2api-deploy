@@ -33,5 +33,8 @@ func register(ctx *pulumi.Context, executablePath string) error {
 	if err != nil {
 		return fmt.Errorf("invalid environment artifact bundle")
 	}
-	return program.Register(ctx, bundle.Manifest.Release, []byte(config), []byte(secrets))
+	if err := program.Register(ctx, bundle.Manifest.Release, []byte(config), []byte(secrets)); err != nil {
+		return fmt.Errorf("environment registration failed")
+	}
+	return nil
 }
