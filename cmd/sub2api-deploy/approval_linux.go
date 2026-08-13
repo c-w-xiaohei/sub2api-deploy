@@ -17,6 +17,14 @@ import (
 const maxApprovalSubjectSize = 64 * 1024
 const maxApprovalResponseSize = 74
 
+func terminalApproval(ctx context.Context, subject hostcontract.ApprovalSubject) bool {
+	return terminalApprovalFromPath(ctx, subject, "/dev/tty")
+}
+
+func terminalApprovalFromPath(context.Context, hostcontract.ApprovalSubject, string) bool {
+	return false
+}
+
 func terminalApprovalDecision(ctx context.Context, subject hostcontract.ApprovalSubject, input io.Reader, output io.Writer) bool {
 	if ctx == nil || input == nil || output == nil || ctx.Err() != nil || subject.Validate() != nil {
 		return false

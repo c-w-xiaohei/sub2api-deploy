@@ -14,7 +14,32 @@ import (
 	"testing"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/pkg/term/termios"
 )
+
+func TestTerminalApprovalAdapterRequiresTerminalAndAcceptsExactPTYChallenge(t *testing.T) {
+	if terminalApprovalFromPath(context.Background(), approvalTestSubject(), "/dev/null") {
+		t.Fatal("non-terminal approval input was accepted")
+	}
+	master, slave, err := termios.Pty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	path := slave.Name()
+	canonical, err := json.Marshal(approvalTestSubject())
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(canonical)
+	if _, err := master.Write([]byte("APPROVE " + hex.EncodeToString(digest[:]) + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !terminalApprovalFromPath(context.Background(), approvalTestSubject(), path) {
+		t.Fatal("exact approval challenge from a terminal was denied")
+	}
+}
 
 func TestTerminalApprovalRequiresExactCanonicalChallenge(t *testing.T) {
 	subject := approvalTestSubject()
