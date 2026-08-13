@@ -175,10 +175,12 @@ func TestAttachedPulumiEnvUsesOnlyLastEffectiveDebugProviderValue(t *testing.T) 
 
 func TestRunAttachedFailsWhenProviderExitsAfterPublishingPortAndStopsPulumi(t *testing.T) {
 	paths := attachedHelperPaths(t)
-	pulumiLog, cleanupLog := filepath.Join(t.TempDir(), "pulumi.log"), filepath.Join(t.TempDir(), "cleanup.log")
+	directory := t.TempDir()
+	pulumiLog, cleanupLog := filepath.Join(directory, "pulumi.log"), filepath.Join(directory, "cleanup.log")
+	pulumiReady := attachedFIFO(t, filepath.Join(directory, "pulumi-ready"))
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	err := runAttached(ctx, paths, []string{"up"}, append(os.Environ(), "SUB2API_ATTACHED_PROVIDER_MODE=exit-after-port", "SUB2API_ATTACHED_PULUMI_MODE=blocked", "SUB2API_ATTACHED_PULUMI_LOG="+pulumiLog, "SUB2API_ATTACHED_CLEANUP_LOG="+cleanupLog), io.Discard, io.Discard, func(context.Context, hostcontract.ApprovalSubject) bool { return false })
+	err := runAttached(ctx, paths, []string{"up"}, append(os.Environ(), "SUB2API_ATTACHED_PROVIDER_MODE=exit-after-pulumi-ready", "SUB2API_ATTACHED_PULUMI_MODE=blocked", "SUB2API_ATTACHED_PULUMI_LOG="+pulumiLog, "SUB2API_ATTACHED_PULUMI_READY="+pulumiReady.name, "SUB2API_ATTACHED_CLEANUP_LOG="+cleanupLog), io.Discard, io.Discard, func(context.Context, hostcontract.ApprovalSubject) bool { return false })
 	if err == nil || errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), attachedCanary) {
 		t.Fatalf("provider early exit error = %v", err)
 	}
@@ -358,6 +360,7 @@ case "$SUB2API_ATTACHED_PROVIDER_MODE" in
   oversize-no-newline) i=0; while [ "$i" -lt 1025 ]; do printf 9; i=$((i + 1)); done; cat <&3 >/dev/null; printf '%s\n' closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0 ;;
   blocked) cat <&3 >/dev/null; printf '%s\n' closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0 ;;
   exit-after-port) printf '%s\n' 43123; exit 0 ;;
+  exit-after-pulumi-ready) printf '%s\n' 43123; read _ < "$SUB2API_ATTACHED_PULUMI_READY"; exit 0 ;;
   close-approval) printf '%s\n' 43123; exec 3>&-; while :; do :; done ;;
   close-approval-before-port) exec 3>&-; trap 'printf "%s\\n" closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0' INT TERM; while :; do :; done ;;
   close-approval-after-port) printf '%s\n' 43123; read _ < "$SUB2API_ATTACHED_PROVIDER_RELEASE"; exec 3>&-; trap 'printf x > "$SUB2API_ATTACHED_PROVIDER_EXITED"' EXIT; exit 0 ;;
