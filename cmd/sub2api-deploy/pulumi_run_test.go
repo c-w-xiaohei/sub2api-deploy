@@ -24,6 +24,7 @@ import (
 const (
 	pulumiRunPassphrase = stagePassphrase
 	pulumiRunRuntime    = "PULUMI_RUNTIME_SECRET_CANARY"
+	pulumiRunSOPSKey    = "PULUMI_SOPS_KEY_CANARY"
 )
 
 func TestPreparePulumiStackValuesSeparatesPassphraseFromProgramSecrets(t *testing.T) {
@@ -115,7 +116,7 @@ func TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi(t *testing
 	for _, want := range []string{
 		"cwd=" + workdir,
 		"args=<up><--stack=production><--config-file=", "<--yes><--message=release>",
-		"fd3=no", "approval=", "passphrase=absent", "runtime=absent",
+		"fd3=no", "approval=", "passphrase=absent", "runtime=absent", "sops=absent",
 	} {
 		if !strings.Contains(data, want) {
 			t.Fatalf("Pulumi observation missing %q", want)
@@ -226,7 +227,7 @@ func assertPulumiRunRedacted(t *testing.T, err error, canaries ...string) {
 func assertPulumiRunTextRedacted(t *testing.T, values ...string) {
 	t.Helper()
 	for _, value := range values {
-		for _, canary := range []string{pulumiRunPassphrase, pulumiRunRuntime, "PULUMI_REVISION_KEY_CANARY"} {
+		for _, canary := range []string{pulumiRunPassphrase, pulumiRunRuntime, pulumiRunSOPSKey, "PULUMI_REVISION_KEY_CANARY"} {
 			if strings.Contains(value, canary) { t.Fatal("output exposed secret") }
 		}
 	}
@@ -254,10 +255,11 @@ func pulumiRunFixture(t *testing.T, sopsOutput []byte, pulumiMode string) (strin
 	before := pulumiRunSource{bytes: append([]byte(nil), sourceBytes...), info: beforeInfo, manager: manager}
 	logs := pulumiRunLogs{pulumi: filepath.Join(logsDir, "pulumi"), staged: filepath.Join(logsDir, "staged"), cleanup: filepath.Join(logsDir, "cleanup"), providerStarted: filepath.Join(logsDir, "provider-started"), stagedParent: filepath.Join(logsDir, "staged-parent")}
 	writeAttachedExecutable(t, filepath.Join(bin, "sub2api-deploy"), "#!/bin/sh\nexit 0\n")
-	writeAttachedExecutable(t, filepath.Join(bin, "sops"), "#!/bin/sh\nprintf '%s' '"+strings.ReplaceAll(string(sopsOutput), "'", "'\\''")+"'\n")
-	writeAttachedExecutable(t, filepath.Join(bin, "pulumi-resource-sub2api-host"), "#!/bin/sh\nprintf x > '"+logs.providerStarted+"'\nprintf '%s\\n' 43123\ncat <&3 >/dev/null\nprintf '%s\\n' closed > '"+logs.cleanup+"'\n")
-	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; esac; done\nprintf '\\nfd3=' >> '"+logs.pulumi+"'; if [ -e /proc/self/fd/3 ]; then printf yes >> '"+logs.pulumi+"'; else printf no >> '"+logs.pulumi+"'; fi\nprintf '\\napproval=%s\\n' \"$SUB2API_HOST_APPROVAL_FD\" >> '"+logs.pulumi+"'\nprintf 'passphrase=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunPassphrase+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\nprintf '\\nruntime=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunRuntime+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
+	writeAttachedExecutable(t, filepath.Join(bin, "sops"), "#!/bin/sh\n[ \"$SOPS_AGE_KEY\" = '"+pulumiRunSOPSKey+"' ] || exit 24\nprintf '%s' '"+strings.ReplaceAll(string(sopsOutput), "'", "'\\''")+"'\n")
+	writeAttachedExecutable(t, filepath.Join(bin, "pulumi-resource-sub2api-host"), "#!/bin/sh\nif env | grep -q '"+pulumiRunSOPSKey+"'; then exit 25; fi\nprintf x > '"+logs.providerStarted+"'\nprintf '%s\\n' 43123\ncat <&3 >/dev/null\nprintf '%s\\n' closed > '"+logs.cleanup+"'\n")
+	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; esac; done\nprintf '\\nfd3=' >> '"+logs.pulumi+"'; if [ -e /proc/self/fd/3 ]; then printf yes >> '"+logs.pulumi+"'; else printf no >> '"+logs.pulumi+"'; fi\nprintf '\\napproval=%s\\n' \"$SUB2API_HOST_APPROVAL_FD\" >> '"+logs.pulumi+"'\nprintf 'passphrase=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunPassphrase+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\nprintf '\\nruntime=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunRuntime+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\nprintf '\\nsops=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunSOPSKey+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SOPS_AGE_KEY", pulumiRunSOPSKey)
 	return workdir, filepath.Join(bin, "sub2api-deploy"), source, before, logs
 }
 
