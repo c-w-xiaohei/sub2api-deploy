@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	pulumiRunPassphrase = "PULUMI_PASSPHRASE_CANARY"
+	pulumiRunPassphrase = stagePassphrase
 	pulumiRunRuntime    = "PULUMI_RUNTIME_SECRET_CANARY"
 )
 
