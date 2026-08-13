@@ -360,7 +360,7 @@ case "$SUB2API_ATTACHED_PROVIDER_MODE" in
   oversize-no-newline) i=0; while [ "$i" -lt 1025 ]; do printf 9; i=$((i + 1)); done; cat <&3 >/dev/null; printf '%s\n' closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0 ;;
   blocked) cat <&3 >/dev/null; printf '%s\n' closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0 ;;
   exit-after-port) printf '%s\n' 43123; exit 0 ;;
-  exit-after-pulumi-ready) printf '%s\n' 43123; read _ < "$SUB2API_ATTACHED_PULUMI_READY"; exit 0 ;;
+  exit-after-pulumi-ready) printf '%s\n' 43123; dd if="$SUB2API_ATTACHED_PULUMI_READY" of=/dev/null bs=1 count=1 2>/dev/null; exit 0 ;;
   close-approval) printf '%s\n' 43123; exec 3>&-; while :; do :; done ;;
   close-approval-before-port) exec 3>&-; trap 'printf "%s\\n" closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0' INT TERM; while :; do :; done ;;
   close-approval-after-port) printf '%s\n' 43123; read _ < "$SUB2API_ATTACHED_PROVIDER_RELEASE"; exec 3>&-; trap 'printf x > "$SUB2API_ATTACHED_PROVIDER_EXITED"' EXIT; exit 0 ;;
