@@ -10,8 +10,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"os"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"golang.org/x/sys/unix"
 )
 
 const maxApprovalSubjectSize = 64 * 1024
@@ -21,8 +23,30 @@ func terminalApproval(ctx context.Context, subject hostcontract.ApprovalSubject)
 	return terminalApprovalFromPath(ctx, subject, "/dev/tty")
 }
 
-func terminalApprovalFromPath(context.Context, hostcontract.ApprovalSubject, string) bool {
-	return false
+func terminalApprovalFromPath(ctx context.Context, subject hostcontract.ApprovalSubject, path string) bool {
+	if ctx == nil || path == "" || ctx.Err() != nil {
+		return false
+	}
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOCTTY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return false
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return false
+	}
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFCHR {
+		return false
+	}
+	if _, err := unix.IoctlGetTermios(fd, unix.TCGETS); err != nil {
+		return false
+	}
+	stopCancellation := context.AfterFunc(ctx, func() { _ = file.Close() })
+	defer stopCancellation()
+	return terminalApprovalDecision(ctx, subject, file, file)
 }
 
 func terminalApprovalDecision(ctx context.Context, subject hostcontract.ApprovalSubject, input io.Reader, output io.Writer) bool {

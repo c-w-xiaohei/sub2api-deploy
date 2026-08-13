@@ -68,6 +68,11 @@ func TestTerminalApprovalAdapterCancellationClosesBlockedTerminalRead(t *testing
 	case <-time.After(2 * time.Second):
 		t.Fatal("approval adapter did not write a prompt")
 	}
+	select {
+	case approved := <-done:
+		t.Fatalf("terminal approval returned before cancellation: approved=%t", approved)
+	case <-time.After(50 * time.Millisecond):
+	}
 	cancel()
 	select {
 	case approved := <-done:
