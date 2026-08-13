@@ -921,8 +921,12 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 		if e = r.writeArtifact(candidate.Env, envBytes(a, (*q.Secrets).Apps[a.ID]), 0600); e != nil {
 			return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
 		}
+		dataToken := appDataToken(token)
+		if e = r.ensureDataDir(dataToken); e != nil {
+			return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
+		}
 		if !exists {
-			if e = r.docker(ctx, "run", "-d", "--restart", "unless-stopped", "--label", "sub2api.host="+ownershipLabelFor(s.Resource, s.Ownership, "app", token, inactive), "--label", "sub2api.host.target="+targetLabelFor(candidate), "--name", candidate.Name, "--network", networkName(s), "--env-file", r.artifactPath(candidate.Env), a.Image); e != nil {
+			if e = r.docker(ctx, "run", "-d", "--restart", "unless-stopped", "--label", "sub2api.host="+ownershipLabelFor(s.Resource, s.Ownership, "app", token, inactive), "--label", "sub2api.host.target="+targetLabelFor(candidate), "--name", candidate.Name, "--network", networkName(s), "--env-file", r.artifactPath(candidate.Env), "-v", r.dataPath(dataToken)+":/app/data", a.Image); e != nil {
 				if exists, observed := r.candidateExists(ctx, inv, candidate); observed != nil {
 					return hostprotocol.Result{}, hostcontract.StableObservation{}, observed
 				} else if !exists {
@@ -1545,6 +1549,7 @@ func (r *Runtime) candidateExists(ctx context.Context, inv inventory, o managedO
 	return r.ownedPresent(ctx, inv, o)
 }
 func appToken(id string) string { return token("app", id) }
+func appDataToken(app string) string { return token("app-data", app) }
 func objectName(s State, role, app, slot string) string {
 	return "s2h-" + token(s.Resource.Environment, s.Resource.ServerKey, s.Ownership.Value, role, app, slot)
 }
