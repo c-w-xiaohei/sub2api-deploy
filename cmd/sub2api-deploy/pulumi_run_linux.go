@@ -118,12 +118,12 @@ func runPulumiPlan(ctx context.Context, plan pulumiPlan, workdir, cliPath string
 	if err != nil {
 		return errInvalidPulumiInputs
 	}
-	childEnv := pulumiChildEnv(env)
-	sopsPath, err := resolveSOPS(childEnv)
+	sopsEnv, childEnv := pulumiProcessEnvs(env)
+	sopsPath, err := resolveSOPS(sopsEnv)
 	if err != nil {
 		return errInvalidPulumiInputs
 	}
-	secretsYAML, err := decryptPulumiSecrets(ctx, sopsPath, resolvedWorkdir, paths.Secrets, childEnv)
+	secretsYAML, err := decryptPulumiSecrets(ctx, sopsPath, resolvedWorkdir, paths.Secrets, sopsEnv)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -180,15 +180,19 @@ func readBoundedPulumiFile(path string) ([]byte, error) {
 	return contents, nil
 }
 
-func pulumiChildEnv(env []string) []string {
-	result := make([]string, 0, len(env))
+func pulumiProcessEnvs(env []string) ([]string, []string) {
+	sopsEnv := make([]string, 0, len(env))
+	childEnv := make([]string, 0, len(env))
 	for _, value := range env {
 		if strings.HasPrefix(value, "PULUMI_CONFIG_PASSPHRASE=") || strings.HasPrefix(value, "PULUMI_CONFIG_PASSPHRASE_FILE=") {
 			continue
 		}
-		result = append(result, value)
+		sopsEnv = append(sopsEnv, value)
+		if !strings.HasPrefix(value, "SOPS_") {
+			childEnv = append(childEnv, value)
+		}
 	}
-	return result
+	return sopsEnv, childEnv
 }
 
 func resolveSOPS(env []string) (string, error) {
