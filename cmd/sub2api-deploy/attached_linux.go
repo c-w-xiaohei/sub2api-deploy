@@ -56,6 +56,10 @@ func attachedSocketpair() (*os.File, *os.File, error) {
 }
 
 func runAttached(ctx context.Context, paths attachedExecutables, args, env []string, stdout, stderr io.Writer, decide func(context.Context, hostcontract.ApprovalSubject) bool) error {
+	return runAttachedIn(ctx, paths, "", args, env, stdout, stderr, decide)
+}
+
+func runAttachedIn(ctx context.Context, paths attachedExecutables, workdir string, args, env []string, stdout, stderr io.Writer, decide func(context.Context, hostcontract.ApprovalSubject) bool) error {
 	if ctx == nil || decide == nil {
 		return fmt.Errorf("attached execution is unavailable")
 	}
@@ -85,6 +89,7 @@ func runAttached(ctx context.Context, paths attachedExecutables, args, env []str
 	defer output.Close()
 	provider := exec.Command(paths.provider)
 	provider.Env, provider.Stdout, provider.Stderr = attachedProviderEnv(env), outputWriter, io.Discard
+	provider.Dir = workdir
 	provider.ExtraFiles = []*os.File{child}
 	if err := provider.Start(); err != nil {
 		_ = outputWriter.Close()
@@ -143,6 +148,7 @@ func runAttached(ctx context.Context, paths attachedExecutables, args, env []str
 	}
 	pulumi := exec.Command(paths.pulumi, args...)
 	pulumi.Env, pulumi.Stdout, pulumi.Stderr = attachedPulumiEnv(env, port), stdout, stderr
+	pulumi.Dir = workdir
 	if err := pulumi.Start(); err != nil {
 		cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 		return fmt.Errorf("pulumi failed")
