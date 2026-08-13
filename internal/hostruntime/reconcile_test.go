@@ -201,6 +201,33 @@ func TestAppRunUsesRestartUnlessStoppedAndDefaultDrain(t *testing.T) {
 	}
 }
 
+func TestAppBlueGreenSlotsSharePreservedDataDirectory(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), app("one", "old"))); err != nil {
+		t.Fatal(err)
+	}
+	data := rt.dataPath(token("app-data", appToken("one")))
+	if !runner.anyArg("-v", data+":/app/data") {
+		t.Fatalf("initial app data mount = %#v", runner.calls)
+	}
+	if err := os.WriteFile(filepath.Join(data, "sentinel"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = rt.readState()
+	runner.calls = nil
+	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionC(), app("one", "new"))); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.anyArg("-v", data+":/app/data") {
+		t.Fatalf("replacement app data mount = %#v", runner.calls)
+	}
+	if got, err := os.ReadFile(filepath.Join(data, "sentinel")); err != nil || string(got) != "keep" {
+		t.Fatalf("preserved app data = %q, %v", got, err)
+	}
+}
+
 func TestEveryRunRoleUsesExactKeyedOwnershipAndTargetLabels(t *testing.T) {
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
