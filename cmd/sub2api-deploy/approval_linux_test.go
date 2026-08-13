@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/pkg/term/termios"
@@ -38,6 +39,43 @@ func TestTerminalApprovalAdapterRequiresTerminalAndAcceptsExactPTYChallenge(t *t
 	}
 	if !terminalApprovalFromPath(context.Background(), approvalTestSubject(), path) {
 		t.Fatal("exact approval challenge from a terminal was denied")
+	}
+}
+
+func TestTerminalApprovalAdapterCancellationClosesBlockedTerminalRead(t *testing.T) {
+	master, slave, err := termios.Pty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() {
+		done <- terminalApprovalFromPath(ctx, approvalTestSubject(), slave.Name())
+	}()
+	prompt := make(chan error, 1)
+	go func() {
+		var one [1]byte
+		_, err := master.Read(one[:])
+		prompt <- err
+	}()
+	select {
+	case err := <-prompt:
+		if err != nil {
+			t.Fatalf("approval prompt read = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval adapter did not write a prompt")
+	}
+	cancel()
+	select {
+	case approved := <-done:
+		if approved {
+			t.Fatal("cancelled terminal approval was accepted")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled terminal approval remained blocked")
 	}
 }
 
