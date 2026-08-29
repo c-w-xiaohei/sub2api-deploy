@@ -96,7 +96,12 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		if app.PublicAccess.Type != "cloudflare" {
 			continue
 		}
-		for _, serverID := range sortedStrings(app.PublicAccess.Servers) {
+		publicServers := sortedStrings(app.PublicAccess.Servers)
+		publicHostDependencies := make([]pulumi.Resource, 0, len(publicServers))
+		for _, serverID := range publicServers {
+			publicHostDependencies = append(publicHostDependencies, hosts[serverID])
+		}
+		for _, serverID := range publicServers {
 			for _, address := range publicAddresses(validated.Servers[serverID]) {
 				recordType := "A"
 				if net.ParseIP(address).To4() == nil {
@@ -109,7 +114,7 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 					Ttl:     pulumi.Float64(1),
 					Type:    pulumi.String(recordType),
 					ZoneId:  pulumi.String(validated.Cloudflare.ZoneID),
-				}, pulumi.Provider(cloudflareProvider), pulumi.DependsOn([]pulumi.Resource{hosts[serverID]}))
+				}, pulumi.Provider(cloudflareProvider), pulumi.DependsOn(publicHostDependencies))
 				if err != nil {
 					return err
 				}

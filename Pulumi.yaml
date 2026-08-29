@@ -1,6 +1,6 @@
-name: sub2api-vps-deploy
+name: sub2api-environment
 runtime:
   name: go
   options:
     binary: ./bin/pulumi-program
-description: Direct Pulumi deployment of Sub2API onto the local VPS.
+description: Pulumi deployment of the Sub2API environment.

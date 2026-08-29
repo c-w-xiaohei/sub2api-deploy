@@ -28,7 +28,7 @@ printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:
 	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+sshLog+"\"\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	var stdout, stderr strings.Builder
-	if err := run([]string{"validate", "production"}, root, &stdout, &stderr); err != nil {
+	if err := run([]string{"validate", "production"}, root, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("run error = %v, stderr = %s", err, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "environment: production") || !strings.Contains(stdout.String(), "servers: 1") || !strings.Contains(stdout.String(), "apps: 1") {
@@ -66,7 +66,7 @@ printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:
 	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nprintf '%s\\n' 'fake command output CLI_SECRET_SENTINEL' >&2\nexit 7\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	var stdout, stderr strings.Builder
-	if err := run([]string{"validate", "production"}, root, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "Edge_Box") || !strings.Contains(err.Error(), "expand") {
+	if err := run([]string{"validate", "production"}, root, nil, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "Edge_Box") || !strings.Contains(err.Error(), "expand") {
 		t.Fatalf("run error = %v", err)
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "CLI_SECRET_SENTINEL") || strings.Contains(stdout.String()+stderr.String(), "fake command output") {
@@ -94,7 +94,7 @@ printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:
 	sshLog := filepath.Join(root, "ssh.log")
 	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+sshLog+"\"\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := run([]string{"validate", "production"}, root, io.Discard, io.Discard); err != nil {
+	if err := run([]string{"validate", "production"}, root, nil, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	sshOutput, err := os.ReadFile(sshLog)
@@ -107,10 +107,10 @@ printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:
 }
 
 func TestPublicCLIWiresPulumiProviderAndApproval(t *testing.T) {
-	workdir, _, _, _, logs := pulumiRunFixture(t, pulumiRunSecrets(), "success")
+	workdir, cli, _, _, logs := pulumiRunFixture(t, pulumiRunSecrets(), "success")
 
 	var stdout, stderr strings.Builder
-	if err := run([]string{"pulumi", "production", "preview"}, workdir, &stdout, &stderr); err != nil {
+	if err := run([]string{"pulumi", "production", "preview"}, workdir, func() (string, error) { return cli, nil }, &stdout, &stderr); err != nil {
 		t.Fatalf("run error = %v, stderr = %s", err, stderr.String())
 	}
 
@@ -134,7 +134,7 @@ func TestExecuteReturnsGetwdErrorWithoutPanicking(t *testing.T) {
 	var stdout, stderr strings.Builder
 	err := execute([]string{"validate", "production"}, func() (string, error) {
 		return "", os.ErrNotExist
-	}, &stdout, &stderr)
+	}, os.Executable, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "working directory") {
 		t.Fatalf("execute error = %v", err)
 	}
