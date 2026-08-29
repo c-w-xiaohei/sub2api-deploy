@@ -106,6 +106,30 @@ printf '%s\n' 'revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' 'apps:
 	}
 }
 
+func TestPublicCLIWiresPulumiProviderAndApproval(t *testing.T) {
+	workdir, _, _, _, logs := pulumiRunFixture(t, pulumiRunSecrets(), "success")
+
+	var stdout, stderr strings.Builder
+	if err := run([]string{"pulumi", "production", "preview"}, workdir, &stdout, &stderr); err != nil {
+		t.Fatalf("run error = %v, stderr = %s", err, stderr.String())
+	}
+
+	pulumi := pulumiRunRead(t, logs.pulumi)
+	for _, want := range []string{
+		"cwd=" + workdir,
+		"args=<preview><--stack=production><--config-file=",
+		"fd3=no",
+		"approval=\n",
+	} {
+		if !strings.Contains(pulumi, want) {
+			t.Fatalf("Pulumi invocation missing %q: %s", want, pulumi)
+		}
+	}
+	if _, err := os.Stat(logs.providerStarted); err != nil {
+		t.Fatalf("provider did not start: %v", err)
+	}
+}
+
 func TestExecuteReturnsGetwdErrorWithoutPanicking(t *testing.T) {
 	var stdout, stderr strings.Builder
 	err := execute([]string{"validate", "production"}, func() (string, error) {

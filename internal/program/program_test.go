@@ -119,22 +119,23 @@ func TestRegisterFoundationGraph(t *testing.T) {
 	if len(dns) != 2 {
 		t.Fatalf("Cloudflare DNS registrations = %d, want 2 public-server records", len(dns))
 	}
-	seenHosts := map[string]bool{}
+	seenAddresses := map[string]bool{}
 	for _, record := range dns {
 		assertProvider(t, record, cloudflare)
 		assertDNSInputs(t, record)
 		dependencies := directDependencies(record)
 		dependsAlpha, dependsBravo := containsURN(dependencies, alpha), containsURN(dependencies, bravo)
-		if dependsAlpha == dependsBravo {
-			t.Fatalf("DNS record %q must depend on exactly one corresponding Host: %v", record.Name, dependencies)
+		if len(dependencies) != 2 || !dependsAlpha || !dependsBravo {
+			t.Fatalf("DNS record %q must depend exactly on both public Hosts: %v", record.Name, dependencies)
 		}
-		if dependsAlpha { seenHosts[alpha.Name] = true }
-		if dependsBravo { seenHosts[bravo.Name] = true }
-		if dependsAlpha { assertDNSContent(t, record, "198.51.100.11") }
-		if dependsBravo { assertDNSContent(t, record, "198.51.100.12") }
+		content := stringValue(t, property(record.Inputs, "content"))
+		if content != "198.51.100.11" && content != "198.51.100.12" {
+			t.Fatalf("DNS content = %q, want a public server address", content)
+		}
+		seenAddresses[content] = true
 	}
-	if !seenHosts[alpha.Name] || !seenHosts[bravo.Name] {
-		t.Fatalf("DNS publication dependencies do not cover both public Hosts: %#v", seenHosts)
+	if !seenAddresses["198.51.100.11"] || !seenAddresses["198.51.100.12"] {
+		t.Fatalf("DNS publication content does not cover both public server addresses: %#v", seenAddresses)
 	}
 
 	for _, forbidden := range []string{"command:local:Command", "sub2api:host:Edge", "sub2api:host:Site", "neon:provider:Project"} {
