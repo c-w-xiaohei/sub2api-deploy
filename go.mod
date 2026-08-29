@@ -6,6 +6,7 @@ require (
 	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.18.0
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-go-provider v1.4.1
+	github.com/pulumi/pulumi/pkg/v3 v3.256.0
 	github.com/pulumi/pulumi/sdk/v3 v3.256.0
 	github.com/pkg/term v1.1.0
 	github.com/upstash/pulumi-upstash/sdk v0.5.0
@@ -78,7 +79,6 @@ require (
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pulumi/appdash v0.0.0-20231130102222-75f619a67231 // indirect
-	github.com/pulumi/pulumi/pkg/v3 v3.256.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06 // indirect
