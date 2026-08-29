@@ -49,6 +49,11 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Verify target Environment Program contract
+        run: |
+          npm ci
+          npx vitest run test/environment-program-target.test.ts
+
       - name: Verify repository
         run: bash scripts/verify-release.sh
 
