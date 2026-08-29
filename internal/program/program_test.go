@@ -151,6 +151,29 @@ func TestRegisterFoundationGraph(t *testing.T) {
 	}
 }
 
+func TestRegisterPublishesDNSOnlyForPublicAccessServers(t *testing.T) {
+	mocks := &recordingMocks{}
+	if err := runRegister(t, mocks, pinnedRelease, managedSinglePublicServerConfig(), managedSecrets()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	hosts := resourcesOfType(mocks.resources, hostresource.HostToken)
+	alpha, bravo := hostForServer(t, hosts, "alpha"), hostForServer(t, hosts, "bravo")
+	assertHostDependsOn(t, bravo, alpha)
+
+	dns := resourcesOfType(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord")
+	if len(dns) != 1 {
+		t.Fatalf("Cloudflare DNS registrations = %d, want 1 public-server record", len(dns))
+	}
+	record := dns[0]
+	assertDNSInputs(t, record)
+	assertDNSContent(t, record, "198.51.100.12")
+	dependencies := directDependencies(record)
+	if len(dependencies) != 1 || !containsURN(dependencies, bravo) || containsURN(dependencies, alpha) {
+		t.Fatalf("DNS record %q must depend exactly on public Host %q, not placement-only Host %q: %v", record.Name, bravo.Name, alpha.Name, dependencies)
+	}
+}
+
 func TestRegisterRejectsBeforeRegistration(t *testing.T) {
 	for _, tc := range []struct{ name, release, config, secrets string }{
 		{"strict YAML", pinnedRelease, managedConfig() + "\nunknown: true\n", managedSecrets()},
@@ -381,6 +404,7 @@ func normalizedDependencies(item pulumi.MockResourceArgs, all []pulumi.MockResou
 func sanitize(value resource.PropertyMap) string { var scrub func(resource.PropertyValue) any; scrub = func(value resource.PropertyValue) any { if value.IsSecret() { return scrub(value.SecretValue().Element) }; if value.IsComputed() { return "<computed>" }; if value.IsArray() { result := make([]any, len(value.ArrayValue())); for i, child := range value.ArrayValue() { result[i] = scrub(child) }; return result }; if value.IsObject() { result := map[string]any{}; for key, child := range value.ObjectValue() { result[string(key)] = scrub(child) }; return result }; return value.V }; result := map[string]any{}; for key, value := range value { result[string(key)] = scrub(value) }; bytes, _ := json.Marshal(result); return string(bytes) }
 
 func managedConfig() string { return baseConfig("external", "upstash", "cloudflare") }
+func managedSinglePublicServerConfig() string { return strings.Replace(managedConfig(), "servers: [alpha, bravo]\n      cloudflare:", "servers: [bravo]\n      cloudflare:", 1) }
 func externalConfig() string { return baseConfig("external", "external", "none") }
 func reorderedExternalConfig() string { return strings.Replace(externalConfig(), "  alpha:\n    sshAlias: alpha-ssh\n    addresses:\n      public:\n        ipv4: 198.51.100.11\n  bravo:\n    sshAlias: bravo-ssh\n    addresses:\n      public:\n        ipv4: 198.51.100.12", "  bravo:\n    sshAlias: bravo-ssh\n    addresses:\n      public:\n        ipv4: 198.51.100.12\n  alpha:\n    sshAlias: alpha-ssh\n    addresses:\n      public:\n        ipv4: 198.51.100.11", 1) }
 func maintenanceConfig() string { return strings.Replace(externalConfig(), "servers: [alpha, bravo]", "servers: []", 1) }
