@@ -26,7 +26,7 @@
 
 ### Task 1: Exact-SHA CI Evidence Foundation
 
-**Owns:** `.github/workflows/ci.yml`
+**Owns:** `.github/workflows/ci.yml`, `test/controller-ci.test.ts`
 
 **Depends on:** none
 
