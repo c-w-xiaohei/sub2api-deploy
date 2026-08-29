@@ -16,6 +16,9 @@ describe("Host controller CI evidence contract", () => {
   it("prepares the required offline OpenSSH environment without contacting a VPS", () => {
     expect(workflow).toMatch(/apt-get install[^\n]*openssh-server/);
     expect(workflow).toMatch(/command -v sshd/);
+    const prerequisite = workflow.indexOf("Prepare offline OpenSSH prerequisites");
+    expect(prerequisite).toBeGreaterThan(workflow.indexOf("Test Host controller"));
+    expect(prerequisite).toBeGreaterThan(workflow.indexOf("Race-test Host controller"));
   });
 
   it("records fixed candidate tests and fails skipped or absent evidence", () => {
@@ -33,7 +36,10 @@ describe("Host controller CI evidence contract", () => {
     expect(workflow).toContain("go test -json");
     expect(workflow).toContain('event.Action === "skip"');
     expect(workflow).toContain('event.Action === "pass"');
+    expect(workflow).toContain('event.Action === "fail"');
     expect(workflow).toContain("required test did not pass");
+    expect(workflow).toContain("test_status=$?");
+    expect(workflow).toContain('test "$test_status" -eq 0');
   });
 
   it("uploads SHA-bound JSON events and a common trace intake", () => {
@@ -42,5 +48,12 @@ describe("Host controller CI evidence contract", () => {
     expect(workflow).toMatch(/name:\s*controller-evidence-\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
     expect(workflow).toContain("events.jsonl");
     expect(workflow).toContain("metadata.json");
+    expect(workflow).toContain("if: always() && matrix.arch == 'amd64'");
+    const metadata = workflow.indexOf("metadata.json");
+    const events = workflow.indexOf("go test -json");
+    const parser = workflow.indexOf("required test did not pass");
+    expect(metadata).toBeLessThan(events);
+    expect(workflow.indexOf("trace/README.txt")).toBeLessThan(events);
+    expect(parser).toBeGreaterThan(events);
   });
 });
