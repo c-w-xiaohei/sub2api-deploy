@@ -37,6 +37,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.74.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.1.2 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.31.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.43.0 // indirect
 	github.com/aws/smithy-go v1.27.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
