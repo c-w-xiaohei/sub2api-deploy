@@ -34,6 +34,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.74.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.43.0 // indirect
+	github.com/aws/smithy-go v1.27.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
