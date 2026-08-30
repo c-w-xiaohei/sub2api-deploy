@@ -42,6 +42,7 @@ github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.26/go.mod h1:9G8LPblMwaodeQd
 github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.27 h1:8sPbKi1/KRHwl5oR3qN9mUXestCeHuaRutxylnr/eVY=
 github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.27/go.mod h1:QV9IVIopJ1dpQUno0f9VYDUwOEjj8u0iEJ4JiZVre3Y=
 github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.27 h1:9d8AoASQY9UwrOSmiJ7uSM0MGUPFhnenwSvpaFfat2c=
+github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.27/go.mod h1:x0rldpsnUQaQIs4Rh+Vwm9Z/0vI6BxadGtsgJfZFb8s=
 github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.74.4 h1:4GBRq2ZWJkOy6S4HRNuJJpaZ5KXPNIDe/QJysoyXglI=
 github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.74.4/go.mod h1:Op4lD9kBH1InUC+DxIALi0ALAASdpY71vRdtevYFVrs=
 github.com/aws/aws-sdk-go-v2/service/s3 v1.103.0 h1:BmOawMUDBUiFAMgk8zTp3w5iei2Vh5j4mwIHTXOuGTc=
