@@ -352,6 +352,7 @@ go.opentelemetry.io/collector/pdata v1.64.0 h1:P3HDQLm/ksHWBbaWqtlXhAvC/4lTL5pqI
 go.opentelemetry.io/collector/pdata v1.64.0/go.mod h1:aftmWhlLcl6WCUmquMr34Y2ufd+HtpQWu/zLQra2fGs=
 go.opentelemetry.io/contrib/bridges/otelslog v0.20.0 h1:oEl2Pw/i4OQwhAuda2pAHFAcOMivA+Xa+iTccBfab/g=
 go.opentelemetry.io/contrib/bridges/otelslog v0.20.0/go.mod h1:yMSQaiiq5dpfrSJCYLBcqFeJkFFI67seT4ngvx6jfVo=
+go.opentelemetry.io/contrib/detectors/gcp v1.44.0 h1:NmLfL734pJhM0JKaYd2Y28+nY9dPRWYAAbxhRCrKXPw=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0 h1:2yEATaop1/a1I4psnSLgWVPLWwCzkqWakgJy7xTDVy0=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0/go.mod h1:D7J12YRapIekYyPWgGPlA/23pRmpSEZC5xJC/TTLI9U=
 go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 h1:8tvICD4vSTOOsNrsI4Ljf6C+6UKvpTEH5XY3JMoyPoo=
