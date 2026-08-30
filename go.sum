@@ -34,6 +34,7 @@ github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ
 github.com/aws/aws-sdk-go-v2 v1.41.11 h1:9PRf7jyTMEUM6fuNRAJa2mO/skJfrF50rENJwf2LXqw=
 github.com/aws/aws-sdk-go-v2 v1.41.11/go.mod h1:iiUX27gOXRuYaoeUVXhUpPwjJHzISfPAjjcuhUbLSVs=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.12 h1:oRtsqWgxbpeXrOlxOoQStx2M9WNbIkPq4C4Xn1or6bc=
+github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.12/go.mod h1:Zg0Oe9qT+9wcezlm1a64wGJp2qZdRElVxo/seJf7jYU=
 github.com/aws/aws-sdk-go-v2/config v1.32.21 h1:1i1v5jWn6iNPl7zkH4VwIXQOb+OMqMRFNjdHQeZbFVo=
 github.com/aws/aws-sdk-go-v2/config v1.32.21/go.mod h1:7NXDJjk0e4QOMv3Y3ppwALx3ifdSQHzCACFtRX5J1hI=
 github.com/aws/aws-sdk-go-v2/credentials v1.19.20 h1:nIGz0+cQKwijxSsWNpggvPxjxFMtrAHNj16RYzGbu2Q=
