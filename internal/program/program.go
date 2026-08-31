@@ -3,7 +3,6 @@ package program
 import (
 	"fmt"
 	"net"
-	"reflect"
 	"regexp"
 	"sort"
 	"time"
@@ -24,154 +23,6 @@ type managedRedisInputs struct {
 	Endpoint   pulumi.StringInput
 	Port       pulumi.IntInput
 	Password   pulumi.StringInput
-}
-
-type hostRegistrationValue struct {
-	Resource map[string]any  `pulumi:"resource"`
-	Server   map[string]any  `pulumi:"server"`
-	Target   hostTargetValue `pulumi:"target"`
-	Secrets  map[string]any  `pulumi:"secrets"`
-}
-
-type hostRegistrationInputs struct {
-	Resource pulumi.MapInput  `pulumi:"resource"`
-	Server   pulumi.MapInput  `pulumi:"server"`
-	Target   hostTargetInputs `pulumi:"target"`
-	Secrets  pulumi.Input     `pulumi:"secrets"`
-}
-
-func (hostRegistrationInputs) ElementType() reflect.Type {
-	return reflect.TypeOf(hostRegistrationValue{})
-}
-
-type hostTargetValue struct {
-	ReleaseArtifact string                  `pulumi:"releaseArtifact"`
-	Apps            []hostAppValue          `pulumi:"apps"`
-	DataServices    []localDataServiceValue `pulumi:"dataServices"`
-	ReverseProxy    reverseProxyValue       `pulumi:"reverseProxy"`
-}
-
-type hostTargetInputs struct {
-	ReleaseArtifact string                    `pulumi:"releaseArtifact"`
-	Apps            hostAppInputsArray        `pulumi:"apps"`
-	DataServices    localDataServiceInputsArray `pulumi:"dataServices"`
-	ReverseProxy    reverseProxyInputs      `pulumi:"reverseProxy"`
-}
-
-func (hostTargetInputs) ElementType() reflect.Type {
-	return reflect.TypeOf(hostTargetValue{})
-}
-
-type hostAppValue struct {
-	ID               string            `pulumi:"id"`
-	Image            string            `pulumi:"image"`
-	Hostname         string            `pulumi:"hostname"`
-	ReadinessPath    string            `pulumi:"readinessPath"`
-	DrainTimeout     string            `pulumi:"drainTimeout"`
-	InitialBootstrap bool              `pulumi:"initialBootstrap"`
-	RuntimeSettings  map[string]string `pulumi:"runtimeSettings"`
-	DataLinks        []dataLinkValue   `pulumi:"dataLinks"`
-}
-
-type hostAppInputs struct {
-	ID               string                `pulumi:"id"`
-	Image            string                `pulumi:"image"`
-	Hostname         string                `pulumi:"hostname"`
-	ReadinessPath    string                `pulumi:"readinessPath"`
-	DrainTimeout     string                `pulumi:"drainTimeout"`
-	InitialBootstrap bool                  `pulumi:"initialBootstrap"`
-	RuntimeSettings  pulumi.StringMapInput `pulumi:"runtimeSettings"`
-	DataLinks        dataLinkInputsArray   `pulumi:"dataLinks"`
-}
-
-type hostAppInputsArray []hostAppInputs
-
-func (hostAppInputsArray) ElementType() reflect.Type {
-	return reflect.TypeOf([]hostAppValue{})
-}
-
-func (hostAppInputs) ElementType() reflect.Type {
-	return reflect.TypeOf(hostAppValue{})
-}
-
-type dataLinkValue struct {
-	Name     string           `pulumi:"name"`
-	Identity dataIdentityValue `pulumi:"identity"`
-}
-
-type dataLinkInputs struct {
-	Name     string              `pulumi:"name"`
-	Identity dataIdentityInputs `pulumi:"identity"`
-}
-
-type dataLinkInputsArray []dataLinkInputs
-
-func (dataLinkInputsArray) ElementType() reflect.Type {
-	return reflect.TypeOf([]dataLinkValue{})
-}
-
-func (dataLinkInputs) ElementType() reflect.Type {
-	return reflect.TypeOf(dataLinkValue{})
-}
-
-type dataIdentityValue struct {
-	Kind          string `pulumi:"kind"`
-	ProviderID    string `pulumi:"providerId"`
-	Endpoint      string `pulumi:"endpoint"`
-	Port          int    `pulumi:"port"`
-	Database      string `pulumi:"database"`
-	TLSServerName string `pulumi:"tlsServerName,optional"`
-}
-
-type dataIdentityInputs struct {
-	Kind          string             `pulumi:"kind"`
-	ProviderID    pulumi.StringInput `pulumi:"providerId"`
-	Endpoint      pulumi.StringInput `pulumi:"endpoint"`
-	Port          pulumi.IntInput    `pulumi:"port"`
-	Database      string             `pulumi:"database"`
-	TLSServerName pulumi.StringInput `pulumi:"tlsServerName,optional"`
-}
-
-func (dataIdentityInputs) ElementType() reflect.Type {
-	return reflect.TypeOf(dataIdentityValue{})
-}
-
-type localDataServiceValue struct {
-	ID          string `pulumi:"id"`
-	Type        string `pulumi:"type"`
-	Port        int    `pulumi:"port"`
-	Persistence bool   `pulumi:"persistence,optional"`
-}
-
-type localDataServiceInputs struct {
-	ID          pulumi.StringInput `pulumi:"id"`
-	Type        pulumi.StringInput `pulumi:"type"`
-	Port        pulumi.IntInput    `pulumi:"port"`
-	Persistence pulumi.BoolInput   `pulumi:"persistence,optional"`
-}
-
-type localDataServiceInputsArray []localDataServiceInputs
-
-func (localDataServiceInputsArray) ElementType() reflect.Type {
-	return reflect.TypeOf([]localDataServiceValue{})
-}
-
-func (localDataServiceInputs) ElementType() reflect.Type {
-	return reflect.TypeOf(localDataServiceValue{})
-}
-
-type reverseProxyValue struct {
-	Image     string `pulumi:"image"`
-	ACMEEmail string `pulumi:"acmeEmail"`
-}
-
-type reverseProxyInputs struct {
-	Image     string `pulumi:"image"`
-	ACMEEmail string `pulumi:"acmeEmail"`
-}
-
-func (reverseProxyInputs) ElementType() reflect.Type {
-	return reflect.TypeOf(reverseProxyValue{})
 }
 
 func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYAML []byte) error {
@@ -281,14 +132,14 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 		if dependencies := appDependencies(serverID, validated.Config, hosts); len(dependencies) != 0 {
 			options = append(options, pulumi.DependsOn(dependencies))
 		}
-		err := ctx.RegisterResource(hostresource.HostToken, "host-"+serverID, hostRegistrationInputs{
-			Resource: pulumi.Map{
+		err := ctx.RegisterResource(hostresource.HostToken, "host-"+serverID, pulumi.Map{
+			"resource": pulumi.Map{
 				"environment": pulumi.String(ctx.Stack()),
 				"serverKey":   pulumi.String(serverID),
 			},
-			Server:  pulumi.Map{"sshAlias": pulumi.String(validated.Servers[serverID].SSHAlias)},
-			Target:  hostTarget(validated.Config, release, serverID, managed),
-			Secrets: hostSecrets(validated.Config, secrets, serverID, managed),
+			"server": pulumi.Map{"sshAlias": pulumi.String(validated.Servers[serverID].SSHAlias)},
+			"target": hostTarget(validated.Config, release, serverID, managed),
+			"secrets": hostSecrets(validated.Config, secrets, serverID, managed),
 		}, &host, options...)
 		if err != nil {
 			return nil, err
@@ -354,15 +205,15 @@ func rejectCrossHostDocker(appID, kind, serviceType, serviceServer string, appSe
 	return nil
 }
 
-func hostTarget(config environment.Config, release, server string, managed map[string]managedRedisInputs) hostTargetInputs {
-	apps := hostAppInputsArray{}
+func hostTarget(config environment.Config, release, server string, managed map[string]managedRedisInputs) pulumi.Map {
+	apps := pulumi.Array{}
 	for _, id := range sortedAppIDs(config) {
 		app := config.Apps[id]
 		if !contains(app.Servers, server) {
 			continue
 		}
 		servers := sortedStrings(app.Servers)
-		links := dataLinkInputsArray{postgresLink(app.Postgres.Name, app.Postgres.Database, config.Postgres[app.Postgres.Name])}
+		links := pulumi.Array{postgresLink(app.Postgres.Name, app.Postgres.Database, config.Postgres[app.Postgres.Name])}
 		redis := config.Redis[app.Redis.Name]
 		if redis.Type == "upstash" {
 			links = append(links, managedRedisLink(app.Redis.Name, fmt.Sprint(app.Redis.Database), managed[app.Redis.Name]))
@@ -371,82 +222,80 @@ func hostTarget(config environment.Config, release, server string, managed map[s
 		}
 		settings := copyStringMap(app.Environment)
 		settings["ADMIN_EMAIL"] = app.InitialAdminEmail
-		apps = append(apps, hostAppInputs{
-			ID:               id,
-			Image:            app.Image,
-			Hostname:         app.Hostname,
-			ReadinessPath:    app.ReadinessPath,
-			DrainTimeout:     app.DrainTimeout.String(),
-			InitialBootstrap: server == servers[0],
-			RuntimeSettings:  stringMapInput(settings),
-			DataLinks:        links,
+		apps = append(apps, pulumi.Map{
+			"id":               pulumi.String(id),
+			"image":            pulumi.String(app.Image),
+			"hostname":         pulumi.String(app.Hostname),
+			"readinessPath":    pulumi.String(app.ReadinessPath),
+			"drainTimeout":     pulumi.String(app.DrainTimeout.String()),
+			"initialBootstrap": pulumi.Bool(server == servers[0]),
+			"runtimeSettings":  stringMapInput(settings),
+			"dataLinks":        links,
 		})
 	}
-	return hostTargetInputs{
-		ReleaseArtifact: release,
-		Apps:            apps,
-		DataServices:    localServices(config, server),
-		ReverseProxy: reverseProxyInputs{
-			Image:     config.ReverseProxy.Image,
-			ACMEEmail: config.ReverseProxy.AcmeEmail,
+	services := localServices(config, server)
+	return pulumi.Map{
+		"releaseArtifact": pulumi.String(release),
+		"apps":            apps,
+		"dataServices":    services,
+		"reverseProxy": pulumi.Map{
+			"image":     pulumi.String(config.ReverseProxy.Image),
+			"acmeEmail": pulumi.String(config.ReverseProxy.AcmeEmail),
 		},
 	}
 }
 
-func postgresLink(id, database string, service environment.Postgres) dataLinkInputs {
+func postgresLink(id, database string, service environment.Postgres) pulumi.Map {
 	endpoint := service.Host
 	if service.Type == "docker" {
 		endpoint = "postgres"
 	}
-	return dataLinkInputs{Name: id, Identity: dataIdentityInputs{
-		Kind:          "postgres",
-		ProviderID:    pulumi.String(id),
-		Endpoint:      pulumi.String(endpoint),
-		Port:          pulumi.Int(*service.Port),
-		Database:      database,
-		TLSServerName: pulumi.String(endpoint),
+	return pulumi.Map{"name": pulumi.String(id), "identity": pulumi.Map{
+		"kind":          pulumi.String("postgres"),
+		"providerId":    pulumi.String(id),
+		"endpoint":      pulumi.String(endpoint),
+		"port":          pulumi.Int(*service.Port),
+		"database":      pulumi.String(database),
+		"tlsServerName": pulumi.String(endpoint),
 	}}
 }
 
-func redisLink(id, database string, service environment.Redis) dataLinkInputs {
+func redisLink(id, database string, service environment.Redis) pulumi.Map {
 	endpoint := service.Host
 	if service.Type == "docker" {
 		endpoint = "redis"
 	}
-	return dataLinkInputs{Name: id, Identity: dataIdentityInputs{
-		Kind:       "redis",
-		ProviderID: pulumi.String(id),
-		Endpoint:   pulumi.String(endpoint),
-		Port:       pulumi.Int(*service.Port),
-		Database:   database,
+	return pulumi.Map{"name": pulumi.String(id), "identity": pulumi.Map{
+		"kind":       pulumi.String("redis"),
+		"providerId": pulumi.String(id),
+		"endpoint":   pulumi.String(endpoint),
+		"port":       pulumi.Int(*service.Port),
+		"database":   pulumi.String(database),
 	}}
 }
 
-func managedRedisLink(id, database string, service managedRedisInputs) dataLinkInputs {
-	return dataLinkInputs{
-		Name: id,
-		Identity: dataIdentityInputs{
-			Kind:       "redis",
-			ProviderID: service.ProviderID,
-			Endpoint:   service.Endpoint,
-			Port:       service.Port,
-			Database:   database,
-		},
-	}
+func managedRedisLink(id, database string, service managedRedisInputs) pulumi.Map {
+	return pulumi.Map{"name": pulumi.String(id), "identity": pulumi.Map{
+		"kind":       pulumi.String("redis"),
+		"providerId": service.ProviderID,
+		"endpoint":   service.Endpoint,
+		"port":       service.Port,
+		"database":   pulumi.String(database),
+	}}
 }
 
-func localServices(config environment.Config, server string) localDataServiceInputsArray {
-	services := localDataServiceInputsArray{}
+func localServices(config environment.Config, server string) pulumi.Array {
+	services := pulumi.Array{}
 	for _, id := range sortedPostgresIDs(config) {
 		service := config.Postgres[id]
 		if service.Type == "docker" && service.Server == server {
-			services = append(services, localDataServiceInputs{ID: pulumi.String(id), Type: pulumi.String("postgres"), Port: pulumi.Int(*service.Port)})
+			services = append(services, pulumi.Map{"id": pulumi.String(id), "type": pulumi.String("postgres"), "port": pulumi.Int(*service.Port)})
 		}
 	}
 	for _, id := range sortedRedisIDs(config) {
 		service := config.Redis[id]
 		if service.Type == "docker" && service.Server == server {
-			services = append(services, localDataServiceInputs{ID: pulumi.String(id), Type: pulumi.String("redis"), Port: pulumi.Int(*service.Port), Persistence: pulumi.Bool(*service.Persistence)})
+			services = append(services, pulumi.Map{"id": pulumi.String(id), "type": pulumi.String("redis"), "port": pulumi.Int(*service.Port), "persistence": pulumi.Bool(*service.Persistence)})
 		}
 	}
 	return services
@@ -535,8 +384,8 @@ func secretStringPtr(value string) pulumi.StringPtrInput {
 	return pulumi.ToSecret(pulumi.StringPtr(value)).(pulumi.StringPtrInput)
 }
 
-func stringMapInput(values map[string]string) pulumi.StringMap {
-	result := pulumi.StringMap{}
+func stringMapInput(values map[string]string) pulumi.Map {
+	result := pulumi.Map{}
 	for key, value := range values {
 		result[key] = pulumi.String(value)
 	}

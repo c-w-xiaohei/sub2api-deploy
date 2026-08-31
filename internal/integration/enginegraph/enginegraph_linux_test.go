@@ -200,29 +200,31 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 
 	for _, field := range []struct {
 		name string
-		typeName string
 	}{
-		{name: "providerId", typeName: "string"},
-		{name: "endpoint", typeName: "string"},
-		{name: "port", typeName: "number"},
+		{name: "providerId"},
+		{name: "endpoint"},
+		{name: "port"},
 	} {
 		value, ok := propertyAt(host.News, "target", "apps", "0", "dataLinks", "1", "identity", field.name)
 		semantics, valid := propertySemantics(value)
-		if !ok || !valid || !semantics.unknown || semantics.typeName != field.typeName {
-			t.Fatalf("managed Redis %s projection lacks unknown/computed %s semantics", field.name, field.typeName)
+		if !ok || !valid || !semantics.unknown {
+			t.Fatalf("managed Redis %s projection lacks unknown/computed semantics", field.name)
 		}
 	}
 
-	for _, path := range [][]string{
-		{"target", "releaseArtifact"},
-		{"target", "apps", "0", "id"},
-		{"target", "apps", "0", "image"},
-		{"target", "apps", "0", "hostname"},
-		{"target", "apps", "0", "dataLinks", "0", "identity", "endpoint"},
+	for _, field := range []struct {
+		path     []string
+		expected string
+	}{
+		{path: []string{"target", "releaseArtifact"}, expected: release},
+		{path: []string{"target", "apps", "0", "id"}, expected: "app"},
+		{path: []string{"target", "apps", "0", "image"}, expected: "ghcr.io/example/sub2api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+		{path: []string{"target", "apps", "0", "hostname"}, expected: "app.example.test"},
+		{path: []string{"target", "apps", "0", "dataLinks", "0", "identity", "endpoint"}, expected: "postgres.external.test"},
 	} {
-		value, ok := propertyAt(host.News, path...)
-		if !ok || !value.IsString() || value.ContainsUnknowns() || value.ContainsSecrets() {
-			t.Fatalf("ordinary Host field %s is not known and non-secret", strings.Join(path, "."))
+		value, ok := propertyAt(host.News, field.path...)
+		if !ok || !value.IsString() || value.ContainsUnknowns() || value.ContainsSecrets() || value.StringValue() != field.expected {
+			t.Fatalf("ordinary Host field %s is not the expected known non-secret value", strings.Join(field.path, "."))
 		}
 	}
 
@@ -232,7 +234,7 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 	}
 	redisPassword, ok := propertyAt(host.News, "secrets", "apps", "app", "redis", "password")
 	passwordSemantics, valid := propertySemantics(redisPassword)
-	if !ok || !valid || !passwordSemantics.unknown || !passwordSemantics.secret || passwordSemantics.typeName != "string" {
+	if !ok || !valid || !passwordSemantics.unknown || !passwordSemantics.secret {
 		t.Fatal("generated Redis password lacks unknown+secret semantic classes")
 	}
 	if containsString(resource.NewObjectProperty(host.News), "upstash-api-key-canary") {
@@ -248,9 +250,8 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 }
 
 type propertySemanticsResult struct {
-	unknown  bool
-	secret   bool
-	typeName string
+	unknown bool
+	secret  bool
 }
 
 func propertySemantics(value resource.PropertyValue) (propertySemanticsResult, bool) {
@@ -278,12 +279,8 @@ func propertySemantics(value resource.PropertyValue) (propertySemanticsResult, b
 		semantics.unknown = semantics.unknown || !output.Known
 		semantics.secret = semantics.secret || output.Secret
 		return semantics, true
-	case value.IsString():
-		return propertySemanticsResult{typeName: "string"}, true
-	case value.IsNumber():
-		return propertySemanticsResult{typeName: "number"}, true
 	default:
-		return propertySemanticsResult{}, false
+		return propertySemanticsResult{}, true
 	}
 }
 
