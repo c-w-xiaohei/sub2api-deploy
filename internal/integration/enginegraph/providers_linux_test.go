@@ -39,7 +39,7 @@ func engineProviderLoaders(trace *traceFixture) []*deploytest.ProviderLoader {
 func hostProvider(trace *traceFixture) plugin.Provider {
 	return &deploytest.Provider{
 		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
-			if req.Type == hostProviderType {
+			if req.URN.Type() == hostProviderType {
 				trace.recordHostCheck(req)
 			}
 			return plugin.CheckResponse{Properties: req.News}, nil

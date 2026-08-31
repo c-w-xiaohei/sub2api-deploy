@@ -93,8 +93,8 @@ func (f *traceFixture) recordHostCheck(req plugin.CheckRequest) {
 	defer f.mu.Unlock()
 	f.hostChecks = append(f.hostChecks, hostCheckObservation{
 		URN:           req.URN,
-		Type:          req.Type,
-		Name:          req.Name,
+		Type:          req.URN.Type(),
+		Name:          string(req.URN.Name()),
 		AllowUnknowns: req.AllowUnknowns,
 		News:          clonePropertyMap(req.News),
 	})
