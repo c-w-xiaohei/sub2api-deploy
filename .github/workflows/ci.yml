@@ -206,7 +206,7 @@ jobs:
           }) + "\n");
           fs.writeFileSync(`${root}/trace/README.txt`, "Tasks append redacted trace artifacts under this directory.\n");
           NODE
-          tests='^(TestEngineGraphFailureStopsPublication|TestEngineGraphReadyPublishesAfterOrderedHosts|TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication|TestEngineConfiguredServerCountZero|TestEngineConfiguredServerCountOneTwo|TestEngineAppPlacementOneReadyFailure|TestEngineManagedUpstashPreviewPreservesComputedSecretProjection)$'
+          tests='^(TestEngineGraphFailureStopsPublication|TestEngineGraphReadyPublishesAfterOrderedHosts|TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication|TestEngineConfiguredServerCountZero|TestEngineConfiguredServerCountOneTwo|TestEngineAppPlacementOneReadyFailure|TestEngineManagedUpstashPreviewPreservesComputedSecretProjection|TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor|TestEngineManagedUpstashStateIsProtectedAndRetained)$'
           export ENGINE_GRAPH_TRACE_DIR="${GITHUB_WORKSPACE}/evidence/${TARGET_SHA}/trace"
           set +e
           go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$evidence/events.jsonl"
