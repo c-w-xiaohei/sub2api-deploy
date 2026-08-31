@@ -4,6 +4,7 @@ package enginegraph_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -39,14 +40,33 @@ const (
 )
 
 type traceFixture struct {
-	mu     sync.Mutex
-	events []string
+	mu                sync.Mutex
+	events            []string
+	publicationEvents []string
+}
+
+func (f *traceFixture) append(event string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, event)
 }
 
 func (f *traceFixture) snapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.events...)
+}
+
+func (f *traceFixture) recordPublication(event string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.publicationEvents = append(f.publicationEvents, event)
+}
+
+func (f *traceFixture) publicationSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.publicationEvents...)
 }
 
 func TestEngineGraphFailureStopsPublication(t *testing.T) {
@@ -74,23 +94,10 @@ func TestEngineGraphFailureStopsPublication(t *testing.T) {
 	}
 
 	trace := &traceFixture{}
-	// The isolated host has no loaders yet, so it cannot discover or download a provider.
-	languageRuntime := deploytest.NewLanguageRuntimeF(func(info plugin.RunInfo, _ *deploytest.ResourceMonitor) error {
-		pulumiCtx, err := pulumi.NewContext(context.Background(), pulumi.RunInfo{
-			Project:     info.Project,
-			Stack:       info.Stack,
-			Parallel:    info.Parallel,
-			DryRun:      info.DryRun,
-			MonitorAddr: info.MonitorAddress,
-		})
-		if err != nil {
-			return err
-		}
-		return pulumi.RunWithContext(pulumiCtx, func(pulumiCtx *pulumi.Context) error {
-			return program.Register(pulumiCtx, release, configYAML, secretsYAML)
-		})
+	languageRuntime := newContextAwareLanguageRuntime(func(ctx *pulumi.Context) error {
+		return program.Register(ctx, release, configYAML, secretsYAML)
 	})
-	hostFactory := deploytest.NewPluginHostF(nil, nil, languageRuntime, nil, nil)
+	hostFactory := deploytest.NewPluginHostF(nil, nil, languageRuntime, nil, nil, engineProviderLoaders(trace)...)
 	host := hostFactory()
 	secretsManager := b64.NewBase64SecretsManager()
 	revisionKey, err := secretsManager.Encrypter().EncryptValue(ctx, "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
@@ -135,28 +142,59 @@ func TestEngineGraphFailureStopsPublication(t *testing.T) {
 	if snapshot == nil {
 		t.Fatal("partial checkpoint is nil")
 	}
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("partial checkpoint is invalid: %v", err)
-	}
-	if strings.Contains(err.Error(), "Could not find plugin for (") {
-		assertInitialMissingProviderCheckpoint(t, snapshot)
-	}
-
+	assertFailureCheckpoint(t, snapshot)
 	if !strings.Contains(err.Error(), scriptedAlphaFailure) {
-		t.Fatalf("update error = %q, want sanitized scripted alpha failure %q; missing-provider diagnostics mean Task5 provider loaders are still absent", err, scriptedAlphaFailure)
+		t.Fatalf("update error = %q, want sanitized scripted alpha failure %q", err, scriptedAlphaFailure)
 	}
 	if got := trace.snapshot(); len(got) != 1 || got[0] != alphaFailureTrace {
 		t.Fatalf("scripted trace = %v, want [%s]; bravo Host and Cloudflare DNS publication must not run after alpha fails", got, alphaFailureTrace)
+	}
+	if got := trace.publicationSnapshot(); len(got) != 0 {
+		t.Fatalf("Cloudflare publication events = %v, want none after alpha fails", got)
 	}
 }
 
 func engineOptions(host plugin.Host) engine.UpdateOptions {
 	return engine.UpdateOptions{
+		Parallel: 4,
 		HostFactory: func(context.Context, diag.Sink, diag.Sink, plugin.DebugContext) (plugin.Host, error) {
 			return host, nil
 		},
 		SkipPluginPreInstall: true,
 	}
+}
+
+type contextAwareLanguageRuntime struct {
+	plugin.LanguageRuntime
+	program func(*pulumi.Context) error
+}
+
+func newContextAwareLanguageRuntime(program func(*pulumi.Context) error) deploytest.LanguageRuntimeFactory {
+	return func() plugin.LanguageRuntime {
+		base := deploytest.NewLanguageRuntime(func(_ plugin.RunInfo, _ *deploytest.ResourceMonitor) error {
+			return nil
+		})
+		return &contextAwareLanguageRuntime{LanguageRuntime: base, program: program}
+	}
+}
+
+func (r *contextAwareLanguageRuntime) Run(ctx context.Context, info plugin.RunInfo) (string, bool, error) {
+	pulumiCtx, err := pulumi.NewContext(ctx, pulumi.RunInfo{
+		Project:     info.Project,
+		Stack:       info.Stack,
+		Parallel:    info.Parallel,
+		DryRun:      info.DryRun,
+		MonitorAddr: info.MonitorAddress,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	runErr := pulumi.RunWithContext(pulumiCtx, r.program)
+	closeErr := pulumiCtx.Close()
+	if joinedErr := errors.Join(runErr, closeErr); joinedErr != nil {
+		return joinedErr.Error(), false, nil
+	}
+	return "", false, nil
 }
 
 func readFixture(t *testing.T, name string) []byte {
@@ -168,18 +206,25 @@ func readFixture(t *testing.T, name string) []byte {
 	return contents
 }
 
-func assertInitialMissingProviderCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+func assertFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	t.Helper()
-	if len(snapshot.Resources) != 1 {
-		t.Fatalf("missing-provider partial checkpoint resources = %d, want only stack resource", len(snapshot.Resources))
+	if err := snapshot.VerifyIntegrity(); err != nil {
+		t.Fatalf("partial checkpoint is invalid: %v", err)
 	}
-	stackResource := snapshot.Resources[0]
-	if stackResource.Type != "pulumi:pulumi:Stack" {
-		t.Fatalf("missing-provider partial checkpoint resource = %q, want stack resource", stackResource.Type)
-	}
+	stackResources := 0
 	for _, resource := range snapshot.Resources {
-		if resource.Type == "sub2api-host:index:Host" || resource.Type == "cloudflare:index/dnsRecord:DnsRecord" {
-			t.Fatalf("missing-provider partial checkpoint must not contain Host or DNS resources: %s", resource.URN)
+		if resource.Type == "pulumi:pulumi:Stack" {
+			stackResources++
+			continue
 		}
+		if resource.Type == "sub2api-host:index:Host" || resource.Type == "cloudflare:index/dnsRecord:DnsRecord" {
+			t.Fatalf("partial checkpoint must not contain Host or DNS resources: %s", resource.URN)
+		}
+		if !strings.HasPrefix(string(resource.Type), "pulumi:providers:") {
+			t.Fatalf("partial checkpoint contains unexpected resource type %q: %s", resource.Type, resource.URN)
+		}
+	}
+	if stackResources != 1 {
+		t.Fatalf("partial checkpoint stack resources = %d, want 1", stackResources)
 	}
 }

@@ -1,0 +1,117 @@
+//go:build linux
+
+package enginegraph_test
+
+import (
+	"context"
+	"errors"
+
+	"github.com/blang/semver"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/deploytest"
+	"github.com/pulumi/pulumi/pkg/v3/resource/plugin"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+)
+
+const (
+	hostProviderPackage      = tokens.Package("sub2api-host")
+	cloudflareProviderPackage = tokens.Package("cloudflare")
+	upstashProviderPackage    = tokens.Package("upstash")
+)
+
+// engineProviderLoaders supplies only the providers used by the existing Program graph. These
+// providers never leave the test process: deploytest keeps their instances in the plugin host.
+func engineProviderLoaders(trace *traceFixture) []*deploytest.ProviderLoader {
+	return []*deploytest.ProviderLoader{
+		deploytest.NewProviderLoader(hostProviderPackage, semver.MustParse("1.0.0"), func() (plugin.Provider, error) {
+			return hostProvider(trace), nil
+		}),
+		deploytest.NewProviderLoader(cloudflareProviderPackage, semver.MustParse("6.18.0"), func() (plugin.Provider, error) {
+			return cloudflareProvider(trace), nil
+		}),
+		deploytest.NewProviderLoader(upstashProviderPackage, semver.MustParse("1.0.0"), func() (plugin.Provider, error) {
+			return upstashProvider(), nil
+		}),
+	}
+}
+
+func hostProvider(trace *traceFixture) plugin.Provider {
+	return &deploytest.Provider{
+		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
+			return plugin.CheckResponse{Properties: req.News}, nil
+		},
+		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
+			if req.Preview {
+				return plugin.CreateResponse{Properties: req.Properties, Status: resource.StatusOK}, nil
+			}
+			serverKey := hostServerKey(req.Properties)
+			if serverKey == "" {
+				return plugin.CreateResponse{}, errors.New("test Host input has no server key")
+			}
+			if req.URN.Name() != "host-"+serverKey {
+				return plugin.CreateResponse{}, errors.New("test Host URN does not match server key")
+			}
+			if serverKey == "alpha" {
+				trace.append("host:" + serverKey + ":create:fail")
+				return plugin.CreateResponse{}, errors.New(scriptedAlphaFailure)
+			}
+			trace.append("host:" + serverKey + ":create:ok")
+			return plugin.CreateResponse{
+				ID:         resource.ID("host-" + serverKey),
+				Properties: req.Properties,
+				Status:     resource.StatusOK,
+			}, nil
+		},
+	}
+}
+
+func cloudflareProvider(trace *traceFixture) plugin.Provider {
+	return &deploytest.Provider{
+		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
+			return plugin.CheckResponse{Properties: req.News}, nil
+		},
+		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
+			if req.Type == "cloudflare:index/dnsRecord:DnsRecord" && !req.Preview {
+				trace.recordPublication("cloudflare:dns:create")
+			}
+			return recordingCreate(req, resource.ID("cloudflare-"+req.Name)), nil
+		},
+	}
+}
+
+func upstashProvider() plugin.Provider {
+	return &deploytest.Provider{
+		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
+			return plugin.CheckResponse{Properties: req.News}, nil
+		},
+		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
+			response := recordingCreate(req, resource.ID("upstash-"+req.Name))
+			if req.Type == "upstash:index/redisDatabase:RedisDatabase" && !req.Preview {
+				response.Properties["endpoint"] = resource.NewStringProperty("redis.example.test")
+				response.Properties["port"] = resource.NewNumberProperty(6380)
+				response.Properties["password"] = resource.MakeSecret(resource.NewStringProperty("upstash-password-canary"))
+			}
+			return response, nil
+		},
+	}
+}
+
+func recordingCreate(req plugin.CreateRequest, id resource.ID) plugin.CreateResponse {
+	response := plugin.CreateResponse{Properties: req.Properties, Status: resource.StatusOK}
+	if !req.Preview {
+		response.ID = id
+	}
+	return response
+}
+
+func hostServerKey(inputs resource.PropertyMap) string {
+	resourceInput, ok := inputs["resource"]
+	if !ok || !resourceInput.IsObject() {
+		return ""
+	}
+	serverKey, ok := resourceInput.ObjectValue()["serverKey"]
+	if !ok || !serverKey.IsString() {
+		return ""
+	}
+	return serverKey.StringValue()
+}
