@@ -119,6 +119,16 @@ func cloudflareProvider(trace *traceFixture) plugin.Provider {
 			}
 			return recordingCreate(req, resource.ID("cloudflare-"+req.Name)), nil
 		},
+		DeleteF: func(_ context.Context, req plugin.DeleteRequest) (plugin.DeleteResponse, error) {
+			if req.URN.Type() != "cloudflare:index/dnsRecord:DnsRecord" {
+				return plugin.DeleteResponse{}, errors.New("test Cloudflare delete request is not a DNS record")
+			}
+			if req.URN.Name() == "" {
+				return plugin.DeleteResponse{}, errors.New("test Cloudflare delete request has no logical resource name")
+			}
+			trace.append("cloudflare:dns:" + req.URN.Name() + ":delete:ok")
+			return plugin.DeleteResponse{Status: resource.StatusOK}, nil
+		},
 	}
 }
 
