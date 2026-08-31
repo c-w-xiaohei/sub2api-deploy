@@ -72,6 +72,17 @@ func hostProvider(trace *traceFixture) plugin.Provider {
 				Status:     resource.StatusOK,
 			}, nil
 		},
+		DeleteF: func(_ context.Context, req plugin.DeleteRequest) (plugin.DeleteResponse, error) {
+			serverKey := hostServerKey(req.Inputs)
+			if serverKey == "" {
+				return plugin.DeleteResponse{}, errors.New("test Host input has no server key")
+			}
+			if req.URN.Name() != "host-"+serverKey {
+				return plugin.DeleteResponse{}, errors.New("test Host URN does not match server key")
+			}
+			trace.append("host:" + serverKey + ":delete:ok")
+			return plugin.DeleteResponse{Status: resource.StatusOK}, nil
+		},
 		UpdateF: func(_ context.Context, req plugin.UpdateRequest) (plugin.UpdateResponse, error) {
 			serverKey := hostServerKey(req.NewInputs)
 			if serverKey == "" {
