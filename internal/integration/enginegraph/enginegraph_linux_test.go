@@ -196,9 +196,12 @@ func TestEngineAppPlacementOneReadyFailure(t *testing.T) {
 		if !strings.Contains(err.Error(), scriptedAlphaFailure) {
 			t.Fatalf("placement-one update error = %q, want scripted alpha failure %q", err, scriptedAlphaFailure)
 		}
-		assertFailureCheckpoint(t, snapshot)
-		if got := trace.snapshot(); !slices.Equal(got, []string{alphaFailureTrace}) {
-			t.Fatalf("placement-one failure trace = %v, want only %q", got, alphaFailureTrace)
+		assertPlacementFailureCheckpoint(t, snapshot)
+		got := trace.snapshot()
+		assertEventCount(t, got, alphaFailureTrace, 1)
+		assertEventCount(t, got, "host:bravo:create:ok", 1)
+		if len(got) != 2 {
+			t.Fatalf("placement-one failure trace = %v, want only alpha failure and bravo Host success", got)
 		}
 		if got := trace.publicationSnapshot(); len(got) != 0 {
 			t.Fatalf("placement-one failure publication events = %v, want none", got)
@@ -216,18 +219,16 @@ func TestEngineAppPlacementOneReadyFailure(t *testing.T) {
 		assertAppPlacementCheckpoint(t, snapshot)
 
 		got := trace.snapshot()
-		wantPrefix := []string{"host:alpha:create:ok", "host:bravo:create:ok"}
-		if len(got) != 3 || !slices.Equal(got[:2], wantPrefix) {
-			t.Fatalf("placement-one ready lifecycle trace = %v, want both Hosts ready before one publication", got)
+		alphaReady := "host:alpha:create:ok"
+		bravoReady := "host:bravo:create:ok"
+		alphaDNS := "cloudflare:dns:dns-app-alpha-A:create:ok"
+		assertEventCount(t, got, alphaReady, 1)
+		assertEventCount(t, got, bravoReady, 1)
+		assertEventCount(t, got, alphaDNS, 1)
+		if len(got) != 3 {
+			t.Fatalf("placement-one ready lifecycle trace = %v, want exactly two Host successes and one Alpha DNS create", got)
 		}
-		if got := trace.publicationSnapshot(); len(got) != 1 {
-			t.Fatalf("placement-one ready publication events = %v, want one", got)
-		}
-
-		want := append(wantPrefix, "cloudflare:dns:dns-app-alpha-A:create:ok")
-		if !slices.Equal(got, want) {
-			t.Fatalf("placement-one ready identity-specific publication trace = %v, want %v", got, want)
-		}
+		assertEventAfter(t, got, alphaDNS, alphaReady)
 	})
 }
 
@@ -556,6 +557,27 @@ func assertAppPlacementCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	}
 }
 
+func assertPlacementFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+	t.Helper()
+	assertConfiguredHostCheckpoint(t, snapshot, []string{"bravo"}, nil)
+
+	for _, state := range snapshot.Resources {
+		if state.Type != "sub2api-host:index:Host" || state.ID != "host-bravo" {
+			continue
+		}
+		target, ok := state.Inputs["target"]
+		if !ok || !target.IsObject() {
+			t.Fatalf("partial bravo Host %s has no target object", state.URN)
+		}
+		apps, ok := target.ObjectValue()["apps"]
+		if !ok || !apps.IsArray() || len(apps.ArrayValue()) != 0 {
+			t.Fatalf("partial bravo Host %s target Apps = %v, want none", state.URN, apps)
+		}
+		return
+	}
+	t.Fatal("partial checkpoint has no stable bravo Host")
+}
+
 func assertHostDeletionTrace(t *testing.T, events, want []string) {
 	t.Helper()
 	deletions := []string{}
@@ -593,6 +615,22 @@ func eventIndex(events []string, want string) int {
 		}
 	}
 	return -1
+}
+
+func assertEventCount(t *testing.T, events []string, want string, count int) {
+	t.Helper()
+	if got := countEvent(events, want); got != count {
+		t.Fatalf("lifecycle trace = %v, want %d occurrences of %q, got %d", events, count, want, got)
+	}
+}
+
+func assertEventAfter(t *testing.T, events []string, event, predecessor string) {
+	t.Helper()
+	eventAt := eventIndex(events, event)
+	predecessorAt := eventIndex(events, predecessor)
+	if eventAt == -1 || predecessorAt == -1 || eventAt <= predecessorAt {
+		t.Fatalf("lifecycle trace = %v, want %q after %q", events, event, predecessor)
+	}
 }
 
 func countEvent(events []string, want string) int {
