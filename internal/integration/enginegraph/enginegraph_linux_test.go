@@ -235,7 +235,7 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 	redisPassword, ok := propertyAt(host.News, "secrets", "apps", "app", "redis", "password")
 	passwordSemantics, valid := propertySemantics(redisPassword)
 	if !ok || !valid || !passwordSemantics.unknown || !passwordSemantics.secret {
-		t.Fatal("generated Redis password lacks unknown+secret semantic classes")
+		t.Fatalf("generated Redis password semantics: ok=%t valid=%t unknown=%t secret=%t", ok, valid, passwordSemantics.unknown, passwordSemantics.secret)
 	}
 	if containsString(resource.NewObjectProperty(host.News), "upstash-api-key-canary") {
 		t.Fatal("Upstash API key canary reached Host Check input")
