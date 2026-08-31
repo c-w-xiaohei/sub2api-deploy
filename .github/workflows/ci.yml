@@ -168,3 +168,79 @@ jobs:
           name: host-controller-${{ matrix.arch }}
           path: dist/host-controller/
           if-no-files-found: error
+
+  engine-graph:
+    name: Engine Graph
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+
+      - name: Verify exact target SHA
+        run: |
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+
+      - name: Verify Go modules
+        run: go mod verify
+
+      - name: Record required engine-graph test evidence
+        run: |
+          evidence="evidence/${TARGET_SHA}"
+          mkdir -p "$evidence/trace"
+          TARGET_SHA="$TARGET_SHA" GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" node <<'NODE'
+          const fs = require("node:fs");
+          const root = `evidence/${process.env.TARGET_SHA}`;
+          fs.writeFileSync(`${root}/metadata.json`, JSON.stringify({
+            sha: process.env.TARGET_SHA,
+            runUrl: process.env.GITHUB_RUN_URL,
+            gate: "engine-graph",
+          }) + "\n");
+          fs.writeFileSync(`${root}/trace/README.txt`, "Tasks append redacted trace artifacts under this directory.\n");
+          NODE
+          tests='^(TestEngineGraphFailureStopsPublication|TestEngineGraphReadyPublishesAfterOrderedHosts|TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication|TestEngineConfiguredServerCountZero|TestEngineConfiguredServerCountOneTwo|TestEngineAppPlacementOneReadyFailure|TestEngineManagedUpstashPreviewPreservesComputedSecretProjection)$'
+          export ENGINE_GRAPH_TRACE_DIR="${GITHUB_WORKSPACE}/evidence/${TARGET_SHA}/trace"
+          set +e
+          go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$evidence/events.jsonl"
+          test_status=$?
+          set -e
+          trace_files="$(find "$ENGINE_GRAPH_TRACE_DIR" -type f -name '*.jsonl' -print)"
+          test -n "$trace_files"
+          while IFS= read -r trace_file; do
+            test -s "$trace_file"
+          done <<< "$trace_files"
+          TARGET_SHA="$TARGET_SHA" REQUIRED_TESTS="$tests" node <<'NODE'
+          const fs = require("node:fs");
+          const path = `evidence/${process.env.TARGET_SHA}/events.jsonl`;
+          const required = process.env.REQUIRED_TESTS.slice(2, -2).split("|");
+          const terminal = new Map();
+          for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (!event.Test || !required.includes(event.Test)) continue;
+            if (event.Action === "skip") terminal.set(event.Test, "skip");
+            if (event.Action === "pass") terminal.set(event.Test, "pass");
+            if (event.Action === "fail") terminal.set(event.Test, "fail");
+          }
+          for (const name of required) {
+            const result = terminal.get(name);
+            if (result !== "pass") throw new Error(`required test did not pass: ${name} (${result ?? "absent"})`);
+          }
+          NODE
+          test "$test_status" -eq 0
+
+      - name: Upload engine-graph evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-graph-evidence-${{ env.TARGET_SHA }}
+          path: evidence/${{ env.TARGET_SHA }}/
+          if-no-files-found: error

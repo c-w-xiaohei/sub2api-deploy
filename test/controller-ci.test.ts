@@ -87,7 +87,7 @@ describe("Host controller CI evidence contract", () => {
     expect(workflow).toContain('sha: process.env.TARGET_SHA');
     expect(workflow).toContain('gate: "engine-graph"');
     expect(workflow).toContain("evidence/${TARGET_SHA}");
-    expect(workflow).toMatch(/ENGINE_GRAPH_TRACE_DIR\s*=\s*["']?evidence\/\$\{TARGET_SHA\}\/trace/);
+    expect(workflow).toMatch(/ENGINE_GRAPH_TRACE_DIR\s*=\s*["']?(?:\$\{GITHUB_WORKSPACE\}\/)?evidence\/\$\{TARGET_SHA\}\/trace/);
     expect(workflow).toMatch(
       /(?:export\s+ENGINE_GRAPH_TRACE_DIR|ENGINE_GRAPH_TRACE_DIR\s*=\s*[^\n]*go test -json|env:[\s\S]{0,160}ENGINE_GRAPH_TRACE_DIR)[\s\S]*go test -json/,
     );

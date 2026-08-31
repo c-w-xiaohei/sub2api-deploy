@@ -4,6 +4,9 @@ package enginegraph_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"maps"
@@ -47,6 +50,8 @@ const (
 	managedUpstashSecrets = "managed-upstash-preview-secrets.yaml"
 )
 
+var engineGraphTraceFileMu sync.Mutex
+
 type traceFixture struct {
 	mu                sync.Mutex
 	events            []string
@@ -86,6 +91,109 @@ func (f *traceFixture) publicationSnapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.publicationEvents...)
+}
+
+func (f *traceFixture) artifactSnapshot() (events, publicationEvents []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...), append([]string(nil), f.publicationEvents...)
+}
+
+type engineGraphTraceEnvelope struct {
+	TestName         string `json:"test_name"`
+	LifecycleEvent   string `json:"lifecycle_event,omitempty"`
+	PublicationEvent string `json:"publication_event,omitempty"`
+	Summary          string `json:"summary,omitempty"`
+}
+
+func writeEngineGraphTraceArtifact(t *testing.T, trace *traceFixture, directory string) {
+	engineGraphTraceFileMu.Lock()
+	defer engineGraphTraceFileMu.Unlock()
+
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Errorf("engine graph trace artifact directory setup failed")
+		return
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Errorf("engine graph trace artifact directory permissions failed")
+		return
+	}
+
+	fileName := sanitizedTraceFileName(t.Name())
+	file, err := os.OpenFile(filepath.Join(directory, fileName), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Errorf("engine graph trace artifact open failed")
+		return
+	}
+
+	closeFile := func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("engine graph trace artifact close failed")
+		}
+	}
+	if err := file.Chmod(0o600); err != nil {
+		closeFile()
+		t.Errorf("engine graph trace artifact permissions failed")
+		return
+	}
+
+	events, publicationEvents := trace.artifactSnapshot()
+	encoder := json.NewEncoder(file)
+	var writeErr error
+	if len(events) == 0 && len(publicationEvents) == 0 {
+		writeErr = encoder.Encode(engineGraphTraceEnvelope{
+			TestName: t.Name(),
+			Summary:  "empty trace",
+		})
+	} else {
+		for _, event := range events {
+			if err := encoder.Encode(engineGraphTraceEnvelope{
+				TestName:       t.Name(),
+				LifecycleEvent: event,
+			}); err != nil {
+				writeErr = err
+				break
+			}
+		}
+		if writeErr == nil {
+			for _, event := range publicationEvents {
+				if err := encoder.Encode(engineGraphTraceEnvelope{
+					TestName:         t.Name(),
+					PublicationEvent: event,
+				}); err != nil {
+					writeErr = err
+					break
+				}
+			}
+		}
+	}
+	closeFile()
+	if writeErr != nil {
+		t.Errorf("engine graph trace artifact write failed")
+	}
+}
+
+func sanitizedTraceFileName(testName string) string {
+	var stem strings.Builder
+	for _, character := range testName {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' || character == '.' {
+			stem.WriteRune(character)
+		} else {
+			stem.WriteByte('_')
+		}
+	}
+	cleanStem := strings.Trim(stem.String(), "._")
+	if cleanStem == "" {
+		cleanStem = "engine-graph"
+	}
+	if len(cleanStem) > 96 {
+		cleanStem = cleanStem[:96]
+	}
+	hash := sha256.Sum256([]byte(testName))
+	return cleanStem + "-" + hex.EncodeToString(hash[:]) + ".jsonl"
 }
 
 func (f *traceFixture) recordHostCheck(req plugin.CheckRequest) {
@@ -482,6 +590,12 @@ type engineGraphHarness struct {
 
 func newEngineGraphHarness(t *testing.T, hostReadiness map[string]bool) *engineGraphHarness {
 	t.Helper()
+	trace := &traceFixture{hostReadiness: hostReadiness}
+	if directory := os.Getenv("ENGINE_GRAPH_TRACE_DIR"); directory != "" {
+		t.Cleanup(func() {
+			writeEngineGraphTraceArtifact(t, trace, directory)
+		})
+	}
 	ctx := context.Background()
 	project := &workspace.Project{
 		Name:    tokens.PackageName("sub2api-environment"),
@@ -510,7 +624,7 @@ func newEngineGraphHarness(t *testing.T, hostReadiness map[string]bool) *engineG
 		stack:          stackState,
 		project:        project,
 		programRoot:    t.TempDir(),
-		trace:          &traceFixture{hostReadiness: hostReadiness},
+		trace:          trace,
 		secretsManager: secretsManager,
 		revisionKey:   revisionKey,
 	}
