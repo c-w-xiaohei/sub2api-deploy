@@ -310,6 +310,34 @@ func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
 			t.Fatalf("%s metadata = %#v, want unknown secret=%t nil value", output.name, result, output.secret)
 		}
 	}
+
+	mocks := &recordingMocks{}
+	if err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		_, err := registerHosts(ctx, validated, secrets, pinnedRelease, managed)
+		return err
+	}, pulumi.WithMocks("sub2api-environment", "canary", mocks)); err != nil {
+		t.Fatalf("registerHosts() error = %v", err)
+	}
+	host := hostForServer(t, resourcesOfType(mocks.resources, hostresource.HostToken), "alpha")
+	link := dataLink(t, appTarget(t, host.Inputs, "app"), "app-redis")
+	if len(link) != 2 {
+		t.Fatalf("managed Redis link shape = %v, want exactly name and identity", link)
+	}
+	identity := object(t, link, "identity")
+	if len(identity) != 5 {
+		t.Fatalf("managed Redis identity shape = %v, want exactly five fields", identity)
+	}
+	assertComputedType(t, property(identity, "providerId"), "string")
+	assertComputedType(t, property(identity, "endpoint"), "string")
+	assertComputedType(t, property(identity, "port"), "number")
+	if stringValue(t, property(identity, "kind")) != "redis" || stringValue(t, property(identity, "database")) != "0" {
+		t.Fatalf("managed Redis identity known fields = %v", identity)
+	}
+	password := property(appCredentials(t, host.Inputs, "app", "redis"), "password")
+	if !password.IsSecret() {
+		t.Fatalf("managed Redis password lost secret marking: %v", password)
+	}
+	assertComputedType(t, unwrap(password), "string")
 }
 
 func TestRegisterMaintenancePlacementKeepsHostsAndSuppressesPublication(t *testing.T) {
@@ -374,6 +402,7 @@ func appTarget(t *testing.T, inputs resource.PropertyMap, id string) resource.Pr
 func dataLink(t *testing.T, app resource.PropertyMap, name string) resource.PropertyMap { t.Helper(); links := unwrap(property(app, "dataLinks")); if !links.IsArray() { t.Fatalf("dataLinks is not an array: %v", links) }; for _, link := range links.ArrayValue() { if stringValue(t, property(link.ObjectValue(), "name")) == name { return link.ObjectValue() } }; t.Fatalf("data link %q absent", name); return nil }
 func assertIdentity(t *testing.T, link resource.PropertyMap, kind string, want dataIdentity) { t.Helper(); identity := object(t, link, "identity"); got := dataIdentity{stringValue(t, property(identity, "providerId")), stringValue(t, property(identity, "endpoint")), int(unwrap(property(identity, "port")).NumberValue()), stringValue(t, property(identity, "database")), optionalString(t, property(identity, "tlsServerName"))}; if stringValue(t, property(identity, "kind")) != kind || got != want { t.Fatalf("%s identity = %#v / %s, want %#v / %s", stringValue(t, property(link, "name")), got, stringValue(t, property(identity, "kind")), want, kind) } }
 func optionalString(t *testing.T, value resource.PropertyValue) string { t.Helper(); if value.V == nil { return "" }; return stringValue(t, value) }
+func assertComputedType(t *testing.T, value resource.PropertyValue, want string) { t.Helper(); value = unwrap(value); if !value.IsComputed() || value.Input().Element.TypeString() != want { t.Fatalf("computed value = %v, want computed %s", value, want) } }
 func appCredentials(t *testing.T, inputs resource.PropertyMap, appID, kind string) resource.PropertyMap { t.Helper(); secrets := unwrap(property(inputs, "secrets")); if !secrets.IsObject() { t.Fatalf("Host secrets are not an object: %v", secrets) }; apps := object(t, secrets.ObjectValue(), "apps"); return object(t, apps, appID)[resource.PropertyKey(kind)].ObjectValue() }
 func assertManagedApp(t *testing.T, host pulumi.MockResourceArgs, appID, postgresName string, postgres dataIdentity, redisName string, redis dataIdentity, postgresPassword, redisPassword string) { t.Helper(); app := appTarget(t, host.Inputs, appID); assertIdentity(t, dataLink(t, app, postgresName), "postgres", postgres); assertIdentity(t, dataLink(t, app, redisName), "redis", redis); pg, rd := appCredentials(t, host.Inputs, appID, "postgres"), appCredentials(t, host.Inputs, appID, "redis"); if stringValue(t, property(pg, "username")) != "appuser" || stringValue(t, property(pg, "password")) != postgresPassword || stringValue(t, property(rd, "username")) != "default" || stringValue(t, property(rd, "password")) != redisPassword { t.Fatalf("App credentials are not exact: postgres=%v redis=%v", pg, rd) } }
 func assertAppSchema(t *testing.T, host pulumi.MockResourceArgs, bootstrap bool) { t.Helper(); app := appTarget(t, host.Inputs, "app"); if stringValue(t, property(app, "readinessPath")) != "/ready" || stringValue(t, property(app, "drainTimeout")) != "10s" { t.Fatalf("App runtime defaults = %v", app) }; settings := object(t, app, "runtimeSettings"); if stringValue(t, property(settings, "FEATURE_FLAG")) != "enabled" || stringValue(t, property(settings, "ADMIN_EMAIL")) != "admin@example.test" { t.Fatalf("App runtime settings = %v", settings) }; if bootstrap != optionalBool(t, property(app, "initialBootstrap")) { t.Fatalf("initialBootstrap = %v, want %t", property(app, "initialBootstrap"), bootstrap) }; secrets := unwrap(property(host.Inputs, "secrets")).ObjectValue(); appSecrets := object(t, object(t, secrets, "apps"), "app"); runtime := appSecrets["runtimeEnvironment"].ObjectValue(); if stringValue(t, property(runtime, "PRIVATE_FLAG")) != privateFlag { t.Fatalf("App private environment = %v", runtime) }; if bootstrap != (property(appSecrets, "initialAdminPassword").V != nil) { t.Fatalf("initial admin secret scope = %v, want bootstrap=%t", appSecrets, bootstrap) } }

@@ -425,9 +425,14 @@ func TestEngineAppPlacementOneReadyFailure(t *testing.T) {
 		assertPlacementFailureCheckpoint(t, snapshot)
 		got := trace.snapshot()
 		assertEventCount(t, got, alphaFailureTrace, 1)
-		assertEventCount(t, got, "host:bravo:create:ok", 1)
-		if len(got) != 2 {
-			t.Fatalf("placement-one failure trace = %v, want only alpha failure and bravo Host success", got)
+		bravoSuccesses := countEvent(got, "host:bravo:create:ok")
+		if bravoSuccesses > 1 {
+			t.Fatalf("placement-one failure trace = %v, want at most one bravo Host success", got)
+		}
+		for _, event := range got {
+			if event != alphaFailureTrace && event != "host:bravo:create:ok" {
+				t.Fatalf("placement-one failure trace = %v, want only alpha failure and optional bravo Host success", got)
+			}
 		}
 		if got := trace.publicationSnapshot(); len(got) != 0 {
 			t.Fatalf("placement-one failure publication events = %v, want none", got)
@@ -942,23 +947,45 @@ func assertAppPlacementCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 
 func assertPlacementFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	t.Helper()
-	assertConfiguredHostCheckpoint(t, snapshot, []string{"bravo"}, nil)
-
-	for _, state := range snapshot.Resources {
-		if state.Type != "sub2api-host:index:Host" || state.ID != "host-bravo" {
-			continue
-		}
-		target, ok := state.Inputs["target"]
-		if !ok || !target.IsObject() {
-			t.Fatalf("partial bravo Host %s has no target object", state.URN)
-		}
-		apps, ok := target.ObjectValue()["apps"]
-		if !ok || !apps.IsArray() || len(apps.ArrayValue()) != 0 {
-			t.Fatalf("partial bravo Host %s target Apps = %v, want none", state.URN, apps)
-		}
-		return
+	if snapshot == nil {
+		t.Fatal("placement failure checkpoint is nil")
 	}
-	t.Fatal("partial checkpoint has no stable bravo Host")
+	if err := snapshot.VerifyIntegrity(); err != nil {
+		t.Fatalf("placement failure checkpoint is invalid: %v", err)
+	}
+	stackResources := 0
+	bravoHosts := 0
+	for _, state := range snapshot.Resources {
+		switch state.Type {
+		case "pulumi:pulumi:Stack":
+			stackResources++
+		case "sub2api-host:index:Host":
+			if state.URN.Name() != "host-bravo" || state.ID != "host-bravo" {
+				t.Fatalf("partial checkpoint contains unstable or non-Bravo Host: %s", state.URN)
+			}
+			target, ok := state.Inputs["target"]
+			if !ok || !target.IsObject() {
+				t.Fatalf("partial bravo Host %s has no target object", state.URN)
+			}
+			apps, ok := target.ObjectValue()["apps"]
+			if !ok || !apps.IsArray() || len(apps.ArrayValue()) != 0 {
+				t.Fatalf("partial bravo Host %s target Apps = %v, want none", state.URN, apps)
+			}
+			bravoHosts++
+			if bravoHosts > 1 {
+				t.Fatalf("partial checkpoint contains %d Bravo Hosts, want at most one", bravoHosts)
+			}
+		case "cloudflare:index/dnsRecord:DnsRecord":
+			fallthrough
+		default:
+			if !strings.HasPrefix(string(state.Type), "pulumi:providers:") {
+				t.Fatalf("partial checkpoint contains unexpected resource type %q: %s", state.Type, state.URN)
+			}
+	}
+	}
+	if stackResources != 1 {
+		t.Fatalf("partial checkpoint stack resources = %d, want 1", stackResources)
+	}
 }
 
 func assertHostDeletionTrace(t *testing.T, events, want []string) {

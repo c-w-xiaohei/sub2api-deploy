@@ -3,6 +3,7 @@ package program
 import (
 	"fmt"
 	"net"
+	"reflect"
 	"regexp"
 	"sort"
 	"time"
@@ -23,6 +24,40 @@ type managedRedisInputs struct {
 	Endpoint   pulumi.StringInput
 	Port       pulumi.IntInput
 	Password   pulumi.StringInput
+}
+
+type managedRedisLinkValue struct {
+	Name     string                    `pulumi:"name"`
+	Identity managedRedisIdentityValue `pulumi:"identity"`
+}
+
+type managedRedisIdentityValue struct {
+	Kind       string `pulumi:"kind"`
+	ProviderID string `pulumi:"providerId"`
+	Endpoint   string `pulumi:"endpoint"`
+	Port       int    `pulumi:"port"`
+	Database   string `pulumi:"database"`
+}
+
+type managedRedisIdentityInputs struct {
+	Kind       string             `pulumi:"kind"`
+	ProviderID pulumi.StringInput `pulumi:"providerId"`
+	Endpoint   pulumi.StringInput `pulumi:"endpoint"`
+	Port       pulumi.IntInput    `pulumi:"port"`
+	Database   string             `pulumi:"database"`
+}
+
+type managedRedisLinkInputs struct {
+	Name     string                     `pulumi:"name"`
+	Identity managedRedisIdentityInputs `pulumi:"identity"`
+}
+
+func (managedRedisLinkInputs) ElementType() reflect.Type {
+	return reflect.TypeOf(managedRedisLinkValue{})
+}
+
+func (managedRedisIdentityInputs) ElementType() reflect.Type {
+	return reflect.TypeOf(managedRedisIdentityValue{})
 }
 
 func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYAML []byte) error {
@@ -274,14 +309,17 @@ func redisLink(id, database string, service environment.Redis) pulumi.Map {
 	}}
 }
 
-func managedRedisLink(id, database string, service managedRedisInputs) pulumi.Map {
-	return pulumi.Map{"name": pulumi.String(id), "identity": pulumi.Map{
-		"kind":       pulumi.String("redis"),
-		"providerId": service.ProviderID,
-		"endpoint":   service.Endpoint,
-		"port":       service.Port,
-		"database":   pulumi.String(database),
-	}}
+func managedRedisLink(id, database string, service managedRedisInputs) managedRedisLinkInputs {
+	return managedRedisLinkInputs{
+		Name: id,
+		Identity: managedRedisIdentityInputs{
+			Kind:       "redis",
+			ProviderID: service.ProviderID,
+			Endpoint:   service.Endpoint,
+			Port:       service.Port,
+			Database:   database,
+		},
+	}
 }
 
 func localServices(config environment.Config, server string) pulumi.Array {
