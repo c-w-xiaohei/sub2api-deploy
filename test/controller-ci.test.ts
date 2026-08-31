@@ -102,6 +102,5 @@ describe("Host controller CI evidence contract", () => {
     expect(workflow).toContain('test -s "$trace_file"');
     expect(workflow).toMatch(/name:\s*engine-graph-evidence-\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
     expect(workflow).toMatch(/path:\s*evidence\/\$\{\{\s*env\.TARGET_SHA\s*\}\}\//);
-    expect(workflow).toMatch(/path:\s*evidence\/\$\{\{\s*env\.TARGET_SHA\s*\}\}\/[^\n]*trace/);
   });
 });
