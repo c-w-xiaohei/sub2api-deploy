@@ -66,6 +66,28 @@ func hostProvider(trace *traceFixture) plugin.Provider {
 				Status:     resource.StatusOK,
 			}, nil
 		},
+		UpdateF: func(_ context.Context, req plugin.UpdateRequest) (plugin.UpdateResponse, error) {
+			serverKey := hostServerKey(req.NewInputs)
+			if serverKey == "" {
+				return plugin.UpdateResponse{}, errors.New("test Host input has no server key")
+			}
+			if req.URN.Name() != "host-"+serverKey {
+				return plugin.UpdateResponse{}, errors.New("test Host URN does not match server key")
+			}
+			if req.Preview {
+				return plugin.UpdateResponse{Properties: req.NewInputs, Status: resource.StatusOK}, nil
+			}
+			// hostReadiness is populated before the engine starts and is immutable during the update.
+			if !trace.hostReadiness[serverKey] {
+				trace.append("host:" + serverKey + ":update:fail")
+				if serverKey == "alpha" {
+					return plugin.UpdateResponse{}, errors.New("scripted Host alpha update failure")
+				}
+				return plugin.UpdateResponse{}, errors.New("scripted Host " + serverKey + " update failure")
+			}
+			trace.append("host:" + serverKey + ":update:ok")
+			return plugin.UpdateResponse{Properties: req.NewInputs, Status: resource.StatusOK}, nil
+		},
 	}
 }
 
