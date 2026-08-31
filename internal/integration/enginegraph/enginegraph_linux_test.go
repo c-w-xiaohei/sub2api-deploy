@@ -100,10 +100,7 @@ func TestEngineGraphReadyPublishesAfterOrderedHosts(t *testing.T) {
 		"bravo": true,
 	})
 	if err != nil {
-		if !strings.Contains(err.Error(), scriptedAlphaFailure) {
-			t.Fatalf("ready-success matrix failed before the expected alpha readiness failure: %v", err)
-		}
-		t.Fatalf("ready-success matrix update = %q, want success after ready alpha and bravo Hosts", err)
+		t.Fatalf("ready-success matrix update failed unexpectedly: %v", err)
 	}
 
 	want := []string{
@@ -149,13 +146,11 @@ func TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication(t *testing.
 		t.Fatalf("Cloudflare publication events = %v, want no new publication during maintenance", got)
 	}
 
-	// This is intentionally RED until the test provider exposes its Update lifecycle callback.
-	// The engine has reached the real Host update steps if the only missing evidence is these entries.
 	got := harness.trace.snapshot()
 	for _, serverKey := range []string{"alpha", "bravo"} {
 		want := "host:" + serverKey + ":update:ok"
 		if countEvent(got, want) != 1 {
-			t.Fatalf("maintenance Host lifecycle trace = %v, want one %q; current test provider does not expose Update", got, want)
+			t.Fatalf("maintenance Host lifecycle trace = %v, want one %q", got, want)
 		}
 	}
 }
@@ -249,7 +244,14 @@ func (h *engineGraphHarness) update(t *testing.T, configName, secretsName string
 		},
 		Scopes: backend.CancellationScopes,
 	}, nil)
-	snapshot, snapshotErr := h.stack.Snapshot(ctx, stack.Base64SecretsProvider{})
+	currentStack, getStackErr := h.backend.GetStack(ctx, h.stack.Ref())
+	if getStackErr != nil {
+		t.Fatalf("load current checkpoint stack: %v", getStackErr)
+	}
+	if currentStack == nil {
+		t.Fatalf("load current checkpoint stack: backend returned nil stack")
+	}
+	snapshot, snapshotErr := currentStack.Snapshot(ctx, stack.Base64SecretsProvider{})
 	if snapshotErr != nil {
 		t.Fatalf("load partial checkpoint: %v", snapshotErr)
 	}
