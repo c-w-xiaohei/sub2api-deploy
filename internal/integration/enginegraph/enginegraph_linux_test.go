@@ -560,6 +560,7 @@ func (h *engineGraphHarness) preview(t *testing.T, configName, secretsName strin
 		},
 		Scopes: backend.CancellationScopes,
 	}, engineEvents)
+	close(engineEvents)
 	<-eventsDone
 
 	after, err := h.reloadSnapshot(ctx)
