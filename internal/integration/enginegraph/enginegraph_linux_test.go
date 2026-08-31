@@ -105,14 +105,22 @@ func TestEngineGraphReadyPublishesAfterOrderedHosts(t *testing.T) {
 		t.Fatalf("ready-success matrix update failed unexpectedly: %v", err)
 	}
 
-	want := []string{
-		"host:alpha:create:ok",
-		"host:bravo:create:ok",
-		"cloudflare:dns:create",
-		"cloudflare:dns:create",
+	got := trace.snapshot()
+	alphaReady := "host:alpha:create:ok"
+	bravoReady := "host:bravo:create:ok"
+	alphaDNS := "cloudflare:dns:dns-app-alpha-A:create:ok"
+	bravoDNS := "cloudflare:dns:dns-app-bravo-A:create:ok"
+	assertEventCount(t, got, alphaReady, 1)
+	assertEventCount(t, got, bravoReady, 1)
+	assertEventCount(t, got, alphaDNS, 1)
+	assertEventCount(t, got, bravoDNS, 1)
+	if len(got) != 4 {
+		t.Fatalf("ready-success trace = %v, want exactly two Host successes and two DNS creates", got)
 	}
-	if got := trace.snapshot(); !slices.Equal(got, want) {
-		t.Fatalf("ready-success trace = %v, want %v", got, want)
+	assertEventAfter(t, got, bravoReady, alphaReady)
+	for _, dnsEvent := range []string{alphaDNS, bravoDNS} {
+		assertEventAfter(t, got, dnsEvent, alphaReady)
+		assertEventAfter(t, got, dnsEvent, bravoReady)
 	}
 	if got := trace.publicationSnapshot(); len(got) != 2 {
 		t.Fatalf("Cloudflare publication events = %v, want two events after both Hosts", got)
@@ -130,13 +138,22 @@ func TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication(t *testing.
 		t.Fatalf("ready fixture update = %q, want success before maintenance transition", err)
 	}
 	assertReadyCheckpoint(t, first)
-	if got := harness.trace.snapshot(); !slices.Equal(got, []string{
-		"host:alpha:create:ok",
-		"host:bravo:create:ok",
-		"cloudflare:dns:create",
-		"cloudflare:dns:create",
-	}) {
-		t.Fatalf("ready fixture trace = %v, want two Hosts followed by two DNS publications", got)
+	got := harness.trace.snapshot()
+	alphaReady := "host:alpha:create:ok"
+	bravoReady := "host:bravo:create:ok"
+	alphaDNS := "cloudflare:dns:dns-app-alpha-A:create:ok"
+	bravoDNS := "cloudflare:dns:dns-app-bravo-A:create:ok"
+	assertEventCount(t, got, alphaReady, 1)
+	assertEventCount(t, got, bravoReady, 1)
+	assertEventCount(t, got, alphaDNS, 1)
+	assertEventCount(t, got, bravoDNS, 1)
+	if len(got) != 4 {
+		t.Fatalf("ready fixture trace = %v, want exactly two Host successes and two DNS creates", got)
+	}
+	assertEventAfter(t, got, bravoReady, alphaReady)
+	for _, dnsEvent := range []string{alphaDNS, bravoDNS} {
+		assertEventAfter(t, got, dnsEvent, alphaReady)
+		assertEventAfter(t, got, dnsEvent, bravoReady)
 	}
 
 	final, err := harness.update(t, "external-two-host-maintenance.yaml", "external-two-host-maintenance-secrets.yaml")

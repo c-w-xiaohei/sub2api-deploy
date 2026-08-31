@@ -114,8 +114,17 @@ func cloudflareProvider(trace *traceFixture) plugin.Provider {
 			return plugin.CheckResponse{Properties: req.News}, nil
 		},
 		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
+			if req.URN.Type() != "cloudflare:index/dnsRecord:DnsRecord" {
+				return plugin.CreateResponse{}, errors.New("test Cloudflare create request is not a DNS record")
+			}
+			if req.URN.Name() == "" {
+				return plugin.CreateResponse{}, errors.New("test Cloudflare create request has no logical resource name")
+			}
 			if req.Type == "cloudflare:index/dnsRecord:DnsRecord" && !req.Preview {
-				trace.recordPublication("cloudflare:dns:create")
+				trace.mu.Lock()
+				trace.events = append(trace.events, "cloudflare:dns:"+req.URN.Name()+":create:ok")
+				trace.publicationEvents = append(trace.publicationEvents, "cloudflare:dns:create")
+				trace.mu.Unlock()
 			}
 			return recordingCreate(req, resource.ID("cloudflare-"+req.Name)), nil
 		},
