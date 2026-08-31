@@ -165,7 +165,7 @@ func TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication(t *testing.
 		t.Fatalf("Cloudflare publication events = %v, want no new publication during maintenance", got)
 	}
 
-	got := harness.trace.snapshot()
+	got = harness.trace.snapshot()
 	for _, serverKey := range []string{"alpha", "bravo"} {
 		want := "host:" + serverKey + ":update:ok"
 		if countEvent(got, want) != 1 {
