@@ -198,10 +198,18 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 		t.Fatal("invalid RED path: preview did not Check Host alpha")
 	}
 
-	for _, field := range []string{"providerId", "endpoint", "port"} {
-		value, ok := propertyAt(host.News, "target", "apps", "0", "dataLinks", "1", "identity", field)
-		if !ok || !value.ContainsUnknowns() {
-			t.Fatalf("managed Redis %s projection lacks unknown/computed semantics", field)
+	for _, field := range []struct {
+		name string
+		typeName string
+	}{
+		{name: "providerId", typeName: "string"},
+		{name: "endpoint", typeName: "string"},
+		{name: "port", typeName: "number"},
+	} {
+		value, ok := propertyAt(host.News, "target", "apps", "0", "dataLinks", "1", "identity", field.name)
+		semantics, valid := propertySemantics(value)
+		if !ok || !valid || !semantics.unknown || semantics.typeName != field.typeName {
+			t.Fatalf("managed Redis %s projection lacks unknown/computed %s semantics", field.name, field.typeName)
 		}
 	}
 
@@ -223,7 +231,8 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 		t.Fatal("Host secrets projection lost its secret semantic class")
 	}
 	redisPassword, ok := propertyAt(host.News, "secrets", "apps", "app", "redis", "password")
-	if !ok || !redisPassword.ContainsUnknowns() || !redisPassword.ContainsSecrets() {
+	passwordSemantics, valid := propertySemantics(redisPassword)
+	if !ok || !valid || !passwordSemantics.unknown || !passwordSemantics.secret || passwordSemantics.typeName != "string" {
 		t.Fatal("generated Redis password lacks unknown+secret semantic classes")
 	}
 	if containsString(resource.NewObjectProperty(host.News), "upstash-api-key-canary") {
@@ -235,6 +244,46 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 	}
 	if got := harness.trace.publicationSnapshot(); len(got) != 0 {
 		t.Fatalf("preview publication events = %v, want none", got)
+	}
+}
+
+type propertySemanticsResult struct {
+	unknown  bool
+	secret   bool
+	typeName string
+}
+
+func propertySemantics(value resource.PropertyValue) (propertySemanticsResult, bool) {
+	switch {
+	case value.IsSecret():
+		semantics, ok := propertySemantics(value.SecretValue().Element)
+		if !ok {
+			return propertySemanticsResult{}, false
+		}
+		semantics.secret = true
+		return semantics, true
+	case value.IsComputed():
+		semantics, ok := propertySemantics(value.Input().Element)
+		if !ok {
+			return propertySemanticsResult{}, false
+		}
+		semantics.unknown = true
+		return semantics, true
+	case value.IsOutput():
+		output := value.OutputValue()
+		semantics, ok := propertySemantics(output.Element)
+		if !ok {
+			return propertySemanticsResult{}, false
+		}
+		semantics.unknown = semantics.unknown || !output.Known
+		semantics.secret = semantics.secret || output.Secret
+		return semantics, true
+	case value.IsString():
+		return propertySemanticsResult{typeName: "string"}, true
+	case value.IsNumber():
+		return propertySemanticsResult{typeName: "number"}, true
+	default:
+		return propertySemanticsResult{}, false
 	}
 }
 

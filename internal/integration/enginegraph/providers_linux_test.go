@@ -155,7 +155,11 @@ func upstashProvider(trace *traceFixture) plugin.Provider {
 				trace.append("upstash:" + req.Name + ":create:ok")
 			}
 			response := recordingCreate(req, resource.ID("upstash-"+req.Name))
-			if req.Type == "upstash:index/redisDatabase:RedisDatabase" && !req.Preview {
+			if req.Type == "upstash:index/redisDatabase:RedisDatabase" && req.Preview {
+				response.Properties["endpoint"] = resource.MakeComputed(resource.NewStringProperty(""))
+				response.Properties["port"] = resource.MakeComputed(resource.NewNumberProperty(0))
+				response.Properties["password"] = resource.MakeSecret(resource.MakeComputed(resource.NewStringProperty("")))
+			} else if req.Type == "upstash:index/redisDatabase:RedisDatabase" && !req.Preview {
 				response.Properties["endpoint"] = resource.NewStringProperty("redis.example.test")
 				response.Properties["port"] = resource.NewNumberProperty(6380)
 				response.Properties["password"] = resource.MakeSecret(resource.NewStringProperty("upstash-password-canary"))
@@ -176,7 +180,7 @@ func upstashProvider(trace *traceFixture) plugin.Provider {
 }
 
 func recordingCreate(req plugin.CreateRequest, id resource.ID) plugin.CreateResponse {
-	response := plugin.CreateResponse{Properties: req.Properties, Status: resource.StatusOK}
+	response := plugin.CreateResponse{Properties: req.Properties.Copy(), Status: resource.StatusOK}
 	if !req.Preview {
 		response.ID = id
 	}
