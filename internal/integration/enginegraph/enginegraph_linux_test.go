@@ -23,6 +23,7 @@ import (
 	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/deploytest"
 	"github.com/pulumi/pulumi/pkg/v3/resource/plugin"
 	"github.com/pulumi/pulumi/pkg/v3/resource/stack"
+	"github.com/pulumi/pulumi/pkg/v3/secrets"
 	"github.com/pulumi/pulumi/pkg/v3/secrets/b64"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
@@ -119,19 +120,71 @@ func TestEngineGraphReadyPublishesAfterOrderedHosts(t *testing.T) {
 	}
 }
 
+func TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication(t *testing.T) {
+	harness := newEngineGraphHarness(t, map[string]bool{
+		"alpha": true,
+		"bravo": true,
+	})
+
+	first, err := harness.update(t, "external-two-host-cloudflare.yaml", "external-two-host-cloudflare-secrets.yaml")
+	if err != nil {
+		t.Fatalf("ready fixture update = %q, want success before maintenance transition", err)
+	}
+	assertReadyCheckpoint(t, first)
+	if got := harness.trace.snapshot(); !slices.Equal(got, []string{
+		"host:alpha:create:ok",
+		"host:bravo:create:ok",
+		"cloudflare:dns:create",
+		"cloudflare:dns:create",
+	}) {
+		t.Fatalf("ready fixture trace = %v, want two Hosts followed by two DNS publications", got)
+	}
+
+	final, err := harness.update(t, "external-two-host-maintenance.yaml", "external-two-host-maintenance-secrets.yaml")
+	if err != nil {
+		t.Fatalf("maintenance update = %q, want success with configured Hosts retained", err)
+	}
+	assertMaintenanceCheckpoint(t, final)
+	if got := harness.trace.publicationSnapshot(); len(got) != 2 {
+		t.Fatalf("Cloudflare publication events = %v, want no new publication during maintenance", got)
+	}
+
+	// This is intentionally RED until the test provider exposes its Update lifecycle callback.
+	// The engine has reached the real Host update steps if the only missing evidence is these entries.
+	got := harness.trace.snapshot()
+	for _, serverKey := range []string{"alpha", "bravo"} {
+		want := "host:" + serverKey + ":update:ok"
+		if countEvent(got, want) != 1 {
+			t.Fatalf("maintenance Host lifecycle trace = %v, want one %q; current test provider does not expose Update", got, want)
+		}
+	}
+}
+
 func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostReadiness map[string]bool) (*traceFixture, *deploy.Snapshot, error) {
 	t.Helper()
+	harness := newEngineGraphHarness(t, hostReadiness)
+	snapshot, updateErr := harness.update(t, configName, secretsName)
+	return harness.trace, snapshot, updateErr
+}
+
+type engineGraphHarness struct {
+	backend       backend.Backend
+	stack         backend.Stack
+	project       *workspace.Project
+	programRoot   string
+	trace          *traceFixture
+	secretsManager secrets.Manager
+	revisionKey    string
+}
+
+func newEngineGraphHarness(t *testing.T, hostReadiness map[string]bool) *engineGraphHarness {
+	t.Helper()
 	ctx := context.Background()
-	configYAML := readFixture(t, configName)
-	secretsYAML := readFixture(t, secretsName)
 	project := &workspace.Project{
 		Name:    tokens.PackageName("sub2api-environment"),
 		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
 	}
-
-	stateDir := t.TempDir()
-	programRoot := t.TempDir()
-	localBackend, err := diy.New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(stateDir), project)
+	localBackend, err := diy.New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(t.TempDir()), project)
 	if err != nil {
 		t.Fatalf("create local backend: %v", err)
 	}
@@ -144,23 +197,37 @@ func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostRead
 		t.Fatalf("create stack: %v", err)
 	}
 
-	trace := &traceFixture{hostReadiness: hostReadiness}
-	languageRuntime := newContextAwareLanguageRuntime(func(ctx *pulumi.Context) error {
-		return program.Register(ctx, release, configYAML, secretsYAML)
-	})
-	hostFactory := deploytest.NewPluginHostF(nil, nil, languageRuntime, nil, nil, engineProviderLoaders(trace)...)
-	host := hostFactory()
 	secretsManager := b64.NewBase64SecretsManager()
 	revisionKey, err := secretsManager.Encrypter().EncryptValue(ctx, "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 	if err != nil {
 		t.Fatalf("encrypt Host revision key: %v", err)
 	}
+	return &engineGraphHarness{
+		backend:        localBackend,
+		stack:          stackState,
+		project:        project,
+		programRoot:    t.TempDir(),
+		trace:          &traceFixture{hostReadiness: hostReadiness},
+		secretsManager: secretsManager,
+		revisionKey:   revisionKey,
+	}
+}
+
+func (h *engineGraphHarness) update(t *testing.T, configName, secretsName string) (*deploy.Snapshot, error) {
+	t.Helper()
+	ctx := context.Background()
+	configYAML := readFixture(t, configName)
+	secretsYAML := readFixture(t, secretsName)
+	languageRuntime := newContextAwareLanguageRuntime(func(ctx *pulumi.Context) error {
+		return program.Register(ctx, release, configYAML, secretsYAML)
+	})
+	hostFactory := deploytest.NewPluginHostF(nil, nil, languageRuntime, nil, nil, engineProviderLoaders(h.trace)...)
 	updateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, updateErr := localBackend.Update(updateCtx, stackState, backend.UpdateOperation{
-		Proj: project,
+	_, updateErr := h.backend.Update(updateCtx, h.stack, backend.UpdateOperation{
+		Proj: h.project,
 		M:    &backend.UpdateMetadata{},
-		Root: programRoot,
+		Root: h.programRoot,
 		Opts: backend.UpdateOptions{
 			AutoApprove: true,
 			SkipPreview: true,
@@ -170,30 +237,30 @@ func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostRead
 				Stderr:           io.Discard,
 				SuppressProgress: true,
 			},
-			Engine: engineOptions(host),
+			Engine: engineOptions(hostFactory),
 		},
-		SecretsManager:  secretsManager,
+		SecretsManager:  h.secretsManager,
 		SecretsProvider: stack.Base64SecretsProvider{},
 		StackConfiguration: backend.StackConfiguration{
 			Config: config.Map{
-				config.MustMakeKey("sub2api-host", "revisionKey"): config.NewSecureValue(revisionKey),
+				config.MustMakeKey("sub2api-host", "revisionKey"): config.NewSecureValue(h.revisionKey),
 			},
-			Decrypter: secretsManager.Decrypter(),
+			Decrypter: h.secretsManager.Decrypter(),
 		},
 		Scopes: backend.CancellationScopes,
 	}, nil)
-	snapshot, snapshotErr := stackState.Snapshot(ctx, stack.Base64SecretsProvider{})
+	snapshot, snapshotErr := h.stack.Snapshot(ctx, stack.Base64SecretsProvider{})
 	if snapshotErr != nil {
 		t.Fatalf("load partial checkpoint: %v", snapshotErr)
 	}
-	return trace, snapshot, updateErr
+	return snapshot, updateErr
 }
 
-func engineOptions(host plugin.Host) engine.UpdateOptions {
+func engineOptions(hostFactory deploytest.PluginHostFactory) engine.UpdateOptions {
 	return engine.UpdateOptions{
 		Parallel: 4,
 		HostFactory: func(context.Context, diag.Sink, diag.Sink, plugin.DebugContext) (plugin.Host, error) {
-			return host, nil
+			return hostFactory(), nil
 		},
 		SkipPluginPreInstall: true,
 	}
@@ -262,4 +329,77 @@ func assertFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	if stackResources != 1 {
 		t.Fatalf("partial checkpoint stack resources = %d, want 1", stackResources)
 	}
+}
+
+func assertReadyCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+	t.Helper()
+	if err := snapshot.VerifyIntegrity(); err != nil {
+		t.Fatalf("ready checkpoint is invalid: %v", err)
+	}
+	stackResources := 0
+	hosts := map[string]bool{}
+	dnsRecords := 0
+	for _, resource := range snapshot.Resources {
+		switch resource.Type {
+		case "pulumi:pulumi:Stack":
+			stackResources++
+		case "sub2api-host:index:Host":
+			hosts[string(resource.ID)] = true
+		case "cloudflare:index/dnsRecord:DnsRecord":
+			dnsRecords++
+		}
+	}
+	if stackResources != 1 || len(hosts) != 2 || !hosts["host-alpha"] || !hosts["host-bravo"] || dnsRecords != 2 {
+		t.Fatalf("ready checkpoint resources = stacks:%d hosts:%d DNS:%d, want one stack, both Hosts, and two DNS records", stackResources, len(hosts), dnsRecords)
+	}
+}
+
+func assertMaintenanceCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+	t.Helper()
+	if err := snapshot.VerifyIntegrity(); err != nil {
+		t.Fatalf("maintenance checkpoint is invalid: %v", err)
+	}
+	stackResources := 0
+	hostResources := 0
+	hosts := map[string]bool{}
+	dnsRecords := 0
+	for _, resource := range snapshot.Resources {
+		switch resource.Type {
+		case "pulumi:pulumi:Stack":
+			stackResources++
+		case "sub2api-host:index:Host":
+			hostResources++
+			name := resource.URN.Name()
+			if name != "host-alpha" && name != "host-bravo" {
+				t.Fatalf("maintenance checkpoint contains Host with unstable identity: %s", resource.URN)
+			}
+			if string(resource.ID) != name {
+				t.Fatalf("maintenance checkpoint Host %s has ID %q, want %q", resource.URN, resource.ID, name)
+			}
+			target, ok := resource.Inputs["target"]
+			if !ok || !target.IsObject() {
+				t.Fatalf("maintenance checkpoint Host %s has no target object", resource.URN)
+			}
+			apps, ok := target.ObjectValue()["apps"]
+			if !ok || !apps.IsArray() || len(apps.ArrayValue()) != 0 {
+				t.Fatalf("maintenance checkpoint Host %s still projects App runtime: %v", resource.URN, target)
+			}
+			hosts[string(resource.ID)] = true
+		case "cloudflare:index/dnsRecord:DnsRecord":
+			dnsRecords++
+		}
+	}
+	if stackResources != 1 || hostResources != 2 || len(hosts) != 2 || !hosts["host-alpha"] || !hosts["host-bravo"] || dnsRecords != 0 {
+		t.Fatalf("maintenance checkpoint resources = stacks:%d hosts:%d DNS:%d, want one stack, both Hosts, and no DNS records", stackResources, hostResources, dnsRecords)
+	}
+}
+
+func countEvent(events []string, want string) int {
+	count := 0
+	for _, event := range events {
+		if event == want {
+			count++
+		}
+	}
+	return count
 }
