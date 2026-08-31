@@ -45,6 +45,7 @@ const release = "ghcr.io/example/sub2api-deploy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaa
 
 const (
 	scriptedAlphaFailure = "scripted Host alpha create failure"
+	scriptedBravoFailure = "scripted Host bravo create failure"
 	alphaFailureTrace    = "host:alpha:create:fail"
 	managedUpstashConfig = "managed-upstash-preview.yaml"
 	managedUpstashSecrets = "managed-upstash-preview-secrets.yaml"
@@ -277,6 +278,142 @@ func TestEngineGraphFailureStopsPublication(t *testing.T) {
 	}
 	if got := trace.publicationSnapshot(); len(got) != 0 {
 		t.Fatalf("Cloudflare publication events = %v, want none after alpha fails", got)
+	}
+}
+
+func TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor(t *testing.T) {
+	harness := newEngineGraphHarness(t, map[string]bool{
+		"alpha": true,
+		"bravo": false,
+	})
+	snapshot, err := harness.update(t, "external-two-host-cloudflare.yaml", "external-two-host-cloudflare-secrets.yaml")
+	if err == nil {
+		t.Fatal("partial-checkpoint update unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), scriptedBravoFailure) {
+		t.Fatalf("partial-checkpoint update error = %q, want sanitized scripted bravo failure %q", err, scriptedBravoFailure)
+	}
+
+	if snapshot == nil {
+		t.Fatal("partial checkpoint is nil")
+	}
+	if err := snapshot.VerifyIntegrity(); err != nil {
+		t.Fatalf("partial checkpoint is invalid: %v", err)
+	}
+
+	stackResources := 0
+	hostResources := 0
+	providerResources := map[string]int{
+		"pulumi:providers:sub2api-host": 0,
+		"pulumi:providers:cloudflare":   0,
+	}
+	dnsResources := 0
+	for _, state := range snapshot.Resources {
+		switch state.Type {
+		case "pulumi:pulumi:Stack":
+			stackResources++
+		case "pulumi:providers:sub2api-host", "pulumi:providers:cloudflare":
+			providerResources[string(state.Type)]++
+		case "sub2api-host:index:Host":
+			hostResources++
+			if state.URN != "urn:pulumi:canary::sub2api-environment::sub2api-host:index:Host::host-alpha" || state.ID != "host-alpha" {
+				t.Fatalf("partial checkpoint Host identity = %s/%q, want stable alpha URN/ID", state.URN, state.ID)
+			}
+			for _, dependency := range state.Dependencies {
+				if dependency.Type() == hostProviderType {
+					t.Fatalf("partial checkpoint alpha Host has unexpected direct Host dependency %s", dependency)
+				}
+			}
+		case "cloudflare:index/dnsRecord:DnsRecord":
+			dnsResources++
+		default:
+			t.Fatalf("partial checkpoint contains unexpected resource type %q: %s", state.Type, state.URN)
+		}
+	}
+	if stackResources != 1 || hostResources != 1 || dnsResources != 0 || providerResources["pulumi:providers:sub2api-host"] != 1 || providerResources["pulumi:providers:cloudflare"] != 1 {
+		t.Fatalf("partial checkpoint resources = stacks:%d providers:%v Hosts:%d DNS:%d, want one stack, exactly one Host and Cloudflare provider, exactly alpha Host, and no DNS", stackResources, providerResources, hostResources, dnsResources)
+	}
+
+	got := harness.trace.snapshot()
+	if !slices.Equal(got, []string{"host:alpha:create:ok", "host:bravo:create:fail"}) {
+		t.Fatalf("sanitized partial lifecycle trace = %v, want alpha create success followed by bravo create failure", got)
+	}
+	if got := harness.trace.publicationSnapshot(); len(got) != 0 {
+		t.Fatalf("Cloudflare publication events = %v, want none after bravo fails", got)
+	}
+}
+
+func TestEngineManagedUpstashStateIsProtectedAndRetained(t *testing.T) {
+	harness := newEngineGraphHarness(t, map[string]bool{"alpha": true})
+	snapshot, err := harness.update(t, managedUpstashConfig, managedUpstashSecrets)
+	if err != nil {
+		t.Fatalf("managed Upstash update failed: %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("managed Upstash checkpoint is nil")
+	}
+	if err := snapshot.VerifyIntegrity(); err != nil {
+		t.Fatalf("managed Upstash checkpoint is invalid: %v", err)
+	}
+
+	const managedRedisType = "upstash:index/redisDatabase:RedisDatabase"
+	stackResources := 0
+	managedRedisResources := 0
+	hostResources := 0
+	dnsResources := 0
+	providerResources := map[string]int{
+		"pulumi:providers:sub2api-host": 0,
+		"pulumi:providers:upstash":      0,
+	}
+	for _, state := range snapshot.Resources {
+		switch state.Type {
+		case "pulumi:pulumi:Stack":
+			stackResources++
+		case "pulumi:providers:sub2api-host":
+			providerResources[string(state.Type)]++
+		case "pulumi:providers:upstash":
+			providerResources[string(state.Type)]++
+			apiKey, ok := state.Inputs["apiKey"]
+			if !ok || !apiKey.ContainsSecrets() {
+				t.Fatal("managed Upstash provider API key lost secret tracking")
+			}
+		case managedRedisType:
+			managedRedisResources++
+			if !state.Protect || !state.RetainOnDelete {
+				t.Fatalf("managed Upstash resource %s flags = protect:%t retain:%t, want both true", state.URN, state.Protect, state.RetainOnDelete)
+			}
+			password, ok := state.Outputs["password"]
+			if !ok || !password.ContainsSecrets() {
+				t.Fatal("managed Upstash password output lost secret tracking")
+			}
+		case "sub2api-host:index:Host":
+			hostResources++
+			if state.URN != "urn:pulumi:canary::sub2api-environment::sub2api-host:index:Host::host-alpha" || state.ID != "host-alpha" {
+				t.Fatalf("managed Upstash Host identity = %s/%q, want stable alpha URN/ID", state.URN, state.ID)
+			}
+			redisPassword, ok := propertyAt(state.Inputs, "secrets", "apps", "app", "redis", "password")
+			if !ok || !redisPassword.ContainsSecrets() {
+				t.Fatal("managed Upstash Host password lost secret tracking")
+			}
+			target, ok := state.Inputs["target"]
+			if !ok || containsString(target, "upstash-api-key-canary") {
+				t.Fatal("Upstash API key canary reached ordinary Host input")
+			}
+		case "cloudflare:index/dnsRecord:DnsRecord":
+			dnsResources++
+		default:
+			t.Fatalf("managed Upstash checkpoint contains unexpected resource type %q: %s", state.Type, state.URN)
+		}
+	}
+	if stackResources != 1 || managedRedisResources != 1 || hostResources != 1 || dnsResources != 0 || providerResources["pulumi:providers:sub2api-host"] != 1 || providerResources["pulumi:providers:upstash"] != 1 {
+		t.Fatalf("managed Upstash checkpoint resources = stacks:%d providers:%v Redis:%d Hosts:%d DNS:%d, want one stack, exactly one Host and Upstash provider, one managed Redis, one alpha Host, and no DNS", stackResources, providerResources, managedRedisResources, hostResources, dnsResources)
+	}
+
+	if got := harness.trace.snapshot(); !slices.Equal(got, []string{"upstash:app-redis:create:ok", "host:alpha:create:ok"}) {
+		t.Fatalf("managed Upstash lifecycle trace = %v, want only Upstash create then Host create", got)
+	}
+	if got := harness.trace.publicationSnapshot(); len(got) != 0 {
+		t.Fatalf("managed Upstash publication events = %v, want none", got)
 	}
 }
 

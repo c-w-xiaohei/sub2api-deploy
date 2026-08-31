@@ -60,6 +60,8 @@ describe("Host controller CI evidence contract", () => {
   it("runs the exact-SHA engine-graph gate with every implemented engine test", () => {
     for (const symbol of [
       "TestEngineGraphFailureStopsPublication",
+      "TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor",
+      "TestEngineManagedUpstashStateIsProtectedAndRetained",
       "TestEngineGraphReadyPublishesAfterOrderedHosts",
       "TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication",
       "TestEngineConfiguredServerCountZero",
