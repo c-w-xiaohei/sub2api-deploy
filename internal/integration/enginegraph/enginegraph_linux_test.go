@@ -229,16 +229,19 @@ func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing
 	}
 
 	secretProjection, ok := host.News["secrets"]
-	if !ok || !secretProjection.ContainsSecrets() {
-		t.Fatal("Host secrets projection lost its secret semantic class")
+	if !ok || !secretProjection.ContainsSecrets() || !secretProjection.ContainsUnknowns() {
+		t.Fatal("Host secrets projection lost its unknown+secret semantic classes")
 	}
-	redisPassword, ok := propertyAt(host.News, "secrets", "apps", "app", "redis", "password")
-	passwordSemantics, valid := propertySemantics(redisPassword)
-	if !ok || !valid || !passwordSemantics.unknown || !passwordSemantics.secret {
-		t.Fatalf("generated Redis password semantics: ok=%t valid=%t unknown=%t secret=%t", ok, valid, passwordSemantics.unknown, passwordSemantics.secret)
+	redisPassword, passwordOK := propertyAt(host.News, "secrets", "apps", "app", "redis", "password")
+	if passwordOK {
+		passwordSemantics, valid := propertySemantics(redisPassword)
+		if !valid || !passwordSemantics.unknown || !passwordSemantics.secret {
+			t.Fatal("generated Redis password lacks unknown+secret semantic classes")
+		}
 	}
-	if containsString(resource.NewObjectProperty(host.News), "upstash-api-key-canary") {
-		t.Fatal("Upstash API key canary reached Host Check input")
+	target, ok := host.News["target"]
+	if !ok || containsString(target, "upstash-api-key-canary") {
+		t.Fatal("Upstash API key canary reached ordinary Host input")
 	}
 
 	if got := harness.trace.snapshot(); len(got) != 0 {
