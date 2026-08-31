@@ -177,7 +177,12 @@ func TestEngineConfiguredServerCountOneTwo(t *testing.T) {
 	if got := harness.trace.publicationSnapshot(); !slices.Equal(got, []string{"cloudflare:dns:create", "cloudflare:dns:create"}) {
 		t.Fatalf("one-server publication trace = %v, want no publication after DNS removal", got)
 	}
-	assertHostDeletionTrace(t, harness.trace.snapshot(), []string{"host:bravo:delete:ok"})
+	events := harness.trace.snapshot()
+	assertHostDeletionTrace(t, events, []string{"host:bravo:delete:ok"})
+	assertDNSDeletionOrdering(t, events, []string{
+		"cloudflare:dns:dns-app-alpha-A:delete:ok",
+		"cloudflare:dns:dns-app-bravo-A:delete:ok",
+	}, "host:bravo:delete:ok")
 }
 
 func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostReadiness map[string]bool) (*traceFixture, *deploy.Snapshot, error) {
@@ -470,13 +475,39 @@ func assertHostDeletionTrace(t *testing.T, events, want []string) {
 	t.Helper()
 	deletions := []string{}
 	for _, event := range events {
-		if strings.HasSuffix(event, ":delete:ok") {
+		if strings.HasPrefix(event, "host:") && strings.HasSuffix(event, ":delete:ok") {
 			deletions = append(deletions, event)
 		}
 	}
 	if !slices.Equal(deletions, want) {
 		t.Fatalf("Host deletion trace = %v, want %v", deletions, want)
 	}
+}
+
+func assertDNSDeletionOrdering(t *testing.T, events, dnsDeletes []string, hostDelete string) {
+	t.Helper()
+	hostIndex := eventIndex(events, hostDelete)
+	if hostIndex == -1 {
+		t.Fatalf("lifecycle trace = %v, want %q", events, hostDelete)
+	}
+	for _, dnsDelete := range dnsDeletes {
+		dnsIndex := eventIndex(events, dnsDelete)
+		if dnsIndex == -1 {
+			t.Fatalf("lifecycle trace = %v, want %q", events, dnsDelete)
+		}
+		if dnsIndex >= hostIndex {
+			t.Fatalf("lifecycle trace = %v, want %q before %q", events, dnsDelete, hostDelete)
+		}
+	}
+}
+
+func eventIndex(events []string, want string) int {
+	for index, event := range events {
+		if event == want {
+			return index
+		}
+	}
+	return -1
 }
 
 func countEvent(events []string, want string) int {
