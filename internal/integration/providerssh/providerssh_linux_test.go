@@ -181,7 +181,7 @@ func TestProviderProcessCancellationReclaimsScriptedSSH(t *testing.T) {
 	if err := waitForProviderFile(filepath.Join(traceDir, "call-1.started")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitForProviderFile(filepath.Join(traceDir, "call-1.child.pid")); err != nil {
+	if err := waitForProviderFile(filepath.Join(traceDir, "call-1.ready")); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
@@ -249,6 +249,9 @@ func startProvider(t *testing.T, mode string) (*providerProcess, string, string)
 		t.Fatalf("build provider: %v", err)
 	}
 	traceDir, responseDir := filepath.Join(t.TempDir(), "trace"), filepath.Join(t.TempDir(), "responses")
+	if err := os.MkdirAll(traceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(responseDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -555,28 +558,43 @@ func waitForProcessExit(pid, start string) error {
 	return fmt.Errorf("SSH process %d survived cancellation", n)
 }
 
-func processStartTime(pid int) string {
+type processSnapshot struct {
+	state string
+	start string
+	pgid  int
+}
+
+func readProcessSnapshot(pid int) (processSnapshot, error) {
 	value, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return processSnapshot{}, err
+	}
+	closeParen := strings.LastIndexByte(string(value), ')')
+	if closeParen < 0 {
+		return processSnapshot{}, errors.New("invalid process stat")
+	}
+	fields := strings.Fields(string(value)[closeParen+1:])
+	if len(fields) < 20 {
+		return processSnapshot{}, errors.New("invalid process stat")
+	}
+	pgid, err := strconv.Atoi(fields[2])
+	if err != nil || pgid <= 0 || fields[19] == "" {
+		return processSnapshot{}, errors.New("invalid process stat")
+	}
+	return processSnapshot{state: fields[0], start: fields[19], pgid: pgid}, nil
+}
+
+func processStartTime(pid int) string {
+	snapshot, err := readProcessSnapshot(pid)
 	if err != nil {
 		return ""
 	}
-	fields := strings.Fields(string(value))
-	if len(fields) < 22 {
-		return ""
-	}
-	return fields[21]
+	return snapshot.start
 }
 
 func sameProcess(pid int, start string) bool {
-	if start == "" || processStartTime(pid) != start {
-		return false
-	}
-	value, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return false
-	}
-	fields := strings.Fields(string(value))
-	return len(fields) >= 3 && fields[2] != "Z"
+	snapshot, err := readProcessSnapshot(pid)
+	return err == nil && snapshot.state != "Z" && snapshot.start == start
 }
 
 func terminateProvider(t *testing.T, pid int, start string, pgid int, executable string, done <-chan error) {
@@ -620,7 +638,15 @@ func terminateProvider(t *testing.T, pid int, start string, pgid int, executable
 }
 
 func terminateRecordedGroup(pid int, start string, recordedPGID int, signal syscall.Signal) bool {
-	if recordedPGID <= 0 || !sameProcess(pid, start) {
+	if recordedPGID <= 0 {
+		return false
+	}
+	first, err := readProcessSnapshot(pid)
+	if err != nil || first.state == "Z" || first.start != start || first.pgid != recordedPGID {
+		return false
+	}
+	second, err := readProcessSnapshot(pid)
+	if err != nil || second.state == "Z" || second.start != start || second.pgid != recordedPGID {
 		return false
 	}
 	pgid, err := syscall.Getpgid(pid)
@@ -633,6 +659,11 @@ func terminateRecordedGroup(pid int, start string, recordedPGID int, signal sysc
 	return true
 }
 
+func sameProcessWithGroup(pid int, start string, recordedPGID int) bool {
+	snapshot, err := readProcessSnapshot(pid)
+	return err == nil && snapshot.state != "Z" && snapshot.start == start && snapshot.pgid == recordedPGID
+}
+
 func processGroupID(pid int) int {
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
@@ -643,43 +674,69 @@ func processGroupID(pid int) int {
 
 func cleanupRecordedSSH(t *testing.T, traceDir, executable string) {
 	t.Helper()
-	deadline := time.Now().Add(2500 * time.Millisecond)
-	quietScans := 0
-	seenPaths := map[string]bool{}
+	discoveryDeadline := time.Now().Add(2500 * time.Millisecond)
+	teardownDeadline := time.Now().Add(5 * time.Second)
+	discoveredPaths := map[string]bool{}
+	completedPaths := map[string]bool{}
 	reported := map[string]bool{}
-	for time.Now().Before(deadline) && quietScans < 2 {
+	scan := func() []string {
 		paths, _ := filepath.Glob(filepath.Join(traceDir, "call-*.pid"))
-		active := false
-		newMetadata := false
+		pendingPaths := []string{}
 		for _, path := range paths {
-			if !seenPaths[path] {
-				seenPaths[path] = true
-				newMetadata = true
+			discoveredPaths[path] = true
+			if completedPaths[path] {
+				continue
 			}
 			processName := executable
 			if strings.Contains(filepath.Base(path), ".child.") {
 				processName = "sleep"
 			}
-			processActive, metadataPending := cleanupRecordedProcess(t, path, processName, deadline, reported)
-			if processActive || metadataPending {
-				active = true
+			state := cleanupRecordedProcess(t, path, processName, teardownDeadline, reported)
+			if state == recordedPendingMetadata {
+				pendingPaths = append(pendingPaths, path)
+			}
+			if state == recordedExited || state == recordedActiveCleaned {
+				completedPaths[path] = true
 			}
 		}
-		if active || newMetadata {
-			quietScans = 0
-		} else {
-			quietScans++
+		return pendingPaths
+	}
+	for time.Now().Before(discoveryDeadline) {
+		scan()
+		remaining := time.Until(discoveryDeadline)
+		if remaining > 25*time.Millisecond {
+			remaining = 25 * time.Millisecond
 		}
-		if quietScans < 2 {
-			time.Sleep(25 * time.Millisecond)
+		if remaining > 0 {
+			time.Sleep(remaining)
 		}
 	}
-	if quietScans < 2 {
-		t.Errorf("SSH process cleanup did not become quiet")
+	finalPending := scan()
+	for _, path := range finalPending {
+		if reported[path] {
+			continue
+		}
+		reported[path] = true
+		t.Errorf("recorded SSH process %s has committed PID metadata with missing or invalid companion metadata", strings.TrimSuffix(filepath.Base(path), ".pid"))
+	}
+	for path := range discoveredPaths {
+		if completedPaths[path] || reported[path] {
+			continue
+		}
+		t.Errorf("recorded SSH process %s teardown state was unresolved", strings.TrimSuffix(filepath.Base(path), ".pid"))
 	}
 }
 
-func cleanupRecordedProcess(t *testing.T, path, executable string, overallDeadline time.Time, reported map[string]bool) (bool, bool) {
+type recordedProcessState uint8
+
+const (
+	recordedExited recordedProcessState = iota
+	recordedPendingMetadata
+	recordedActiveCleaned
+	recordedUnsafe
+)
+
+func cleanupRecordedProcess(t *testing.T, path, executable string, overallDeadline time.Time, reported map[string]bool) recordedProcessState {
 	t.Helper()
 	label := strings.TrimSuffix(filepath.Base(path), ".pid")
 	metadataError := func(message string) {
@@ -691,67 +748,83 @@ func cleanupRecordedProcess(t *testing.T, path, executable string, overallDeadli
 	pidText, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, true
+			return recordedPendingMetadata
 		}
 		metadataError("metadata could not be read")
-		return false, false
+		return recordedUnsafe
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidText)))
 	if err != nil || pid <= 0 {
 		metadataError("has invalid PID metadata")
-		return false, false
+		return recordedUnsafe
 	}
 	base := strings.TrimSuffix(path, ".pid")
 	startText, err := os.ReadFile(base + ".start")
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, true
+			return recordedPendingMetadata
 		}
 		metadataError("has invalid start metadata")
-		return false, false
+		return recordedUnsafe
 	}
 	if strings.TrimSpace(string(startText)) == "" {
-		return false, true
+		metadataError("has invalid start metadata")
+		return recordedUnsafe
 	}
 	start := strings.TrimSpace(string(startText))
 	if _, err := strconv.ParseUint(start, 10, 64); err != nil {
 		metadataError("has invalid start metadata")
-		return false, false
+		return recordedUnsafe
 	}
 	pgidText, err := os.ReadFile(base + ".pgid")
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, true
+			return recordedPendingMetadata
 		}
 		metadataError("has invalid group metadata")
-		return false, false
+		return recordedUnsafe
 	}
 	pgid, err := strconv.Atoi(strings.TrimSpace(string(pgidText)))
 	if err != nil || pgid <= 0 {
 		metadataError("has invalid group metadata")
-		return false, false
+		return recordedUnsafe
 	}
 	commandMatches := processCommandLineMatches
 	if executable == "sleep" {
 		commandMatches = func(pid int, _ string) bool { return processCommandLineMatches(pid, "sleep") }
 	}
-	if !sameProcess(pid, start) || !commandMatches(pid, executable) {
-		return false, false
+	snapshot, snapshotErr := readProcessSnapshot(pid)
+	if snapshotErr != nil {
+		if os.IsNotExist(snapshotErr) {
+			return recordedExited
+		}
+		metadataError("process identity could not be verified")
+		return recordedUnsafe
+	}
+	if snapshot.state == "Z" || snapshot.start != start {
+		return recordedExited
+	}
+	if snapshot.pgid != pgid || !commandMatches(pid, executable) {
+		metadataError(fmt.Sprintf("(%d) identity did not match", pid))
+		return recordedUnsafe
 	}
 	if !terminateRecordedGroup(pid, start, pgid, syscall.SIGTERM) {
 		metadataError(fmt.Sprintf("(%d) could not be safely signaled", pid))
-		return true, false
+		return recordedUnsafe
 	}
-	waitUntil := time.Now().Add(300 * time.Millisecond)
+	waitUntil := time.Now().Add(600 * time.Millisecond)
 	if waitUntil.After(overallDeadline) {
 		waitUntil = overallDeadline
 	}
 	for sameProcess(pid, start) && time.Now().Before(waitUntil) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if sameProcess(pid, start) {
-		terminateRecordedGroup(pid, start, pgid, syscall.SIGKILL)
-		waitUntil = time.Now().Add(300 * time.Millisecond)
+	if sameProcessWithGroup(pid, start, pgid) {
+		if !terminateRecordedGroup(pid, start, pgid, syscall.SIGKILL) {
+			metadataError(fmt.Sprintf("(%d) could not be safely signaled", pid))
+			return recordedUnsafe
+		}
+		waitUntil = time.Now().Add(600 * time.Millisecond)
 		if waitUntil.After(overallDeadline) {
 			waitUntil = overallDeadline
 		}
@@ -761,9 +834,9 @@ func cleanupRecordedProcess(t *testing.T, path, executable string, overallDeadli
 	}
 	if sameProcess(pid, start) {
 		metadataError(fmt.Sprintf("(%d) remained alive", pid))
-		return true, false
+		return recordedUnsafe
 	}
-	return false, false
+	return recordedActiveCleaned
 }
 
 func processExecutableMatches(pid int, executable string) bool {

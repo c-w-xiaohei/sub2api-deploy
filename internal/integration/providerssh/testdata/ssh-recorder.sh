@@ -10,9 +10,16 @@ if [ -f "$counter" ]; then
 fi
 call=$((call + 1))
 printf '%s\n' "$call" > "$counter"
-printf '%s\n' "$$" > "$trace_dir/call-$call.pid"
-awk '{print $22}' /proc/$$/stat > "$trace_dir/call-$call.start"
-awk '{print $5}' /proc/$$/stat > "$trace_dir/call-$call.pgid"
+
+identity_tmp=$trace_dir/call-$call.identity.tmp.$$
+mkdir "$identity_tmp"
+printf '%s\n' "$$" > "$identity_tmp/pid"
+awk '{print $22}' /proc/$$/stat > "$identity_tmp/start"
+awk '{print $5}' /proc/$$/stat > "$identity_tmp/pgid"
+mv "$identity_tmp/start" "$trace_dir/call-$call.start"
+mv "$identity_tmp/pgid" "$trace_dir/call-$call.pgid"
+mv "$identity_tmp/pid" "$trace_dir/call-$call.pid"
+rmdir "$identity_tmp"
 
 args_file=$trace_dir/call-$call.args
 stdin_file=$trace_dir/call-$call.stdin
@@ -31,11 +38,20 @@ fi
 if [ "$mode" = cancel ]; then
   # Keep a descendant alive so cancellation evidence covers the whole SSH group.
   sleep 30 &
-  child=$!
-  printf '%s\n' "$child" > "$trace_dir/call-$call.child.pid"
-  awk '{print $22}' "/proc/$child/stat" > "$trace_dir/call-$call.child.start"
-  awk '{print $5}' "/proc/$child/stat" > "$trace_dir/call-$call.child.pgid"
-  while :; do
+	child=$!
+	child_identity_tmp=$trace_dir/call-$call.child.identity.tmp.$$
+	mkdir "$child_identity_tmp"
+	printf '%s\n' "$child" > "$child_identity_tmp/pid"
+	awk '{print $22}' "/proc/$child/stat" > "$child_identity_tmp/start"
+	awk '{print $5}' "/proc/$child/stat" > "$child_identity_tmp/pgid"
+	mv "$child_identity_tmp/start" "$trace_dir/call-$call.child.start"
+	mv "$child_identity_tmp/pgid" "$trace_dir/call-$call.child.pgid"
+	mv "$child_identity_tmp/pid" "$trace_dir/call-$call.child.pid"
+	rmdir "$child_identity_tmp"
+	ready_tmp=$trace_dir/call-$call.ready.tmp.$$
+	: > "$ready_tmp"
+	mv "$ready_tmp" "$trace_dir/call-$call.ready"
+	while :; do
     sleep 1
   done
 fi
@@ -53,6 +69,10 @@ if [ "$mode" = host-key ]; then
   printf 'Host key verification failed\n' > "$diagnostic"
   exit 255
 fi
+
+ready_tmp=$trace_dir/call-$call.ready.tmp.$$
+: > "$ready_tmp"
+mv "$ready_tmp" "$trace_dir/call-$call.ready"
 
 atomic_copy() {
   source=$1
