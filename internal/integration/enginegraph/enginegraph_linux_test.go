@@ -59,6 +59,7 @@ func TestEngineGraphFailureStopsPublication(t *testing.T) {
 	}
 
 	stateDir := t.TempDir()
+	programRoot := t.TempDir()
 	localBackend, err := diy.New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(stateDir), project)
 	if err != nil {
 		t.Fatalf("create local backend: %v", err)
@@ -101,6 +102,7 @@ func TestEngineGraphFailureStopsPublication(t *testing.T) {
 	_, err = localBackend.Update(updateCtx, stackState, backend.UpdateOperation{
 		Proj: project,
 		M:    &backend.UpdateMetadata{},
+		Root: programRoot,
 		Opts: backend.UpdateOptions{
 			AutoApprove: true,
 			SkipPreview: true,
