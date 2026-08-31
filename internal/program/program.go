@@ -53,8 +53,8 @@ type hostTargetValue struct {
 
 type hostTargetInputs struct {
 	ReleaseArtifact string                    `pulumi:"releaseArtifact"`
-	Apps            []hostAppInputs          `pulumi:"apps"`
-	DataServices    []localDataServiceInputs `pulumi:"dataServices"`
+	Apps            hostAppInputsArray        `pulumi:"apps"`
+	DataServices    localDataServiceInputsArray `pulumi:"dataServices"`
 	ReverseProxy    reverseProxyInputs      `pulumi:"reverseProxy"`
 }
 
@@ -81,7 +81,13 @@ type hostAppInputs struct {
 	DrainTimeout     string                `pulumi:"drainTimeout"`
 	InitialBootstrap bool                  `pulumi:"initialBootstrap"`
 	RuntimeSettings  pulumi.StringMapInput `pulumi:"runtimeSettings"`
-	DataLinks        []dataLinkInputs      `pulumi:"dataLinks"`
+	DataLinks        dataLinkInputsArray   `pulumi:"dataLinks"`
+}
+
+type hostAppInputsArray []hostAppInputs
+
+func (hostAppInputsArray) ElementType() reflect.Type {
+	return reflect.TypeOf([]hostAppValue{})
 }
 
 func (hostAppInputs) ElementType() reflect.Type {
@@ -96,6 +102,12 @@ type dataLinkValue struct {
 type dataLinkInputs struct {
 	Name     string              `pulumi:"name"`
 	Identity dataIdentityInputs `pulumi:"identity"`
+}
+
+type dataLinkInputsArray []dataLinkInputs
+
+func (dataLinkInputsArray) ElementType() reflect.Type {
+	return reflect.TypeOf([]dataLinkValue{})
 }
 
 func (dataLinkInputs) ElementType() reflect.Type {
@@ -136,6 +148,12 @@ type localDataServiceInputs struct {
 	Type        pulumi.StringInput `pulumi:"type"`
 	Port        pulumi.IntInput    `pulumi:"port"`
 	Persistence pulumi.BoolInput   `pulumi:"persistence,optional"`
+}
+
+type localDataServiceInputsArray []localDataServiceInputs
+
+func (localDataServiceInputsArray) ElementType() reflect.Type {
+	return reflect.TypeOf([]localDataServiceValue{})
 }
 
 func (localDataServiceInputs) ElementType() reflect.Type {
@@ -337,14 +355,14 @@ func rejectCrossHostDocker(appID, kind, serviceType, serviceServer string, appSe
 }
 
 func hostTarget(config environment.Config, release, server string, managed map[string]managedRedisInputs) hostTargetInputs {
-	apps := []hostAppInputs{}
+	apps := hostAppInputsArray{}
 	for _, id := range sortedAppIDs(config) {
 		app := config.Apps[id]
 		if !contains(app.Servers, server) {
 			continue
 		}
 		servers := sortedStrings(app.Servers)
-		links := []dataLinkInputs{postgresLink(app.Postgres.Name, app.Postgres.Database, config.Postgres[app.Postgres.Name])}
+		links := dataLinkInputsArray{postgresLink(app.Postgres.Name, app.Postgres.Database, config.Postgres[app.Postgres.Name])}
 		redis := config.Redis[app.Redis.Name]
 		if redis.Type == "upstash" {
 			links = append(links, managedRedisLink(app.Redis.Name, fmt.Sprint(app.Redis.Database), managed[app.Redis.Name]))
@@ -417,8 +435,8 @@ func managedRedisLink(id, database string, service managedRedisInputs) dataLinkI
 	}
 }
 
-func localServices(config environment.Config, server string) []localDataServiceInputs {
-	services := []localDataServiceInputs{}
+func localServices(config environment.Config, server string) localDataServiceInputsArray {
+	services := localDataServiceInputsArray{}
 	for _, id := range sortedPostgresIDs(config) {
 		service := config.Postgres[id]
 		if service.Type == "docker" && service.Server == server {
