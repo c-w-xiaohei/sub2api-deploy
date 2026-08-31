@@ -56,4 +56,41 @@ describe("Host controller CI evidence contract", () => {
     expect(workflow.indexOf("trace/README.txt")).toBeLessThan(events);
     expect(parser).toBeGreaterThan(events);
   });
+
+  it("runs the exact-SHA engine-graph gate with every implemented engine test", () => {
+    for (const symbol of [
+      "TestEngineGraphFailureStopsPublication",
+      "TestEngineGraphReadyPublishesAfterOrderedHosts",
+      "TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication",
+      "TestEngineConfiguredServerCountZero",
+      "TestEngineConfiguredServerCountOneTwo",
+      "TestEngineAppPlacementOneReadyFailure",
+      "TestEngineManagedUpstashPreviewPreservesComputedSecretProjection",
+    ]) {
+      expect(workflow).toContain(symbol);
+    }
+
+    expect(workflow).toContain("engine-graph");
+    expect(workflow).toContain("go test -json");
+    expect(workflow).toContain('event.Action === "skip"');
+    expect(workflow).toContain('event.Action === "pass"');
+    expect(workflow).toContain('event.Action === "fail"');
+    expect(workflow).toContain("required test did not pass");
+    expect(workflow).toContain("test_status=$?");
+    expect(workflow).toContain('test "$test_status" -eq 0');
+  });
+
+  it("publishes engine-graph JSON evidence and trace under its exact target SHA", () => {
+    const gate = workflow.indexOf("engine-graph");
+    expect(gate).toBeGreaterThanOrEqual(0);
+
+    expect(workflow).toContain('sha: process.env.TARGET_SHA');
+    expect(workflow).toContain('gate: "engine-graph"');
+    expect(workflow).toContain("evidence/${TARGET_SHA}");
+    expect(workflow).toContain("trace/");
+    expect(workflow).toContain("events.jsonl");
+    expect(workflow).toContain("metadata.json");
+    expect(workflow).toMatch(/name:\s*engine-graph-evidence-\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
+    expect(workflow).toMatch(/path:\s*evidence\/\$\{\{\s*env\.TARGET_SHA\s*\}\}\//);
+  });
 });
