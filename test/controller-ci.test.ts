@@ -87,15 +87,17 @@ describe("Host controller CI evidence contract", () => {
     expect(workflow).toContain('sha: process.env.TARGET_SHA');
     expect(workflow).toContain('gate: "engine-graph"');
     expect(workflow).toContain("evidence/${TARGET_SHA}");
-    expect(workflow).toMatch(/ENGINE_GRAPH_TRACE_DIR\s*=\s*["']?(?:\$\{GITHUB_WORKSPACE\}\/)?evidence\/\$\{TARGET_SHA\}\/trace/);
+    expect(workflow).toMatch(/ENGINE_GRAPH_TRACE_DIR\s*=\s*\$\{GITHUB_WORKSPACE\}\/evidence\/\$\{TARGET_SHA\}\/trace/);
     expect(workflow).toMatch(
       /(?:export\s+ENGINE_GRAPH_TRACE_DIR|ENGINE_GRAPH_TRACE_DIR\s*=\s*[^\n]*go test -json|env:[\s\S]{0,160}ENGINE_GRAPH_TRACE_DIR)[\s\S]*go test -json/,
     );
     expect(workflow).toContain("events.jsonl");
     expect(workflow).toContain("metadata.json");
-    expect(workflow).toMatch(/(?:compgen[^\n]*\.jsonl|find[^\n]*\.jsonl)[\s\S]*-s/);
-    expect(workflow).toMatch(/(?:compgen[^\n]*\.jsonl|find[^\n]*\.jsonl)[^\n]*(?:trace|ENGINE_GRAPH_TRACE_DIR)/);
-    expect(workflow).toMatch(/(?:trace|ENGINE_GRAPH_TRACE_DIR)[^\n]*(?:compgen|find)[^\n]*\.jsonl/);
+    const traceFindLine = workflow.split("\n").find((line) => line.includes('find "$ENGINE_GRAPH_TRACE_DIR"'));
+    expect(traceFindLine).toBeDefined();
+    expect(traceFindLine).toContain("-name '*.jsonl'");
+    expect(workflow).toContain('test -n "$trace_files"');
+    expect(workflow).toContain('test -s "$trace_file"');
     expect(workflow).toMatch(/name:\s*engine-graph-evidence-\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
     expect(workflow).toMatch(/path:\s*evidence\/\$\{\{\s*env\.TARGET_SHA\s*\}\}\//);
     expect(workflow).toMatch(/path:\s*evidence\/\$\{\{\s*env\.TARGET_SHA\s*\}\}\/[^\n]*trace/);
