@@ -40,6 +40,12 @@ func hostProvider(trace *traceFixture) plugin.Provider {
 		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
 			return plugin.CheckResponse{Properties: req.News}, nil
 		},
+		DiffF: func(_ context.Context, req plugin.DiffRequest) (plugin.DiffResult, error) {
+			if req.OldInputs.DeepEquals(req.NewInputs) {
+				return plugin.DiffResult{Changes: plugin.DiffNone}, nil
+			}
+			return plugin.DiffResult{Changes: plugin.DiffSome}, nil
+		},
 		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
 			if req.Preview {
 				return plugin.CreateResponse{Properties: req.Properties, Status: resource.StatusOK}, nil
