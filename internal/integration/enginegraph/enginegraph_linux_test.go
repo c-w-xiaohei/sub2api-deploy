@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"github.com/pulumi/pulumi/pkg/v3/secrets/b64"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/testing/diagtest"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
@@ -153,6 +155,29 @@ func TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication(t *testing.
 			t.Fatalf("maintenance Host lifecycle trace = %v, want one %q", got, want)
 		}
 	}
+}
+
+func TestEngineConfiguredServerCountOneTwo(t *testing.T) {
+	harness := newEngineGraphHarness(t, map[string]bool{
+		"alpha": true,
+		"bravo": true,
+	})
+
+	ready, err := harness.update(t, "external-two-host-cloudflare.yaml", "external-two-host-cloudflare-secrets.yaml")
+	if err != nil {
+		t.Fatalf("ready fixture update = %q, want success before server-count boundary", err)
+	}
+	assertConfiguredHostCheckpoint(t, ready, []string{"alpha", "bravo"}, []string{"dns-app-alpha-A", "dns-app-bravo-A"})
+
+	one, err := harness.update(t, "external-one-host-empty.yaml", "external-two-host-maintenance-secrets.yaml")
+	if err != nil {
+		t.Fatalf("one-server fixture update = %q, want success after bravo removal", err)
+	}
+	assertConfiguredHostCheckpoint(t, one, []string{"alpha"}, nil)
+	if got := harness.trace.publicationSnapshot(); !slices.Equal(got, []string{"cloudflare:dns:create", "cloudflare:dns:create"}) {
+		t.Fatalf("one-server publication trace = %v, want no publication after DNS removal", got)
+	}
+	assertHostDeletionTrace(t, harness.trace.snapshot(), []string{"host:bravo:delete:ok"})
 }
 
 func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostReadiness map[string]bool) (*traceFixture, *deploy.Snapshot, error) {
@@ -393,6 +418,64 @@ func assertMaintenanceCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	}
 	if stackResources != 1 || hostResources != 2 || len(hosts) != 2 || !hosts["host-alpha"] || !hosts["host-bravo"] || dnsRecords != 0 {
 		t.Fatalf("maintenance checkpoint resources = stacks:%d hosts:%d DNS:%d, want one stack, both Hosts, and no DNS records", stackResources, hostResources, dnsRecords)
+	}
+}
+
+func assertConfiguredHostCheckpoint(t *testing.T, snapshot *deploy.Snapshot, serverKeys, wantDNSNames []string) {
+	t.Helper()
+	if snapshot == nil {
+		t.Fatal("configured-server checkpoint is nil")
+	}
+	if err := snapshot.VerifyIntegrity(); err != nil {
+		t.Fatalf("configured-server checkpoint is invalid: %v", err)
+	}
+
+	wantHosts := make(map[string]resource.ID, len(serverKeys))
+	for _, serverKey := range serverKeys {
+		wantHosts["urn:pulumi:canary::sub2api-environment::sub2api-host:index:Host::host-"+serverKey] = resource.ID("host-" + serverKey)
+	}
+	gotHosts := make(map[string]resource.ID)
+	gotDNS := make(map[string]resource.ID)
+	stackResources := 0
+	for _, state := range snapshot.Resources {
+		switch state.Type {
+		case "pulumi:pulumi:Stack":
+			stackResources++
+		case "sub2api-host:index:Host":
+			gotHosts[string(state.URN)] = state.ID
+		case "cloudflare:index/dnsRecord:DnsRecord":
+			gotDNS[string(state.URN)] = state.ID
+		default:
+			if !strings.HasPrefix(string(state.Type), "pulumi:providers:") {
+				t.Fatalf("configured-server checkpoint contains unexpected resource type %q: %s", state.Type, state.URN)
+			}
+		}
+	}
+	if !maps.Equal(gotHosts, wantHosts) {
+		t.Fatalf("configured Host URN/ID set = %v, want %v", gotHosts, wantHosts)
+	}
+	wantDNS := make(map[string]resource.ID, len(wantDNSNames))
+	for _, name := range wantDNSNames {
+		wantDNS["urn:pulumi:canary::sub2api-environment::cloudflare:index/dnsRecord:DnsRecord::"+name] = resource.ID("cloudflare-" + name)
+	}
+	if stackResources != 1 {
+		t.Fatalf("configured-server checkpoint stack resources = %d, want 1 (provider states may remain independently)", stackResources)
+	}
+	if !maps.Equal(gotDNS, wantDNS) {
+		t.Fatalf("configured-server checkpoint DNS URN set = %v, want %v", gotDNS, wantDNS)
+	}
+}
+
+func assertHostDeletionTrace(t *testing.T, events, want []string) {
+	t.Helper()
+	deletions := []string{}
+	for _, event := range events {
+		if strings.HasSuffix(event, ":delete:ok") {
+			deletions = append(deletions, event)
+		}
+	}
+	if !slices.Equal(deletions, want) {
+		t.Fatalf("Host deletion trace = %v, want %v", deletions, want)
 	}
 }
 
