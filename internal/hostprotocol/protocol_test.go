@@ -102,6 +102,32 @@ func TestDecodeFromReaderIsBoundedAndTyped(t *testing.T) {
 	}
 }
 
+func TestProtocolFrameBoundaries(t *testing.T) {
+	encoded, err := EncodeResponse(Response{Error: &RemoteError{Category: ErrorProtocol, Code: CodeMalformedFrame}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newline := bytes.IndexByte(encoded, '\n')
+	if newline < 0 {
+		t.Fatal("encoded response has no frame header")
+	}
+	base := encoded[newline+1:]
+	for _, size := range []int{MaxFrameSize - 1, MaxFrameSize} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			body := append(append([]byte(nil), base...), bytes.Repeat([]byte{' '}, size-len(base))...)
+			frame := append([]byte(Magic+strconv.Itoa(len(body))+"\n"), body...)
+			if _, err := DecodeResponse(frame); err != nil {
+				t.Fatalf("frame body size %d rejected: %v", size, err)
+			}
+		})
+	}
+	oversized := bytes.Repeat([]byte{' '}, MaxFrameSize+1)
+	frame := append([]byte(Magic+strconv.Itoa(len(oversized))+"\n"), oversized...)
+	if _, err := DecodeResponse(frame); err == nil {
+		t.Fatal("max+1 response frame accepted")
+	}
+}
+
 func TestDecodeRejectsCaseFoldedAndNestedUnknownJSON(t *testing.T) {
 	for _, body := range []string{`{"Version":1,"error":{"category":"protocol","code":"malformed-frame"}}`, `{"version":1,"Version":1,"error":{"category":"protocol","code":"malformed-frame"}}`, `{"version":1,"result":{"status":"inspected","observation":{"machine":{"value":"m","unknown":true},"ownership":{"value":"o"},"appliedRevision":"r","ready":true}}}`} {
 		if _, err := DecodeResponse(appendFrame([]byte(body))); err == nil {

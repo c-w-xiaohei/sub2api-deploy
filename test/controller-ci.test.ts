@@ -105,4 +105,39 @@ describe("Host controller CI evidence contract", () => {
     expect(workflow).toMatch(/name:\s*engine-graph-evidence-\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
     expect(workflow).toMatch(/path:\s*evidence\/\$\{\{\s*env\.TARGET_SHA\s*\}\}\//);
   });
+
+  it("requires a distinct exact-SHA provider-ssh evidence job", () => {
+    const start = workflow.indexOf("  provider-ssh:");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const nextJobMatch = /\n  [a-z][a-z0-9-]*:\s*\n/g;
+    nextJobMatch.lastIndex = start + 3;
+    const nextJobResult = nextJobMatch.exec(workflow);
+    const nextJob = nextJobResult?.index ?? -1;
+    const job = workflow.slice(start, nextJob < 0 ? workflow.length : nextJob);
+
+    expect(job).toContain("TestProviderProcessUsesScriptedSSHTransport");
+    expect(job).toContain("TestProtocolFrameBoundaries");
+    expect(job).toContain("TestLoopbackStrictKnownHostAndOptionTerminator");
+    expect(job).toContain("go test -json");
+    expect(job).toContain('event.Action === "skip"');
+    expect(job).toContain('event.Action === "fail"');
+    expect(job).toContain('event.Action === "pass"');
+    expect(job).toContain('result ?? "absent"');
+    expect(job).toContain("required test did not pass");
+    expect(job).toContain("test_status=$?");
+    expect(job).toContain('test "$test_status" -eq 0');
+
+    expect(job).toContain("openssh-server");
+    expect(job).toContain("command -v sshd");
+    expect(job).toMatch(/\[\[\s+"\$TARGET_SHA"\s+=~\s+\^\[0-9a-f\]\{40\}\$\s+\]\]/);
+    expect(job).toMatch(/ref:\s*\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
+    expect(job).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
+
+    expect(job).toContain('gate: "provider-ssh"');
+    expect(job).toContain("provider-ssh-evidence-${{ env.TARGET_SHA }}");
+    expect(job).toContain("evidence/${{ env.TARGET_SHA }}/");
+    expect(job).toContain("events.jsonl");
+    expect(job).toContain("metadata.json");
+    expect(job).toContain("trace/");
+  });
 });
