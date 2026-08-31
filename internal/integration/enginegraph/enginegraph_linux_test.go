@@ -201,6 +201,24 @@ func TestEngineConfiguredServerCountOneTwo(t *testing.T) {
 	}, "host:bravo:delete:ok")
 }
 
+func TestEngineConfiguredServerCountZero(t *testing.T) {
+	trace, snapshot, err := runEngineGraphUpdate(t, "external-zero-server.yaml", "external-zero-server-secrets.yaml", nil)
+	if err != nil {
+		if !strings.Contains(err.Error(), "servers, postgres, redis, and apps are required") {
+			t.Fatalf("zero-server update error = %q, want the known environment.Validate empty-server error", err)
+		}
+		t.Fatalf("zero-server update = %q, want success with an empty configured-server graph", err)
+	}
+
+	assertConfiguredHostCheckpoint(t, snapshot, nil, nil)
+	if got := trace.snapshot(); len(got) != 0 {
+		t.Fatalf("zero-server lifecycle trace = %v, want none", got)
+	}
+	if got := trace.publicationSnapshot(); len(got) != 0 {
+		t.Fatalf("zero-server publication trace = %v, want none", got)
+	}
+}
+
 func TestEngineAppPlacementOneReadyFailure(t *testing.T) {
 	t.Run("alpha failure blocks publication", func(t *testing.T) {
 		trace, snapshot, err := runEngineGraphUpdate(t, "external-two-host-cloudflare-app-alpha.yaml", "external-two-host-cloudflare-secrets.yaml", map[string]bool{
