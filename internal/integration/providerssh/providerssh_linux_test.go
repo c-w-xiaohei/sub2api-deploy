@@ -57,14 +57,44 @@ func TestProviderProcessUsesScriptedSSHTransport(t *testing.T) {
 	oldRevision := providerRevision(t, key, identity, oldTarget, secrets)
 	desiredRevision := providerRevision(t, key, identity, nextTarget, secrets)
 	oldObservation := providerObservation(oldTarget, oldRevision)
+	nextObservation := providerObservation(nextTarget, desiredRevision)
 	state := providerCheckpoint(t, oldInputs, oldObservation, oldRevision)
+	operationEvidence := hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: identity, Action: hostcontract.ActionReconcile, TargetRevision: desiredRevision, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationPending}
+	operationEvidenceJSON, err := json.Marshal(operationEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationKeyJSON, err := json.Marshal(operationEvidence.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeEvidence := operationEvidence
+	completeEvidence.Status = hostprotocol.OperationComplete
+	completeEvidenceJSON, err := json.Marshal(completeEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	provider, traceDir, responseDir := startProvider(t, "normal")
+	inspectFrame, err := hostprotocol.EncodeRequest(hostprotocol.Request{Action: hostcontract.ActionInspect, Server: hostcontract.ServerTarget{SSHAlias: providerAlias}, Resource: identity, TargetRevision: desiredRevision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconcileFrame, err := hostprotocol.EncodeRequest(hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: providerAlias}, Resource: identity, TargetRevision: desiredRevision, PriorAppliedRevision: oldRevision, Target: &nextTarget, Secrets: &secrets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProviderFixture(t, traceDir, "expected-inspect-frame", inspectFrame)
+	writeProviderFixture(t, traceDir, "expected-reconcile-frame", reconcileFrame)
+	writeProviderFixture(t, traceDir, "expected-operation-key", operationKeyJSON)
+	writeProviderFixture(t, traceDir, "expected-pending-evidence", operationEvidenceJSON)
+	writeProviderFixture(t, traceDir, "expected-complete-evidence", completeEvidenceJSON)
+	writeResponse(t, responseDir, "response-1", inspectedResponse(oldObservation))
+	writeResponse(t, responseDir, "response-pending", inspectedEvidenceResponse(oldObservation, &operationEvidence))
+	writeResponse(t, responseDir, "response-applied", appliedResponse(desiredRevision))
+	writeResponse(t, responseDir, "response-complete", inspectedEvidenceResponse(nextObservation, &completeEvidence))
+	writeResponse(t, responseDir, "response-conflict", conflictResponse())
 	configureProviderProcess(t, provider.client)
-	writeResponse(t, responseDir, 1, inspectedResponse(oldObservation))
-	// The lost reconcile has no terminal observation. A retry must stop rather
-	// than issue the same non-idempotent operation without remote evidence.
-	writeResponse(t, responseDir, 3, inspectedResponse(oldObservation))
 
 	request := pulumirpc.UpdateRequest{
 		Id:         providerStableID(identity),
@@ -82,34 +112,41 @@ func TestProviderProcessUsesScriptedSSHTransport(t *testing.T) {
 	if err := waitForProviderFile(filepath.Join(traceDir, "call-2.stdin")); err != nil {
 		t.Fatal(err)
 	}
+	assertProviderStateDirectorySafe(t, filepath.Join(traceDir, "state.pending"))
 	second, err := provider.client.Update(t.Context(), &request)
-	if err == nil || second != nil {
-		t.Fatal("response-loss retry was not fail-closed")
+	if err != nil || second == nil {
+		t.Fatal("same-key response-loss resume did not succeed")
 	}
-	if err := waitForProviderFile(filepath.Join(traceDir, "call-3.stdin")); err != nil {
+	if err := waitForProviderFile(filepath.Join(traceDir, "call-5.stdin")); err != nil {
 		t.Fatal(err)
 	}
 
 	assertProviderSSHInvocation(t, traceDir, 1, providerAlias, providerSecret)
 	assertProviderSSHInvocation(t, traceDir, 2, providerAlias, providerSecret)
 	assertProviderSSHInvocation(t, traceDir, 3, providerAlias, providerSecret)
-	inspectFrame, err := hostprotocol.EncodeRequest(hostprotocol.Request{Action: hostcontract.ActionInspect, Server: hostcontract.ServerTarget{SSHAlias: providerAlias}, Resource: identity, TargetRevision: desiredRevision})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reconcileFrame, err := hostprotocol.EncodeRequest(hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: providerAlias}, Resource: identity, TargetRevision: desiredRevision, PriorAppliedRevision: oldRevision, Target: &nextTarget, Secrets: &secrets})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assertProviderSSHInvocation(t, traceDir, 4, providerAlias, providerSecret)
+	assertProviderSSHInvocation(t, traceDir, 5, providerAlias, providerSecret)
 	assertProviderFile(t, filepath.Join(traceDir, "call-1.stdin"), inspectFrame)
 	assertProviderFile(t, filepath.Join(traceDir, "call-2.stdin"), reconcileFrame)
 	assertProviderFile(t, filepath.Join(traceDir, "call-3.stdin"), inspectFrame)
-	if got := providerSSHCallCount(t, traceDir); got != 3 {
-		t.Fatalf("SSH calls after response-loss retry = %d, want 3 with no second reconcile", got)
+	assertProviderFile(t, filepath.Join(traceDir, "call-4.stdin"), reconcileFrame)
+	assertProviderFile(t, filepath.Join(traceDir, "call-5.stdin"), inspectFrame)
+	if got := providerSSHCallCount(t, traceDir); got != 5 {
+		t.Fatalf("SSH calls after response-loss resume = %d, want 5 including final inspect", got)
 	}
-	if _, err := os.Stat(filepath.Join(traceDir, "call-4.stdin")); !os.IsNotExist(err) {
-		t.Fatalf("retry started an unsafe second operation: call-4 = %v", err)
+	if _, err := os.Stat(filepath.Join(traceDir, "call-6.stdin")); !os.IsNotExist(err) {
+		t.Fatalf("response-loss resume issued an unexpected sixth SSH call")
 	}
+	assertProviderFile(t, filepath.Join(traceDir, "effect-marker"), []byte("reconcile-effect\n"))
+	effectLog := mustReadProviderFile(t, filepath.Join(traceDir, "effect.log"))
+	if lines := bytes.Count(effectLog, []byte{'\n'}); lines != 1 {
+		t.Fatalf("effect log line count = %d, want 1", lines)
+	}
+	assertProviderFile(t, filepath.Join(traceDir, "effect.log"), append(operationKeyJSON, '\n'))
+	assertProviderFile(t, filepath.Join(traceDir, "operation-key-evidence"), operationKeyJSON)
+	assertProviderStateDirectorySafe(t, filepath.Join(traceDir, "state.complete"))
+	assertProviderFile(t, filepath.Join(traceDir, "state.complete", "key"), operationKeyJSON)
+	assertProviderFile(t, filepath.Join(traceDir, "state.complete", "evidence"), completeEvidenceJSON)
 	if strings.Contains(string(mustReadProviderFile(t, filepath.Join(traceDir, "call-2.args"))), providerSecret) {
 		t.Fatal("secret reached SSH argv")
 	}
@@ -231,7 +268,18 @@ func startProvider(t *testing.T, mode string) (*providerProcess, string, string)
 	cmd := exec.Command(providerPath)
 	cmd.Dir = root
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PATH="+sshDir+string(os.PathListSeparator)+os.Getenv("PATH"), "SSH_TRACE_DIR="+traceDir, "SSH_RESPONSE_DIR="+responseDir, "SSH_MODE_FILE="+modeFile, "SSH_DROP_RESPONSE_CALL=2")
+	cmd.Env = append(os.Environ(),
+		"PATH="+sshDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SSH_TRACE_DIR="+traceDir,
+		"SSH_RESPONSE_DIR="+responseDir,
+		"SSH_MODE_FILE="+modeFile,
+		"SSH_DROP_RESPONSE_CALL=2",
+		"SSH_EXPECTED_INSPECT_FRAME="+filepath.Join(traceDir, "expected-inspect-frame"),
+		"SSH_EXPECTED_RECONCILE_FRAME="+filepath.Join(traceDir, "expected-reconcile-frame"),
+		"SSH_EXPECTED_OPERATION_KEY="+filepath.Join(traceDir, "expected-operation-key"),
+		"SSH_EXPECTED_PENDING_EVIDENCE="+filepath.Join(traceDir, "expected-pending-evidence"),
+		"SSH_EXPECTED_COMPLETE_EVIDENCE="+filepath.Join(traceDir, "expected-complete-evidence"),
+	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -306,15 +354,34 @@ func inspectedResponse(observation hostcontract.StableObservation) hostprotocol.
 	return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &observation}}
 }
 
-func writeResponse(t *testing.T, dir string, call int, response hostprotocol.Response) {
+func inspectedEvidenceResponse(observation hostcontract.StableObservation, evidence *hostprotocol.OperationEvidence) hostprotocol.Response {
+	return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &observation, OperationEvidence: evidence}}
+}
+
+func appliedResponse(revision string) hostprotocol.Response {
+	return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: revision}}
+}
+
+func writeResponse(t *testing.T, dir, name string, response hostprotocol.Response) {
 	t.Helper()
 	frame, err := hostprotocol.EncodeResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "response-"+strconv.Itoa(call)), frame, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), frame, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeProviderFixture(t *testing.T, dir, name string, value []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), value, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func conflictResponse() hostprotocol.Response {
+	return hostprotocol.Response{Version: hostprotocol.Version, Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorConflict, Code: hostprotocol.CodeOperationConflict}}
 }
 
 func providerRPCProperties(t *testing.T, values property.Map) *structpb.Struct {
@@ -407,6 +474,27 @@ func assertProviderFile(t *testing.T, path string, want []byte) {
 	got := mustReadProviderFile(t, path)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("%s frame mismatch: got length %d, want length %d, first differing byte offset %d", filepath.Base(path), len(got), len(want), firstDifferingByte(got, want))
+	}
+}
+
+func assertProviderStateDirectorySafe(t *testing.T, path string) {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"key": true, "evidence": true}
+	for _, entry := range entries {
+		if !allowed[entry.Name()] || entry.IsDir() {
+			t.Fatalf("state directory %s contains an unsafe entry", filepath.Base(path))
+		}
+		value, err := os.ReadFile(filepath.Join(path, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(value, []byte(providerSecret)) {
+			t.Fatalf("state directory %s contains the secret canary", filepath.Base(path))
+		}
 	}
 }
 

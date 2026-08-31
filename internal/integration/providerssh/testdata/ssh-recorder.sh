@@ -29,15 +29,15 @@ if [ -f "$SSH_MODE_FILE" ]; then
   mode=$(cat "$SSH_MODE_FILE")
 fi
 if [ "$mode" = cancel ]; then
-	# Keep a descendant alive so cancellation evidence covers the whole SSH group.
-	sleep 30 &
-	child=$!
-	printf '%s\n' "$child" > "$trace_dir/call-$call.child.pid"
-	awk '{print $22}' "/proc/$child/stat" > "$trace_dir/call-$call.child.start"
-	awk '{print $5}' "/proc/$child/stat" > "$trace_dir/call-$call.child.pgid"
-	while :; do
-		sleep 1
-	done
+  # Keep a descendant alive so cancellation evidence covers the whole SSH group.
+  sleep 30 &
+  child=$!
+  printf '%s\n' "$child" > "$trace_dir/call-$call.child.pid"
+  awk '{print $22}' "/proc/$child/stat" > "$trace_dir/call-$call.child.start"
+  awk '{print $5}' "/proc/$child/stat" > "$trace_dir/call-$call.child.pgid"
+  while :; do
+    sleep 1
+  done
 fi
 if [ "$mode" = host-key ]; then
   diagnostic=
@@ -53,7 +53,90 @@ if [ "$mode" = host-key ]; then
   printf 'Host key verification failed\n' > "$diagnostic"
   exit 255
 fi
-if [ "${SSH_DROP_RESPONSE_CALL:-}" = "$call" ]; then
+
+atomic_copy() {
+  source=$1
+  destination=$2
+  temporary=$destination.tmp.$$
+  cp "$source" "$temporary"
+  mv "$temporary" "$destination"
+}
+
+create_exclusive() {
+  destination=$1
+  value=$2
+  (set -C; printf '%s\n' "$value" > "$destination") 2>/dev/null
+}
+
+create_exclusive_empty() {
+  destination=$1
+  (set -C; : > "$destination") 2>/dev/null
+}
+
+write_pending_state() {
+  temporary=$trace_dir/state.pending.tmp.$$
+  if [ -e "$trace_dir/state.pending" ] || ! mkdir "$temporary" 2>/dev/null; then
+    return 1
+  fi
+  cp "$SSH_EXPECTED_OPERATION_KEY" "$temporary/key"
+  cp "$SSH_EXPECTED_PENDING_EVIDENCE" "$temporary/evidence"
+  mv "$temporary" "$trace_dir/state.pending"
+}
+
+write_complete_state() {
+  temporary=$trace_dir/state.complete.tmp.$$
+  if [ -e "$trace_dir/state.complete" ] || ! mkdir "$temporary" 2>/dev/null; then
+    return 1
+  fi
+  cp "$SSH_EXPECTED_OPERATION_KEY" "$temporary/key"
+  cp "$SSH_EXPECTED_COMPLETE_EVIDENCE" "$temporary/evidence"
+  mv "$temporary" "$trace_dir/state.complete"
+}
+
+conflict_response() {
+  cat "$SSH_RESPONSE_DIR/response-conflict"
+  exit 0
+}
+
+if cmp -s "$stdin_file" "$SSH_EXPECTED_RECONCILE_FRAME"; then
+  if [ -e "$trace_dir/state.complete" ]; then
+    cmp -s "$trace_dir/state.complete/key" "$SSH_EXPECTED_OPERATION_KEY" || conflict_response
+	cmp -s "$stdin_file" "$SSH_EXPECTED_RECONCILE_FRAME" || conflict_response
+    cat "$SSH_RESPONSE_DIR/response-applied"
+    exit 0
+  fi
+  if [ -e "$trace_dir/state.pending" ]; then
+    cmp -s "$trace_dir/state.pending/key" "$SSH_EXPECTED_OPERATION_KEY" || conflict_response
+    write_complete_state || conflict_response
+    rm -rf "$trace_dir/state.pending"
+    cat "$SSH_RESPONSE_DIR/response-applied"
+    exit 0
+  fi
+  write_pending_state || conflict_response
+  atomic_copy "$SSH_EXPECTED_OPERATION_KEY" "$trace_dir/operation-key-evidence"
+  create_exclusive "$trace_dir/effect-marker" "reconcile-effect" || conflict_response
+  create_exclusive_empty "$trace_dir/effect.log" || conflict_response
+  cat "$SSH_EXPECTED_OPERATION_KEY" >> "$trace_dir/effect.log"
+  printf '\n' >> "$trace_dir/effect.log"
+  if [ "${SSH_DROP_RESPONSE_CALL:-}" = "$call" ]; then
+    exit 0
+  fi
   exit 0
 fi
-cat "$SSH_RESPONSE_DIR/response-$call"
+
+if cmp -s "$stdin_file" "$SSH_EXPECTED_INSPECT_FRAME"; then
+  if [ -e "$trace_dir/state.complete" ]; then
+    cmp -s "$trace_dir/state.complete/key" "$SSH_EXPECTED_OPERATION_KEY" || conflict_response
+    cat "$SSH_RESPONSE_DIR/response-complete"
+    exit 0
+  fi
+  if [ -e "$trace_dir/state.pending" ]; then
+    cmp -s "$trace_dir/state.pending/key" "$SSH_EXPECTED_OPERATION_KEY" || conflict_response
+    cat "$SSH_RESPONSE_DIR/response-pending"
+    exit 0
+  fi
+  cat "$SSH_RESPONSE_DIR/response-1"
+  exit 0
+fi
+
+conflict_response
