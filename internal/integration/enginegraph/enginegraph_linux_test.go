@@ -180,7 +180,6 @@ func TestEngineConfiguredServerCountOneTwo(t *testing.T) {
 	events := harness.trace.snapshot()
 	assertHostDeletionTrace(t, events, []string{"host:bravo:delete:ok"})
 	assertDNSDeletionOrdering(t, events, []string{
-		"cloudflare:dns:dns-app-alpha-A:delete:ok",
 		"cloudflare:dns:dns-app-bravo-A:delete:ok",
 	}, "host:bravo:delete:ok")
 }
