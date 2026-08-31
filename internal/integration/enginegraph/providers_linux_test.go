@@ -51,9 +51,13 @@ func hostProvider(trace *traceFixture) plugin.Provider {
 			if req.URN.Name() != "host-"+serverKey {
 				return plugin.CreateResponse{}, errors.New("test Host URN does not match server key")
 			}
-			if serverKey == "alpha" {
+			// hostReadiness is populated before the engine starts and is immutable during the update.
+			if !trace.hostReadiness[serverKey] {
 				trace.append("host:" + serverKey + ":create:fail")
-				return plugin.CreateResponse{}, errors.New(scriptedAlphaFailure)
+				if serverKey == "alpha" {
+					return plugin.CreateResponse{}, errors.New(scriptedAlphaFailure)
+				}
+				return plugin.CreateResponse{}, errors.New("scripted Host " + serverKey + " create failure")
 			}
 			trace.append("host:" + serverKey + ":create:ok")
 			return plugin.CreateResponse{
