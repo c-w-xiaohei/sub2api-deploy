@@ -66,6 +66,21 @@ reverseProxy:
   dnsChallengeToken: dns-placeholder
 `
 
+const emptyTopologyConfig = `version: 1
+reverseProxy:
+  image: traefik:v3.3.3
+  acmeEmail: ops@example.com
+servers: {}
+postgres: {}
+redis: {}
+apps: {}
+`
+
+const emptyTopologySecrets = `revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+reverseProxy:
+  dnsChallengeToken: dns-placeholder
+`
+
 func TestParseAndValidateAcceptsValidEnvironment(t *testing.T) {
 	config, err := ParseConfig([]byte(validConfig))
 	if err != nil {
@@ -87,6 +102,55 @@ func TestParseAndValidateAcceptsValidEnvironment(t *testing.T) {
 	}
 	if validated.Postgres["main-db"].Port == nil || *validated.Postgres["main-db"].Port != 5432 || validated.Redis["main-cache"].Port == nil || *validated.Redis["main-cache"].Port != 6379 {
 		t.Fatalf("service defaults were not applied")
+	}
+}
+
+func TestValidateAcceptsExplicitlyEmptyTopology(t *testing.T) {
+	validated, err := Validate(mustParseConfig(t, emptyTopologyConfig), mustParseSecrets(t, emptyTopologySecrets))
+	if err != nil {
+		t.Fatalf("Validate rejected explicitly empty topology: %v", err)
+	}
+	if len(validated.ServerIDs) != 0 {
+		t.Fatalf("ServerIDs = %v, want no servers", validated.ServerIDs)
+	}
+}
+
+func TestValidateStillRequiresRevisionAndReverseProxySecretsForEmptyTopology(t *testing.T) {
+	for name, secrets := range map[string]string{
+		"revision key": strings.Replace(emptyTopologySecrets, "revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=\n", "", 1),
+		"reverse proxy": strings.Replace(emptyTopologySecrets, "reverseProxy:\n  dnsChallengeToken: dns-placeholder\n", "", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Validate(mustParseConfig(t, emptyTopologyConfig), mustParseSecrets(t, secrets)); err == nil {
+				t.Fatalf("Validate accepted empty topology without %s", name)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsOmittedOrNullTopologyMaps(t *testing.T) {
+	for name, replacement := range map[string]string{
+		"omitted servers": "",
+		"null postgres":  "postgres: null\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := emptyTopologyConfig
+			if name == "omitted servers" {
+				input = strings.Replace(input, "servers: {}\n", replacement, 1)
+			} else {
+				input = strings.Replace(input, "postgres: {}\n", replacement, 1)
+			}
+			if _, err := Validate(mustParseConfig(t, input), mustParseSecrets(t, emptyTopologySecrets)); err == nil {
+				t.Fatalf("Validate accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsPartiallyEmptyTopology(t *testing.T) {
+	input := strings.Replace(emptyTopologyConfig, "servers: {}", "servers:\n  edge: {}", 1)
+	if _, err := Validate(mustParseConfig(t, input), mustParseSecrets(t, emptyTopologySecrets)); err == nil {
+		t.Fatal("Validate accepted topology with only servers configured")
 	}
 }
 

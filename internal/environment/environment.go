@@ -567,7 +567,9 @@ func Validate(config Config, secrets Secrets) (ValidatedConfig, error) {
 	if config.ReverseProxy.Image == "" || config.ReverseProxy.AcmeEmail == "" {
 		return ValidatedConfig{}, fmt.Errorf("reverseProxy.image and reverseProxy.acmeEmail are required")
 	}
-	if len(config.Servers) == 0 || len(config.Apps) == 0 || len(config.Postgres) == 0 || len(config.Redis) == 0 {
+	if config.Servers == nil || config.Postgres == nil || config.Redis == nil || config.Apps == nil ||
+		(len(config.Servers) > 0 || len(config.Postgres) > 0 || len(config.Redis) > 0 || len(config.Apps) > 0) &&
+		(len(config.Servers) == 0 || len(config.Postgres) == 0 || len(config.Redis) == 0 || len(config.Apps) == 0) {
 		return ValidatedConfig{}, fmt.Errorf("servers, postgres, redis, and apps are required")
 	}
 	for id := range config.Servers {
