@@ -1,0 +1,32 @@
+version: 1
+reverseProxy:
+  image: traefik@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  acmeEmail: ops@example.test
+servers:
+  alpha:
+    sshAlias: alpha-ssh
+    addresses:
+      public:
+        ipv4: 198.51.100.11
+postgres:
+  app-postgres:
+    type: external
+    host: postgres.external.test
+    port: 5433
+    tls: {mode: verify-full}
+redis:
+  app-redis:
+    type: upstash
+    region: us-east-1
+apps:
+  app:
+    hostname: app.example.test
+    image: ghcr.io/example/sub2api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    initialAdminEmail: admin@example.test
+    readinessPath: /ready
+    environment: {FEATURE_FLAG: enabled}
+    servers: [alpha]
+    postgres: {name: app-postgres, database: sub2api}
+    redis: {name: app-redis, database: 0}
+    publicAccess:
+      type: none

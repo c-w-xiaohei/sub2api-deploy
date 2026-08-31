@@ -9,7 +9,9 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,13 +43,24 @@ const release = "ghcr.io/example/sub2api-deploy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaa
 const (
 	scriptedAlphaFailure = "scripted Host alpha create failure"
 	alphaFailureTrace    = "host:alpha:create:fail"
+	managedUpstashConfig = "managed-upstash-preview.yaml"
+	managedUpstashSecrets = "managed-upstash-preview-secrets.yaml"
 )
 
 type traceFixture struct {
 	mu                sync.Mutex
 	events            []string
 	publicationEvents []string
+	hostChecks        []hostCheckObservation
 	hostReadiness     map[string]bool
+}
+
+type hostCheckObservation struct {
+	URN           resource.URN
+	Type          tokens.Type
+	Name          string
+	AllowUnknowns bool
+	News          resource.PropertyMap
 }
 
 func (f *traceFixture) append(event string) {
@@ -75,6 +88,69 @@ func (f *traceFixture) publicationSnapshot() []string {
 	return append([]string(nil), f.publicationEvents...)
 }
 
+func (f *traceFixture) recordHostCheck(req plugin.CheckRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hostChecks = append(f.hostChecks, hostCheckObservation{
+		URN:           req.URN,
+		Type:          req.Type,
+		Name:          req.Name,
+		AllowUnknowns: req.AllowUnknowns,
+		News:          clonePropertyMap(req.News),
+	})
+}
+
+func (f *traceFixture) hostCheckSnapshot() []hostCheckObservation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	observations := make([]hostCheckObservation, len(f.hostChecks))
+	for index, observation := range f.hostChecks {
+		observations[index] = observation
+		observations[index].News = clonePropertyMap(observation.News)
+	}
+	return observations
+}
+
+func clonePropertyMap(values resource.PropertyMap) resource.PropertyMap {
+	clone := make(resource.PropertyMap, len(values))
+	for key, value := range values {
+		clone[key] = clonePropertyValue(value)
+	}
+	return clone
+}
+
+func clonePropertyValue(value resource.PropertyValue) resource.PropertyValue {
+	switch typed := value.V.(type) {
+	case resource.PropertyMap:
+		return resource.NewObjectProperty(clonePropertyMap(typed))
+	case []resource.PropertyValue:
+		clone := make([]resource.PropertyValue, len(typed))
+		for index, child := range typed {
+			clone[index] = clonePropertyValue(child)
+		}
+		return resource.NewArrayProperty(clone)
+	case resource.Computed:
+		return resource.MakeComputed(clonePropertyValue(typed.Element))
+	case resource.Output:
+		return resource.NewOutputProperty(resource.Output{
+			Element:      clonePropertyValue(typed.Element),
+			Known:        typed.Known,
+			Secret:       typed.Secret,
+			Dependencies: append([]resource.URN(nil), typed.Dependencies...),
+		})
+	case *resource.Secret:
+		if typed == nil {
+			return value
+		}
+		return resource.MakeSecret(clonePropertyValue(typed.Element))
+	case resource.ResourceReference:
+		typed.ID = clonePropertyValue(typed.ID)
+		return resource.NewResourceReferenceProperty(typed)
+	default:
+		return value
+	}
+}
+
 func TestEngineGraphFailureStopsPublication(t *testing.T) {
 	trace, snapshot, err := runEngineGraphUpdate(t, "external-two-host-cloudflare.yaml", "external-two-host-cloudflare-secrets.yaml", nil)
 	if err == nil {
@@ -93,6 +169,72 @@ func TestEngineGraphFailureStopsPublication(t *testing.T) {
 	}
 	if got := trace.publicationSnapshot(); len(got) != 0 {
 		t.Fatalf("Cloudflare publication events = %v, want none after alpha fails", got)
+	}
+}
+
+func TestEngineManagedUpstashPreviewPreservesComputedSecretProjection(t *testing.T) {
+	// Re-anchors TR-SEC-01..05 and TR-PROG-03/04 at the real Engine preview boundary.
+	harness := newEngineGraphHarness(t, map[string]bool{"alpha": true})
+	before, after, err := harness.preview(t, managedUpstashConfig, managedUpstashSecrets)
+	if err != nil {
+		t.Fatalf("managed Upstash preview failed: %v", err)
+	}
+	if !snapshotsEqual(before, after) {
+		t.Fatal("managed Upstash preview mutated the checkpoint")
+	}
+
+	checks := harness.trace.hostCheckSnapshot()
+	if len(checks) == 0 {
+		t.Fatal("invalid RED path: preview produced no Host Check observation")
+	}
+	var host hostCheckObservation
+	for _, check := range checks {
+		if check.Type == hostProviderType && check.Name == "host-alpha" {
+			host = check
+			break
+		}
+	}
+	if host.Name == "" {
+		t.Fatal("invalid RED path: preview did not Check Host alpha")
+	}
+
+	for _, field := range []string{"providerId", "endpoint", "port"} {
+		value, ok := propertyAt(host.News, "target", "apps", "0", "dataLinks", "1", "identity", field)
+		if !ok || !value.ContainsUnknowns() {
+			t.Fatalf("managed Redis %s projection lacks unknown/computed semantics", field)
+		}
+	}
+
+	for _, path := range [][]string{
+		{"target", "releaseArtifact"},
+		{"target", "apps", "0", "id"},
+		{"target", "apps", "0", "image"},
+		{"target", "apps", "0", "hostname"},
+		{"target", "apps", "0", "dataLinks", "0", "identity", "endpoint"},
+	} {
+		value, ok := propertyAt(host.News, path...)
+		if !ok || !value.IsString() || value.ContainsUnknowns() || value.ContainsSecrets() {
+			t.Fatalf("ordinary Host field %s is not known and non-secret", strings.Join(path, "."))
+		}
+	}
+
+	secretProjection, ok := host.News["secrets"]
+	if !ok || !secretProjection.ContainsSecrets() {
+		t.Fatal("Host secrets projection lost its secret semantic class")
+	}
+	redisPassword, ok := propertyAt(host.News, "secrets", "apps", "app", "redis", "password")
+	if !ok || !redisPassword.ContainsUnknowns() || !redisPassword.ContainsSecrets() {
+		t.Fatal("generated Redis password lacks unknown+secret semantic classes")
+	}
+	if containsString(resource.NewObjectProperty(host.News), "upstash-api-key-canary") {
+		t.Fatal("Upstash API key canary reached Host Check input")
+	}
+
+	if got := harness.trace.snapshot(); len(got) != 0 {
+		t.Fatalf("preview lifecycle events = %v, want no create/update/delete events", got)
+	}
+	if got := harness.trace.publicationSnapshot(); len(got) != 0 {
+		t.Fatalf("preview publication events = %v, want none", got)
 	}
 }
 
@@ -368,6 +510,162 @@ func (h *engineGraphHarness) update(t *testing.T, configName, secretsName string
 		t.Fatalf("load partial checkpoint: %v", snapshotErr)
 	}
 	return snapshot, updateErr
+}
+
+func (h *engineGraphHarness) preview(t *testing.T, configName, secretsName string) (*deploy.Snapshot, *deploy.Snapshot, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	before, err := h.reloadSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("load checkpoint before preview: %v", err)
+	}
+	configYAML := readFixture(t, configName)
+	secretsYAML := readFixture(t, secretsName)
+	languageRuntime := newContextAwareLanguageRuntime(func(ctx *pulumi.Context) error {
+		return program.Register(ctx, release, configYAML, secretsYAML)
+	})
+	hostFactory := deploytest.NewPluginHostF(nil, nil, languageRuntime, nil, nil, engineProviderLoaders(h.trace)...)
+	engineEvents := make(chan engine.Event)
+	eventsDone := make(chan struct{})
+	go func() {
+		for range engineEvents {
+		}
+		close(eventsDone)
+	}()
+
+	_, _, previewErr := backend.PreviewStack(ctx, h.stack, backend.UpdateOperation{
+		Proj: h.project,
+		M:    &backend.UpdateMetadata{},
+		Root: h.programRoot,
+		Opts: backend.UpdateOptions{
+			AutoApprove: true,
+			PreviewOnly: true,
+			Display: display.Options{
+				Color:            colors.Never,
+				Stdout:           io.Discard,
+				Stderr:           io.Discard,
+				SuppressProgress: true,
+			},
+			Engine: engineOptions(hostFactory),
+		},
+		SecretsManager:  h.secretsManager,
+		SecretsProvider: stack.Base64SecretsProvider{},
+		StackConfiguration: backend.StackConfiguration{
+			Config: config.Map{
+				config.MustMakeKey("sub2api-host", "revisionKey"): config.NewSecureValue(h.revisionKey),
+			},
+			Decrypter: h.secretsManager.Decrypter(),
+		},
+		Scopes: backend.CancellationScopes,
+	}, engineEvents)
+	<-eventsDone
+
+	after, err := h.reloadSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("load checkpoint after preview: %v", err)
+	}
+	return before, after, previewErr
+}
+
+func (h *engineGraphHarness) reloadSnapshot(ctx context.Context) (*deploy.Snapshot, error) {
+	currentStack, err := h.backend.GetStack(ctx, h.stack.Ref())
+	if err != nil {
+		return nil, err
+	}
+	if currentStack == nil {
+		return nil, errors.New("backend returned nil stack")
+	}
+	return currentStack.Snapshot(ctx, stack.Base64SecretsProvider{})
+}
+
+func snapshotsEqual(before, after *deploy.Snapshot) bool {
+	if before == nil || after == nil {
+		return before == after
+	}
+	return reflect.DeepEqual(before.Manifest, after.Manifest) &&
+		reflect.DeepEqual(before.Resources, after.Resources) &&
+		reflect.DeepEqual(before.PendingOperations, after.PendingOperations) &&
+		reflect.DeepEqual(before.Metadata, after.Metadata) &&
+		reflect.DeepEqual(before.Snippets, after.Snippets) &&
+		reflect.DeepEqual(before.Extensions, after.Extensions)
+}
+
+func propertyAt(root resource.PropertyMap, path ...string) (resource.PropertyValue, bool) {
+	value := resource.NewObjectProperty(root)
+	inheritedUnknown := false
+	inheritedSecret := false
+	for _, part := range path {
+		for value.IsSecret() || value.IsComputed() || value.IsOutput() {
+			switch {
+			case value.IsSecret():
+				inheritedSecret = true
+				value = value.SecretValue().Element
+			case value.IsComputed():
+				inheritedUnknown = true
+				value = value.Input().Element
+			case value.IsOutput():
+				inheritedUnknown = inheritedUnknown || !value.OutputValue().Known
+				inheritedSecret = inheritedSecret || value.OutputValue().Secret
+				value = value.OutputValue().Element
+			}
+		}
+		if value.IsObject() {
+			child, ok := value.ObjectValue()[resource.PropertyKey(part)]
+			if !ok {
+				return resource.PropertyValue{}, false
+			}
+			value = child
+			continue
+		}
+		if value.IsArray() {
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(value.ArrayValue()) {
+				return resource.PropertyValue{}, false
+			}
+			value = value.ArrayValue()[index]
+			continue
+		}
+		return resource.PropertyValue{}, false
+	}
+	if inheritedUnknown && !value.ContainsUnknowns() {
+		value = resource.MakeComputed(value)
+	}
+	if inheritedSecret && !value.ContainsSecrets() {
+		value = resource.MakeSecret(value)
+	}
+	return value, true
+}
+
+func containsString(value resource.PropertyValue, want string) bool {
+	if value.IsString() {
+		return value.StringValue() == want
+	}
+	if value.IsSecret() {
+		return containsString(value.SecretValue().Element, want)
+	}
+	if value.IsComputed() {
+		return containsString(value.Input().Element, want)
+	}
+	if value.IsOutput() {
+		return containsString(value.OutputValue().Element, want)
+	}
+	if value.IsArray() {
+		for _, child := range value.ArrayValue() {
+			if containsString(child, want) {
+				return true
+			}
+		}
+	}
+	if value.IsObject() {
+		for _, child := range value.ObjectValue() {
+			if containsString(child, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func engineOptions(hostFactory deploytest.PluginHostFactory) engine.UpdateOptions {
