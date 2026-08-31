@@ -311,9 +311,17 @@ func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
 		}
 	}
 
+	rpcManaged := map[string]managedRedisInputs{
+		"app-redis": {
+			ProviderID: unknownString,
+			Endpoint:   unknownString,
+			Port:       unknownInt,
+			Password:   pulumi.ToSecret(pulumi.String(upstashPassword)).(pulumi.StringOutput),
+		},
+	}
 	mocks := &recordingMocks{}
 	if err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		_, err := registerHosts(ctx, validated, secrets, pinnedRelease, managed)
+		_, err := registerHosts(ctx, validated, secrets, pinnedRelease, rpcManaged)
 		return err
 	}, pulumi.WithMocks("sub2api-environment", "canary", mocks)); err != nil {
 		t.Fatalf("registerHosts() error = %v", err)
@@ -337,7 +345,9 @@ func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
 	if !password.IsSecret() {
 		t.Fatalf("managed Redis password lost secret marking: %v", password)
 	}
-	assertComputedType(t, unwrap(password), "string")
+	if stringValue(t, password) != upstashPassword {
+		t.Fatalf("managed Redis password = %q, want known password", stringValue(t, password))
+	}
 }
 
 func TestRegisterMaintenancePlacementKeepsHostsAndSuppressesPublication(t *testing.T) {
