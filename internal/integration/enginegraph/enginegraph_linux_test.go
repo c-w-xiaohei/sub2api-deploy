@@ -184,6 +184,53 @@ func TestEngineConfiguredServerCountOneTwo(t *testing.T) {
 	}, "host:bravo:delete:ok")
 }
 
+func TestEngineAppPlacementOneReadyFailure(t *testing.T) {
+	t.Run("alpha failure blocks publication", func(t *testing.T) {
+		trace, snapshot, err := runEngineGraphUpdate(t, "external-two-host-cloudflare-app-alpha.yaml", "external-two-host-cloudflare-secrets.yaml", map[string]bool{
+			"alpha": false,
+			"bravo": true,
+		})
+		if err == nil {
+			t.Fatal("placement-one failure update unexpectedly succeeded")
+		}
+		if !strings.Contains(err.Error(), scriptedAlphaFailure) {
+			t.Fatalf("placement-one update error = %q, want scripted alpha failure %q", err, scriptedAlphaFailure)
+		}
+		assertFailureCheckpoint(t, snapshot)
+		if got := trace.snapshot(); !slices.Equal(got, []string{alphaFailureTrace}) {
+			t.Fatalf("placement-one failure trace = %v, want only %q", got, alphaFailureTrace)
+		}
+		if got := trace.publicationSnapshot(); len(got) != 0 {
+			t.Fatalf("placement-one failure publication events = %v, want none", got)
+		}
+	})
+
+	t.Run("alpha ready publishes once", func(t *testing.T) {
+		trace, snapshot, err := runEngineGraphUpdate(t, "external-two-host-cloudflare-app-alpha.yaml", "external-two-host-cloudflare-secrets.yaml", map[string]bool{
+			"alpha": true,
+			"bravo": true,
+		})
+		if err != nil {
+			t.Fatalf("placement-one ready update failed unexpectedly: %v", err)
+		}
+		assertAppPlacementCheckpoint(t, snapshot)
+
+		got := trace.snapshot()
+		wantPrefix := []string{"host:alpha:create:ok", "host:bravo:create:ok"}
+		if len(got) != 3 || !slices.Equal(got[:2], wantPrefix) {
+			t.Fatalf("placement-one ready lifecycle trace = %v, want both Hosts ready before one publication", got)
+		}
+		if got := trace.publicationSnapshot(); len(got) != 1 {
+			t.Fatalf("placement-one ready publication events = %v, want one", got)
+		}
+
+		want := append(wantPrefix, "cloudflare:dns:dns-app-alpha-A:create:ok")
+		if !slices.Equal(got, want) {
+			t.Fatalf("placement-one ready identity-specific publication trace = %v, want %v", got, want)
+		}
+	})
+}
+
 func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostReadiness map[string]bool) (*traceFixture, *deploy.Snapshot, error) {
 	t.Helper()
 	harness := newEngineGraphHarness(t, hostReadiness)
@@ -467,6 +514,45 @@ func assertConfiguredHostCheckpoint(t *testing.T, snapshot *deploy.Snapshot, ser
 	}
 	if !maps.Equal(gotDNS, wantDNS) {
 		t.Fatalf("configured-server checkpoint DNS URN set = %v, want %v", gotDNS, wantDNS)
+	}
+}
+
+func assertAppPlacementCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+	t.Helper()
+	assertConfiguredHostCheckpoint(t, snapshot, []string{"alpha", "bravo"}, []string{"dns-app-alpha-A"})
+
+	appsByHost := make(map[string][]resource.PropertyMap)
+	for _, state := range snapshot.Resources {
+		if state.Type != "sub2api-host:index:Host" {
+			continue
+		}
+		target, ok := state.Inputs["target"]
+		if !ok || !target.IsObject() {
+			t.Fatalf("configured Host %s has no target object", state.URN)
+		}
+		apps, ok := target.ObjectValue()["apps"]
+		if !ok || !apps.IsArray() {
+			t.Fatalf("configured Host %s has no target apps array", state.URN)
+		}
+		appInputs := make([]resource.PropertyMap, 0, len(apps.ArrayValue()))
+		for _, app := range apps.ArrayValue() {
+			if !app.IsObject() {
+				t.Fatalf("configured Host %s has non-object App target: %v", state.URN, app)
+			}
+			appInputs = append(appInputs, app.ObjectValue())
+		}
+		appsByHost[string(state.ID)] = appInputs
+	}
+
+	alphaApps, ok := appsByHost["host-alpha"]
+	if !ok || len(alphaApps) != 1 {
+		t.Fatalf("alpha target Apps = %v, want exactly one App", alphaApps)
+	}
+	if appID, ok := alphaApps[0]["id"]; !ok || !appID.IsString() || appID.StringValue() != "app" {
+		t.Fatalf("alpha target App = %v, want App id %q", alphaApps[0], "app")
+	}
+	if bravoApps := appsByHost["host-bravo"]; len(bravoApps) != 0 {
+		t.Fatalf("bravo target Apps = %v, want none", bravoApps)
 	}
 }
 
