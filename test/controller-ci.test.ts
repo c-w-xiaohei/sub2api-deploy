@@ -282,7 +282,7 @@ describe("Host controller CI evidence contract", () => {
     expect(job).toContain("runUrl: process.env.GITHUB_RUN_URL");
     expect(job).toContain('gate: "provider-runtime"');
     expect(job).toContain("trace/README.txt");
-    expect(job).toContain("sanitized fixture traces");
+    expect(job).toMatch(/\bsanitized fixture traces contain\b/i);
     expect(job).toContain("no secrets or raw request frames");
     for (const [events, sanitized] of [
       ["normal_events", "normal.jsonl"],
