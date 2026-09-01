@@ -414,7 +414,11 @@ func jsonProperty(value any) property.Value {
 
 func rawProperty(value any) property.Value {
 	switch value := value.(type) {
-	case string, bool, float64:
+	case string:
+		return property.New(value)
+	case bool:
+		return property.New(value)
+	case float64:
 		return property.New(value)
 	case []any:
 		items := make([]property.Value, len(value))
