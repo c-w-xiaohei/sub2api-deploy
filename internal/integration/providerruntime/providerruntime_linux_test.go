@@ -1816,10 +1816,6 @@ func createInputsWithDataLinks(changes int, generation string) property.Map {
 
 func frozenRevisionForInputs(t *testing.T, inputs property.Map) string {
 	t.Helper()
-	key, err := base64.StdEncoding.DecodeString(ciKey)
-	if err != nil {
-		t.Fatal(err)
-	}
 	targetValue, ok := inputs.GetOk("target")
 	if !ok {
 		t.Fatal("target input is absent")
@@ -2320,7 +2316,7 @@ func assertRetiredPreservingData(t *testing.T, h *providerProcess, before []dock
 		t.Fatalf("retire Docker model/effects are not exact: %v", err)
 	}
 	if preRetire == nil || state.Resource != (hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}) || state.Retirement == nil || state.Retirement.Machine != state.Machine || state.Retirement.Ownership != state.Ownership || !state.Retirement.PreserveData || state.LastOperation == nil || !reflect.DeepEqual(*state.LastOperation, *preRetire) || state.LastOperation.Status != "complete" || state.LastOperation.Key.Action != hostcontract.ActionReconcile || state.LastOperation.Result == nil || state.LastOperation.Result.Status != hostprotocol.ResultApplied || state.Journal == nil || state.Journal.Status != "complete" || state.Journal.Key.Action != hostcontract.ActionRetirePreserveData || state.Journal.Key.TargetRevision != state.AppliedRevision || state.Journal.Key.PriorAppliedRevision != state.AppliedRevision || state.Journal.Result == nil || state.Journal.Result.Status != hostprotocol.ResultRetired || state.Journal.Result.Machine == nil || state.Journal.Result.Ownership == nil || *state.Journal.Result.Machine != state.Machine || *state.Journal.Result.Ownership != state.Ownership || state.Journal.Result.Retirement == nil || !state.Journal.Result.Retirement.PreserveData {
-		t.Fatalf("retirement evidence is not complete: %v", err)
+		t.Fatal("retirement evidence is not complete")
 	}
 }
 
