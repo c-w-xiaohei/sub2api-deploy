@@ -937,10 +937,9 @@ func TestLifecycleReadRefreshesTrustedObservationWithOneInspect(t *testing.T) {
 // TestImportBuildsReadOnlyStateFromVerifiedObservation specifies the program-first
 // import Read. Pulumi ReadStep sends registered Program inputs as both Inputs and
 // input-only Properties; an ordinary Read instead has checkpoint Properties with
-// lifecycle outputs. The trusted installed Host Runtime's inspect attests to its
-// managed state and inventory. Persistent paths are deliberately not Program
-// configuration or observation fields; provider proof is limited to the stable
-// observation fields validated against the complete Program target.
+// lifecycle outputs. The recording transport specifies Provider validation of a
+// StableObservation; Runtime inventory and persistent-path attestation remain
+// integration responsibilities.
 func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
 	inputs := localDataInputs(t, "edge")
 	revision := revisionForInputs(t, inputs)
@@ -965,25 +964,12 @@ func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
 		}
 	})
 
-	t.Run("exact observation produces no diff and drifted revision is an explicit in-place update", func(t *testing.T) {
+	t.Run("exact observation produces no diff", func(t *testing.T) {
 		h := configuredLifecycleHost(t, lifecycleDependencies{artifact: fatalArtifact(t), approve: fatalApproval(t)})
 		exact := checkpoint(t, inputs, verified, revision)
 		diff, err := h.diff(t.Context(), p.DiffRequest{OldInputs: inputs, State: exact, Inputs: inputs})
 		if err != nil || diff.HasChanges || len(diff.DetailedDiff) != 0 {
 			t.Fatalf("exact imported checkpoint diff = %#v, %v", diff, err)
-		}
-
-		drifted := verified
-		drifted.AppliedRevision = mismatchedRevision()
-		state := checkpoint(t, inputs, drifted, drifted.AppliedRevision)
-		diff, err = h.diff(t.Context(), p.DiffRequest{OldInputs: inputs, State: state, Inputs: inputs})
-		if err != nil || !diff.HasChanges || len(diff.DetailedDiff) == 0 {
-			t.Fatalf("drifted imported checkpoint diff = %#v, %v", diff, err)
-		}
-		for path, change := range diff.DetailedDiff {
-			if (path != "observation" && path != "appliedRevision") || change.Kind != p.Update || change.InputDiff {
-				t.Fatalf("drifted Import reported a non-approved or non-in-place diff: %#v", diff.DetailedDiff)
-			}
 		}
 	})
 
@@ -1000,10 +986,17 @@ func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
 		{"unsafe ownership", stableID(resource), inputs, wrongOwner(verified), 1},
 		{"unsafe release", stableID(resource), inputs, wrongRelease(verified), 1},
 		{"malformed revision", stableID(resource), inputs, func() hostcontract.StableObservation { value := verified; value.AppliedRevision = "malformed"; return value }(), 1},
+		{"drifted", stableID(resource), inputs, drifted(verified), 1},
 		{"unsafe app readiness", stableID(resource), inputs, notReadyApp(verified), 1},
 		{"unsafe app image", stableID(resource), inputs, wrongAppImage(verified), 1},
+		{"duplicate app", stableID(resource), inputs, duplicateAppID(verified), 1},
 		{"missing app", stableID(resource), inputs, missingApps(verified), 1},
 		{"unsafe managed data identity", stableID(resource), inputs, mismatchedLocalDataProviderAndEndpoint(verified), 1},
+		{"wrong managed data kind", stableID(resource), inputs, wrongLocalDataKind(verified), 1},
+		{"wrong managed data port", stableID(resource), inputs, wrongLocalDataPort(verified), 1},
+		{"wrong managed data database", stableID(resource), inputs, wrongLocalDataDatabase(verified), 1},
+		{"wrong managed data TLS", stableID(resource), inputs, wrongLocalDataTLS(verified), 1},
+		{"duplicate managed data", stableID(resource), inputs, duplicateLocalData(verified), 1},
 		{"missing managed data", stableID(resource), inputs, missingLocalData(verified), 1},
 		{"not ready managed data", stableID(resource), inputs, notReadyLocalData(verified), 1},
 	} {
@@ -1020,6 +1013,18 @@ func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
 			}
 			assertNoCanary(t, errString(err))
 		})
+	}
+}
+
+func TestLifecycleReadDoesNotTreatOutputOrExtraPropertiesAsImport(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	for _, properties := range []property.Map{inputs.Set("machine", object("value", property.New("forged"))), inputs.Set("unexpected", property.New("forged"))} {
+		r := &recordingLifecycleTransport{}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		got, err := h.read(t.Context(), p.ReadRequest{ID: stableID(lifecycleResource(t, inputs)), Inputs: inputs, Properties: properties})
+		if err == nil || got.ID != "" || got.Properties.Len() != 0 { t.Fatalf("non-input-only Properties were accepted as Import: %#v, %v", got, err) }
+		assertNoCalls(t, r)
+		assertNoCanary(t, errString(err))
 	}
 }
 

@@ -399,6 +399,24 @@ func (h *host) lifecycleRead(ctx context.Context, req p.ReadRequest) (p.ReadResp
 	if req.ID != stableID(in.resource) {
 		return p.ReadResponse{}, fmt.Errorf("invalid resource ID")
 	}
+	if isImportRead(req) {
+		result, err := h.inspect(ctx, in)
+		if err != nil {
+			return p.ReadResponse{}, err
+		}
+		if result.Status != hostprotocol.ResultInspected || result.Observation == nil {
+			return p.ReadResponse{}, fmt.Errorf("invalid inspect response")
+		}
+		observation := *result.Observation
+		if err := validateImportedObservation(observation, in.target, in.revision); err != nil {
+			return p.ReadResponse{}, err
+		}
+		state, err := checkpointState(req.Inputs, observation, observation.AppliedRevision)
+		if err != nil {
+			return p.ReadResponse{}, err
+		}
+		return p.ReadResponse{ID: req.ID, Properties: state, Inputs: req.Inputs}, nil
+	}
 	checkpointInputs, err := h.parseInputs(inputProperties(req.Properties))
 	if err != nil || !reflect.DeepEqual(checkpointInputs, in) {
 		return p.ReadResponse{}, fmt.Errorf("checkpoint inputs do not match")
@@ -435,6 +453,15 @@ func (h *host) lifecycleRead(ctx context.Context, req p.ReadRequest) (p.ReadResp
 		return p.ReadResponse{}, err
 	}
 	return p.ReadResponse{ID: req.ID, Properties: state, Inputs: req.Inputs}, nil
+}
+
+// Pulumi's import ReadStep supplies complete Program inputs as both Inputs and
+// Properties. Any output key or extra property makes this an ordinary Read.
+func isImportRead(req p.ReadRequest) bool {
+	if hasCheckpointOutputs(req.Properties) || req.Properties.Len() != req.Inputs.Len() {
+		return false
+	}
+	return reflect.DeepEqual(req.Properties, req.Inputs)
 }
 
 func (h *host) lifecycleDelete(ctx context.Context, req p.DeleteRequest) error {
@@ -676,6 +703,22 @@ func validateObservation(observation hostcontract.StableObservation, machine, ow
 	}
 	if !matchesTargetDataServices(observation.Data, target.DataServices) {
 		return fmt.Errorf("invalid final observation")
+	}
+	return nil
+}
+
+func validateImportedObservation(observation hostcontract.StableObservation, target hostcontract.Target, revision string) error {
+	if observation.Validate() != nil ||
+		observation.Machine.Value == "" ||
+		observation.Ownership.Value == "" ||
+		observation.HostRelease != target.ReleaseArtifact ||
+		observation.AppliedRevision != revision ||
+		!observation.Ready ||
+		observation.Drifted {
+		return fmt.Errorf("invalid import observation")
+	}
+	if !matchesTargetApps(observation.Apps, target.Apps) || !matchesTargetDataServices(observation.Data, target.DataServices) {
+		return fmt.Errorf("invalid import observation")
 	}
 	return nil
 }
