@@ -220,16 +220,16 @@ describe("Host controller CI evidence contract", () => {
       /^\s*race_stderr="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-race-stderr\.log"\s*$/m,
     );
     expect(job).toMatch(
-      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$normal_events" 2> "\$normal_stderr"\n\s*normal_status=\?/,
+      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$normal_events" 2> "\$normal_stderr"\n\s*normal_status=\$\?/,
     );
     expect(job).toMatch(
-      /go test -race -json -count=1 -timeout=15m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$race_events" 2> "\$race_stderr"\n\s*race_status=\?/,
+      /go test -race -json -count=1 -timeout=15m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$race_events" 2> "\$race_stderr"\n\s*race_status=\$\?/,
     );
     expect(job).toMatch(
-      /extract_sanitized_trace "\$normal_events" "\$evidence\/trace\/normal\.jsonl"\n\s*normal_trace_status=\?/,
+      /extract_sanitized_trace "\$normal_events" "\$evidence\/trace\/normal\.jsonl"\n\s*normal_trace_status=\$\?/,
     );
     expect(job).toMatch(
-      /extract_sanitized_trace "\$race_events" "\$evidence\/trace\/race\.jsonl"\n\s*race_trace_status=\?/,
+      /extract_sanitized_trace "\$race_events" "\$evidence\/trace\/race\.jsonl"\n\s*race_trace_status=\$\?/,
     );
     expect(job).toContain('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"');
     expect(job).not.toMatch(/go test[^\n]*\.\/\.\./);
