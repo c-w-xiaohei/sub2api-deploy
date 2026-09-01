@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime"
@@ -54,18 +55,51 @@ func ServeBootstrap(out io.Writer, in io.Reader, root, machinePath string) error
 // one already-framed request and records only its digest before delegating to
 // the shared serving seam; it never constructs a response or reimplements it.
 func ServeBootstrapWithRequestDigest(out io.Writer, in io.Reader, root, machinePath, digestPath string) error {
+	return serveWithRequestDigest(out, in, root, machinePath, digestPath, ServeBootstrap)
+}
+
+// ServeWithRequestDigest records a digest and non-sensitive action metadata for
+// one framed request before routing it through Runtime.Serve.
+func ServeWithRequestDigest(out io.Writer, in io.Reader, root, machinePath, digestPath string) error {
+	return serveWithRequestDigest(out, in, root, machinePath, digestPath, Serve)
+}
+
+func serveWithRequestDigest(out io.Writer, in io.Reader, root, machinePath, digestPath string, serve func(io.Writer, io.Reader, string, string) error) error {
 	frame, err := io.ReadAll(in)
 	if err != nil {
 		return err
 	}
-	if _, err := hostprotocol.DecodeRequest(frame); err != nil {
+	request, err := hostprotocol.DecodeRequest(frame)
+	if err != nil {
 		return err
 	}
 	if digestPath != "" {
 		sum := sha256.Sum256(frame)
-		if err := os.WriteFile(digestPath, []byte(fmt.Sprintf("%x\n", sum)), 0600); err != nil {
+		metadata := fmt.Sprintf("operationDigest=%x\naction=%s\n", sum, request.Action)
+		temporary, err := os.CreateTemp(filepath.Dir(digestPath), ".request-metadata-")
+		if err != nil {
+			return err
+		}
+		name := temporary.Name()
+		defer os.Remove(name)
+		if err := temporary.Chmod(0600); err != nil {
+			_ = temporary.Close()
+			return err
+		}
+		if _, err := temporary.WriteString(metadata); err != nil {
+			_ = temporary.Close()
+			return err
+		}
+		if err := temporary.Sync(); err != nil {
+			_ = temporary.Close()
+			return err
+		}
+		if err := temporary.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(name, digestPath); err != nil {
 			return err
 		}
 	}
-	return ServeBootstrap(out, bytes.NewReader(frame), root, machinePath)
+	return serve(out, bytes.NewReader(frame), root, machinePath)
 }

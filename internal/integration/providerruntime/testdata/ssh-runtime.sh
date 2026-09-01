@@ -88,15 +88,73 @@ if printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_PROBE_COMMAND" -; then
     exit 0
 fi
 if printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_HOST_COMMAND" -; then
-  publish 4 ssh.host.args "$@"
-  exec env \
-  SUB2API_PROVIDER_RUNTIME_CI_HELPER=1 \
-  SUB2API_PROVIDER_RUNTIME_ROOT="$PROVIDER_RUNTIME_ROOT" \
-  SUB2API_PROVIDER_RUNTIME_MACHINE_ID="$PROVIDER_RUNTIME_MACHINE_ID" \
-  SUB2API_PROVIDER_RUNTIME_MODE=serve \
-  PROVIDER_RUNTIME_TRACE="$PROVIDER_RUNTIME_TRACE" \
-  PATH="$PATH" \
-  "$PROVIDER_RUNTIME_TEST_BINARY" -test.run '^TestProviderRuntimeCIHelper$'
+  if [ "${PROVIDER_RUNTIME_LIFECYCLE_SCENARIO:-false}" = true ]; then
+    exec 8>"$trace/ssh.ordinal.lock"
+    flock -x 8
+    ordinal_file="$trace/ssh.ordinal"
+    ordinal=0
+    [ -f "$ordinal_file" ] && ordinal=$(cat "$ordinal_file")
+    [ "$ordinal" -ge 3 ] || { printf 'fixture Host before bootstrap\n' >&2; exit 64; }
+    ordinal=$((ordinal + 1))
+    tmp="$ordinal_file.$$"
+    printf '%s\n' "$ordinal" > "$tmp"
+    mv -f "$tmp" "$ordinal_file"
+    host_count=0
+    [ -f "$trace/ssh.host.count" ] && host_count=$(cat "$trace/ssh.host.count")
+    host_count=$((host_count + 1))
+    printf '%s\n' "$host_count" > "$trace/ssh.host.count"
+    record_args "$@" > "$trace/ssh.host.$host_count.args"
+    flock -u 8
+    exec 8>&-
+  else
+    publish 4 ssh.host.args "$@"
+  fi
+  response="$trace/ssh.host.response.$$"
+  if env \
+    SUB2API_PROVIDER_RUNTIME_CI_HELPER=1 \
+    SUB2API_PROVIDER_RUNTIME_ROOT="$PROVIDER_RUNTIME_ROOT" \
+    SUB2API_PROVIDER_RUNTIME_MACHINE_ID="$PROVIDER_RUNTIME_MACHINE_ID" \
+    SUB2API_PROVIDER_RUNTIME_MODE=serve \
+    PROVIDER_RUNTIME_REQUEST_DIGEST="$trace/ssh.host.request.sha256" \
+    PROVIDER_RUNTIME_TRACE="$PROVIDER_RUNTIME_TRACE" \
+    PATH="$PATH" \
+    "$PROVIDER_RUNTIME_TEST_BINARY" -test.run '^TestProviderRuntimeCIHelper$' >"$response"; then
+      :
+  else
+      rm -f "$response"
+      exit 1
+  fi
+  metadata="$trace/ssh.host.request.sha256"
+  [ -f "$metadata" ] || { rm -f "$response"; printf 'fixture missing Host metadata\n' >&2; exit 64; }
+  [ "$(wc -l < "$metadata")" -eq 2 ] || { rm -f "$response"; printf 'fixture invalid Host metadata\n' >&2; exit 64; }
+  action=$(awk -F= '$1 == "action" { count++; value=$2 } END { if (count == 1) print value }' "$metadata")
+  digest=$(awk -F= '$1 == "operationDigest" { count++; value=$2 } END { if (count == 1) print value }' "$metadata")
+  case "$action" in inspect|reconcile|retire-preserve-data) ;; *) rm -f "$response"; printf 'fixture invalid Host action\n' >&2; exit 64 ;; esac
+  [ ${#digest} -eq 64 ] && case "$digest" in *[!0123456789abcdef]*) false ;; *) true ;; esac || { rm -f "$response"; printf 'fixture invalid Host digest\n' >&2; exit 64; }
+  exec 8>"$trace/ssh.ordinal.lock"
+  flock -x 8
+  queue="$trace/host-action.queue"
+  [ -f "$queue" ] || { flock -u 8; exec 8>&-; rm -f "$response"; printf 'fixture Host action queue absent\n' >&2; exit 64; }
+  expected_action=$(awk 'NF { print; exit }' "$queue")
+  [ "$expected_action" = "$action" ] || { flock -u 8; exec 8>&-; rm -f "$response"; printf 'fixture Host action queue mismatch\n' >&2; exit 64; }
+  queue_tmp="$queue.$$"
+  awk 'seen { print; next } NF { seen=1 }' "$queue" > "$queue_tmp"
+  mv -f "$queue_tmp" "$queue"
+  marker="$trace/drop-host-response.$action"
+  if [ -f "$marker" ]; then
+    rm -f "$marker" "$response"
+    drop_tmp="$trace/ssh.host.response-loss.$$"
+    printf 'action=%s\noperationDigest=%s\ndropped-after-complete\n' "$action" "$digest" > "$drop_tmp"
+    mv -f "$drop_tmp" "$trace/ssh.host.response-loss"
+    flock -u 8
+    exec 8>&-
+    exit 1
+  fi
+  flock -u 8
+  exec 8>&-
+  cat "$response"
+  rm -f "$response"
+  exit 0
 fi
 if ! printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_BOOTSTRAP_COMMAND" -; then
   printf 'fixture remote command mismatch\n' >&2
@@ -116,7 +174,13 @@ artifact=${PROVIDER_RUNTIME_ARTIFACT:?}
 [ "$(wc -c < "$artifact")" = "$size" ] || { printf 'fixture artifact length mismatch\n' >&2; exit 64; }
 [ "$(sha256sum "$artifact" | awk '{print $1}')" = "$digest" ] || { printf 'fixture artifact hash mismatch\n' >&2; exit 64; }
 dd bs=1 count="$size" status=none | cmp -s - "$artifact" || { printf 'fixture artifact body mismatch\n' >&2; exit 64; }
-printf 'size=%s\ndigest=%s\n' "$size" "$digest" > "$trace/bootstrap.meta"
+exec 8>"$trace/ssh.ordinal.lock"
+flock -x 8
+bootstrap_tmp="$trace/bootstrap.meta.$$"
+printf 'size=%s\ndigest=%s\n' "$size" "$digest" > "$bootstrap_tmp"
+mv -f "$bootstrap_tmp" "$trace/bootstrap.meta"
+flock -u 8
+exec 8>&-
 touch "$trace/bootstrap.complete"
 
 exec env \
