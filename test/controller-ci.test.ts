@@ -140,4 +140,103 @@ describe("Host controller CI evidence contract", () => {
     expect(job).toContain("metadata.json");
     expect(job).toContain("trace/");
   });
+
+  it("requires a distinct exact-SHA provider-runtime evidence job", () => {
+    const start = workflow.indexOf("  provider-runtime:");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const nextJobMatch = /\n  [a-z][a-z0-9-]*:\s*\n/g;
+    nextJobMatch.lastIndex = start + 3;
+    const nextJobResult = nextJobMatch.exec(workflow);
+    const nextJob = nextJobResult?.index ?? -1;
+    const job = workflow.slice(start, nextJob < 0 ? workflow.length : nextJob);
+
+    expect(job).toContain('go-version: "1.25.11"');
+    expect(job).toContain("go mod verify");
+    expect(job).toContain("openssh-server");
+    expect(job).toContain("command -v sshd");
+    expect(job).toMatch(/\[\[\s+"\$TARGET_SHA"\s+=~\s+\^\[0-9a-f\]\{40\}\$\s+\]\]/);
+    expect(job).toMatch(/ref:\s*\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
+    expect(job).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
+
+    for (const symbol of [
+      "TestProviderProcessReachesSharedTemporaryRuntimeServe",
+      "TestProviderLifecycleWithHostProcessTempRuntime",
+    ]) {
+      expect(job).toContain(symbol);
+    }
+    expect(job).toContain(
+      "tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime)$'",
+    );
+    expect(job).toMatch(/^\s*timeout-minutes:\s*25\s*$/m);
+    expect(job).toMatch(
+      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$evidence\/normal-events\.jsonl"\n\s*normal_status=\?/,
+    );
+    expect(job).toMatch(
+      /go test -race -json -count=1 -timeout=10m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$evidence\/race-events\.jsonl"\n\s*race_status=\?/,
+    );
+    expect(job).not.toMatch(/go test[^\n]*\.\/\.\./);
+
+    for (const [parser, events, status] of [
+      ["verify_normal_required_tests", "normal-events.jsonl", "normal_status"],
+      ["verify_race_required_tests", "race-events.jsonl", "race_status"],
+    ]) {
+      const parserCall = `${parser} "$evidence/${events}" "$${status}"`;
+      const statusGate = `test "$${status}" -eq 0`;
+      const marker = parser === "verify_normal_required_tests" ? "NODE_NORMAL" : "NODE_RACE";
+      expect(job).toContain(`${parser}()`);
+      expect(job).toContain(`node <<'${marker}'`);
+      expect(job).toContain(marker);
+      expect(job).toMatch(new RegExp(String.raw`${parser}\(\)\s*\{\s*node <<'${marker}'`));
+      const nodeBodyMatch = job.match(
+        new RegExp(String.raw`^\s*node <<'${marker}'\s*$\n([\s\S]*?)^\s*${marker}\s*$`, "m"),
+      );
+      expect(nodeBodyMatch).not.toBeNull();
+      const body = nodeBodyMatch?.[1] ?? "";
+      expect(body).toContain("JSON.parse(line)");
+      expect(body).toContain('if (!line) continue;');
+      expect(body).toContain(
+        'const terminal = new Map(required.map((name) => [name, "absent"]));',
+      );
+      expect(body).toContain("for (const name of required)");
+      expect(body).toMatch(
+        /if \(event\.Action === "skip" \|\| event\.Action === "fail"\) \{[\s\S]*?throw new Error/,
+      );
+      expect(body).toMatch(/if \(event\.Action === "pass"\) terminal\.set\(event\.Test, "pass"\);/);
+      expect(body).toContain('if (result !== "pass")');
+      expect(body).toContain("required test did not pass");
+      expect(body).toContain("if (!event.Test || !required.includes(event.Test)) continue;");
+      expect(job.indexOf(parserCall)).toBeGreaterThan(job.indexOf(`${status}=$?`));
+      expect(job.indexOf(statusGate)).toBeGreaterThan(job.indexOf(parserCall));
+    }
+
+    expect(job).toContain('evidence="evidence/${TARGET_SHA}/provider-runtime"');
+    expect(job).toContain('const root = `evidence/${process.env.TARGET_SHA}/provider-runtime`');
+    expect(job).toContain('fs.writeFileSync(`${root}/metadata.json`');
+    expect(job).toContain('sha: process.env.TARGET_SHA');
+    expect(job).toContain("runUrl: process.env.GITHUB_RUN_URL");
+    expect(job).toContain('gate: "provider-runtime"');
+    expect(job).toContain("trace/README.txt");
+    expect(job).toContain("sanitized fixture traces");
+    expect(job).toContain("no secrets or raw request frames");
+    expect(job).toContain(
+      'trace_files=$(find "$evidence/trace" -type f ! -name README.txt -print)',
+    );
+    expect(job).toContain('test -n "$trace_files"');
+    const traceLoop = job.match(
+      /while IFS= read -r trace_file; do([\s\S]*?)done <<< "\$trace_files"/,
+    );
+    expect(traceLoop).not.toBeNull();
+    const traceBody = traceLoop?.[1] ?? "";
+    expect(traceBody).toContain('test -s "$trace_file"');
+    expect(traceBody).toContain(
+      "forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|\\\"authorization\\\"\\s*:|sub2api-host-v1 |\\\"secrets\\\"\\s*:'",
+    );
+    expect(traceBody).toMatch(/if grep -E "\$forbidden" "\$trace_file"; then\s*exit 1\s*fi/);
+
+    const upload = job.match(
+      /- name: Upload provider-runtime evidence[\s\S]*?if: always\(\)[\s\S]*?uses: actions\/upload-artifact@v4[\s\S]*?name: provider-runtime-evidence-\$\{\{ env\.TARGET_SHA \}\}\s*$[\s\S]*?path: evidence\/\$\{\{ env\.TARGET_SHA \}\}\/provider-runtime\s*$[\s\S]*?if-no-files-found: error/m,
+    );
+    expect(upload).not.toBeNull();
+    expect(job).not.toContain("continue-on-error");
+  });
 });
