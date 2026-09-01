@@ -10,8 +10,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime"
 )
 
 // ErrSharedServeSeamUnavailable is returned until hostruntime owns the shared
