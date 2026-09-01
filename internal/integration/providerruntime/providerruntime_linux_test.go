@@ -660,7 +660,7 @@ func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint prope
 	}
 	appToken := fixtureToken("app", "api")
 	appName := "s2h-" + fixtureToken("test", "edge", ownership.Value, "app", appToken, "green")
-	wantInventory := map[string]any{"version": float64(2), "resource": map[string]any{"environment": "test", "serverKey": "edge"}, "ownership": map[string]any{"value": ownership.Value}, "objects": []any{map[string]any{"role": "app", "appToken": appToken, "name": appName, "image": "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "revision": revision, "active": "green", "env": "env-" + appToken + fixtureToken(revision), "hostname": "api.example", "readinessPath": "/ready", "drainSeconds": float64(30)}}}
+	wantInventory := map[string]any{"version": float64(2), "resource": map[string]any{"environment": "test", "serverKey": "edge"}, "ownership": map[string]any{"value": ownership.Value}, "objects": []any{map[string]any{"role": "app", "appToken": appToken, "name": appName, "image": "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "revision": revision, "active": "green", "env": "env-" + appToken + fixtureToken(revision), "dataIdentity": map[string]any{"kind": ""}, "hostname": "api.example", "readinessPath": "/ready", "drainSeconds": float64(30)}}}
 	inventoryPath := filepath.Join(h.root, "runtime", "managed", "inventory.json")
 	info, statErr := os.Stat(inventoryPath)
 	if statErr != nil {
@@ -674,7 +674,15 @@ func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint prope
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(gotInventory, wantInventory) {
-		t.Fatal("inventory content is not exact")
+		gotJSON, gotErr := json.Marshal(gotInventory)
+		wantJSON, wantErr := json.Marshal(wantInventory)
+		if gotErr != nil || wantErr != nil {
+			t.Fatal("inventory mismatch diagnostic encoding failed")
+		}
+		if strings.Contains(string(gotJSON), ciSecret) || strings.Contains(string(wantJSON), ciSecret) {
+			t.Fatal("inventory mismatch diagnostic would leak secret")
+		}
+		t.Fatalf("inventory content is not exact\ngot: %s\nwant: %s", gotJSON, wantJSON)
 	}
 	envPath := filepath.Join(h.root, "runtime", "managed", "env-"+appToken+fixtureToken(revision))
 	if got := string(mustRead(t, envPath)); got != "JWT_SECRET="+ciSecret+"\n" {
