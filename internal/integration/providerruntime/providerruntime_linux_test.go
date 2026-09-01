@@ -102,11 +102,14 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 		assertReadOnlyRuntime(t, before, runtimeSnapshot(t, h))
 
 		next := createInputsWithImage("api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+		preUpdateApps := inventoryApps(t, h)
+		preUpdateEffects := dockerEffects(t, h)
 		updated, err := updateProviderResource(t, h, updateRequest(t, created.Id, created.Properties, createInputs(), next), next, hostcontract.ActionInspect, hostcontract.ActionReconcile, hostcontract.ActionInspect)
 		if err != nil || updated == nil {
 			t.Fatalf("ordinary Update: %v", err)
 		}
 		assertCompletedReconcile(t, h, unmarshalProperties(t, updated.Properties), 0)
+		assertReconcileEffectDelta(t, h, preUpdateEffects, dockerEffects(t, h), preUpdateApps, next)
 
 		writeDataSentinel(t, h)
 		drained := createInputsWithTarget(hostcontract.Target{ReleaseArtifact: ciRelease})
@@ -154,6 +157,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 			}
 			before := runtimeSnapshot(t, h)
 			effectsBefore := dockerEffects(t, h)
+			preUpdateApps := inventoryApps(t, h)
 			actions := []hostcontract.Action{hostcontract.ActionInspect}
 			if scenario.changes == 0 || scenario.changes == 1 && scenario.decision == approvalExact {
 				actions = append(actions, hostcontract.ActionReconcile, hostcontract.ActionInspect)
@@ -163,7 +167,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 				if err != nil || updated == nil {
 					t.Fatalf("exact approval Update: %v", err)
 				}
-				assertReconcileEffectDelta(t, h, effectsBefore, dockerEffects(t, h), old, next)
+				assertReconcileEffectDelta(t, h, effectsBefore, dockerEffects(t, h), preUpdateApps, next)
 			} else if err == nil {
 				t.Fatal("non-admitted Update succeeded")
 			}
@@ -215,6 +219,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 		old := createInputsWithDataLinks(1, "old")
 		created := createProviderResource(t, h, old)
 		createdEffects := dockerEffects(t, h)
+		preFirstApps := inventoryApps(t, h)
 		first := createInputsWithDataLinks(1, "new")
 		firstRevision := frozenRevisionForInputs(t, first)
 		firstRequest := updateRequest(t, created.Id, created.Properties, old, first)
@@ -233,6 +238,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 			t.Fatalf("same revision recovery effects = %#v, want unchanged %#v", got, firstEffects)
 		}
 		second := createInputsWithDataLinks(1, "different")
+		preSecondApps := inventoryApps(t, h)
 		secondRevision := frozenRevisionForInputs(t, second)
 		h.approvals.Expect(dataLinkApprovalSubject("new", "different", secondRevision))
 		updated, err := updateProviderResource(t, h, updateRequest(t, created.Id, recovered.Properties, first, second), second, hostcontract.ActionInspect, hostcontract.ActionReconcile, hostcontract.ActionInspect)
@@ -249,11 +255,11 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 			t.Fatal("different revision reused the first approval subject")
 		}
 		secondEffects := dockerEffects(t, h)
-		assertReconcileEffectDelta(t, h, createdEffects, firstEffects, old, first)
+		assertReconcileEffectDelta(t, h, createdEffects, firstEffects, preFirstApps, first)
 		if len(secondEffects) < len(firstEffects) || !reflect.DeepEqual(secondEffects[:len(firstEffects)], firstEffects) {
 			t.Fatalf("second Update duplicated completed first-operation effects: before %#v, after %#v", firstEffects, secondEffects)
 		}
-		assertReconcileEffectDelta(t, h, firstEffects, secondEffects, first, second)
+		assertReconcileEffectDelta(t, h, firstEffects, secondEffects, preSecondApps, second)
 		assertCompletedReconcileForRevision(t, h, unmarshalProperties(t, updated.Properties), secondRevision, 1)
 		h.approvals.AssertExpectedConsumed(t)
 	})
@@ -2047,14 +2053,7 @@ func runtimeState(t *testing.T, h *providerProcess) hostruntime.State {
 	}
 	return state
 }
-func effectActions(effects []dockerEffect) []string {
-	actions := make([]string, len(effects))
-	for i, effect := range effects {
-		actions[i] = effect.Action
-	}
-	return actions
-}
-func assertReconcileEffectDelta(t *testing.T, h *providerProcess, before, after []dockerEffect, current, next property.Map) {
+func assertReconcileEffectDelta(t *testing.T, h *providerProcess, before, after []dockerEffect, preUpdateApps []inventoryApp, next property.Map) {
 	t.Helper()
 	if len(after) < len(before) || !reflect.DeepEqual(after[:len(before)], before) {
 		t.Fatalf("reconcile changed completed effect prefix: before %#v, after %#v", before, after)
@@ -2072,17 +2071,35 @@ func assertReconcileEffectDelta(t *testing.T, h *providerProcess, before, after 
 		t.Fatalf("reconcile effect delta = %#v, want three effects per expected target app", delta)
 	}
 	for index, app := range target.Apps {
-		for offset, action := range []string{"container-run", "container-stop", "container-rm"} {
-			effect := delta[index*3+offset]
-			inputs := next
-			if action != "container-run" {
-				inputs = current
-			}
-			if !matchesExpectedAppEffect(t, h, effect, action, app, inputs, "green") && !matchesExpectedAppEffect(t, h, effect, action, app, inputs, "blue") {
-				t.Fatalf("reconcile effect %d = %#v, want %s for app %q", index*3+offset, effect, action, app.ID)
+		old, ok := inventoryAppForToken(preUpdateApps, fixtureToken("app", app.ID))
+		if !ok {
+			t.Fatalf("pre-update inventory omitted app %q", app.ID)
+		}
+		run := delta[index*3]
+		if !matchesExpectedAppEffect(t, h, run, "container-run", app, next, inactiveSlot(old.Active)) {
+			t.Fatalf("reconcile run effect %d = %#v, want app %q", index, run, app.ID)
+		}
+		for offset, action := range []string{"container-stop", "container-rm"} {
+			if want := expectedInventoryEffect(t, h, action, old); delta[index*3+offset+1] != want {
+				t.Fatalf("reconcile %s effect %d = %#v, want pre-update inventory object %#v", action, index, delta[index*3+offset+1], want)
 			}
 		}
 	}
+}
+func inventoryAppForToken(apps []inventoryApp, token string) (inventoryApp, bool) {
+	for _, app := range apps { if app.AppToken == token { return app, true } }
+	return inventoryApp{}, false
+}
+func inactiveSlot(active string) string { if active == "blue" { return "green" }; return "blue" }
+func expectedInventoryEffect(t *testing.T, h *providerProcess, action string, app inventoryApp) dockerEffect {
+	t.Helper()
+	state := runtimeState(t, h)
+	name := "s2h-" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "app", app.AppToken, app.Active)
+	owner := "s2h1:" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "app", app.AppToken, app.Active)
+	target := "s2ht1:" + fixtureToken("app", app.AppToken, app.Active, app.Revision, app.Image, "", "0", "false")
+	ownerSum, targetSum := sha256.Sum256([]byte(owner)), sha256.Sum256([]byte(target))
+	if app.Name != name { t.Fatalf("pre-update inventory name = %q, want %q", app.Name, name) }
+	return dockerEffect{Action: action, Name: name, AppToken: app.AppToken, Slot: app.Active, OwnerDigest: hex.EncodeToString(ownerSum[:]), TargetDigest: hex.EncodeToString(targetSum[:])}
 }
 func assertInitialCreateEffects(t *testing.T, h *providerProcess, effects []dockerEffect, inputs property.Map) {
 	t.Helper()
@@ -2361,9 +2378,14 @@ func assertExactUpdateCheckpoint(t *testing.T, checkpoint, news property.Map, re
 		}
 	}
 	assertCheckpointSecrets(t, checkpoint)
-	secrets, _ := checkpoint.GetOk("secrets")
-	if !strings.Contains(string(mustJSON(t, secrets)), ciSecret) {
-		t.Fatal("Update checkpoint lost nested secret canary")
+	wantSecrets, _ := news.GetOk("secrets")
+	gotSecrets, _ := checkpoint.GetOk("secrets")
+	wantRaw, gotRaw := string(mustJSON(t, wantSecrets)), string(mustJSON(t, gotSecrets))
+	if strings.Contains(wantRaw, ciSecret) && !strings.Contains(gotRaw, ciSecret) {
+		t.Fatal("Update checkpoint lost requested nested secret canary")
+	}
+	if !strings.Contains(wantRaw, ciSecret) && strings.Contains(gotRaw, ciSecret) {
+		t.Fatal("Update checkpoint invented an unrequested secret canary")
 	}
 	_, _, applied, observation, err := checkpointValues(checkpoint)
 	if err != nil || applied != revision || observation.AppliedRevision != revision || !observation.Ready {
