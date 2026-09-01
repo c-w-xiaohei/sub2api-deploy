@@ -934,6 +934,95 @@ func TestLifecycleReadRefreshesTrustedObservationWithOneInspect(t *testing.T) {
 	}
 }
 
+// TestImportBuildsReadOnlyStateFromVerifiedObservation specifies the program-first
+// import Read. Pulumi ReadStep sends registered Program inputs as both Inputs and
+// input-only Properties; an ordinary Read instead has checkpoint Properties with
+// lifecycle outputs. The trusted installed Host Runtime's inspect attests to its
+// managed state and inventory. Persistent paths are deliberately not Program
+// configuration or observation fields; provider proof is limited to the stable
+// observation fields validated against the complete Program target.
+func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
+	inputs := localDataInputs(t, "edge")
+	revision := revisionForInputs(t, inputs)
+	resource := lifecycleResource(t, inputs)
+	verified := observationFor(decodeTarget(t, inputs), revision)
+
+	t.Run("verified program inputs construct a checkpoint through inspect only", func(t *testing.T) {
+		r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(verified))}}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		request := p.ReadRequest{ID: stableID(resource), Inputs: inputs, Properties: inputs}
+		if !reflect.DeepEqual(request.Properties, request.Inputs) {
+			t.Fatal("program-first Import marker must use input-only Properties equal to Inputs")
+		}
+		got, err := h.read(t.Context(), request)
+		if err != nil || got.ID != stableID(resource) || !onlyInspect(r) || hasWrite(r) {
+			t.Fatalf("program-first Import did not construct read-only state: %#v, %v, %#v", got, err, r.calls)
+		}
+		assertInspect(t, r.calls[0], inputs, revision)
+		assertCheckpoint(t, got.Properties, inputs, verified, revision)
+		if !reflect.DeepEqual(got.Inputs, inputs) || !valueAt(t, got.Inputs, "secrets").Secret() {
+			t.Fatalf("Import did not preserve exact program inputs and secret class: %#v", got.Inputs)
+		}
+	})
+
+	t.Run("exact observation produces no diff and drifted revision is an explicit in-place update", func(t *testing.T) {
+		h := configuredLifecycleHost(t, lifecycleDependencies{artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		exact := checkpoint(t, inputs, verified, revision)
+		diff, err := h.diff(t.Context(), p.DiffRequest{OldInputs: inputs, State: exact, Inputs: inputs})
+		if err != nil || diff.HasChanges || len(diff.DetailedDiff) != 0 {
+			t.Fatalf("exact imported checkpoint diff = %#v, %v", diff, err)
+		}
+
+		drifted := verified
+		drifted.AppliedRevision = mismatchedRevision()
+		state := checkpoint(t, inputs, drifted, drifted.AppliedRevision)
+		diff, err = h.diff(t.Context(), p.DiffRequest{OldInputs: inputs, State: state, Inputs: inputs})
+		if err != nil || !diff.HasChanges || len(diff.DetailedDiff) == 0 {
+			t.Fatalf("drifted imported checkpoint diff = %#v, %v", diff, err)
+		}
+		for path, change := range diff.DetailedDiff {
+			if (path != "observation" && path != "appliedRevision") || change.Kind != p.Update || change.InputDiff {
+				t.Fatalf("drifted Import reported a non-approved or non-in-place diff: %#v", diff.DetailedDiff)
+			}
+		}
+	})
+
+	for _, scenario := range []struct {
+		name      string
+		id        string
+		inputs    property.Map
+		observed  hostcontract.StableObservation
+		calls     int
+	}{
+		{"wrong stable ID", "host-wrong", inputs, verified, 0},
+		{"missing program inputs", stableID(resource), property.NewMap(nil), verified, 0},
+		{"unsafe machine", stableID(resource), inputs, wrongMachine(verified), 1},
+		{"unsafe ownership", stableID(resource), inputs, wrongOwner(verified), 1},
+		{"unsafe release", stableID(resource), inputs, wrongRelease(verified), 1},
+		{"malformed revision", stableID(resource), inputs, func() hostcontract.StableObservation { value := verified; value.AppliedRevision = "malformed"; return value }(), 1},
+		{"unsafe app readiness", stableID(resource), inputs, notReadyApp(verified), 1},
+		{"unsafe app image", stableID(resource), inputs, wrongAppImage(verified), 1},
+		{"missing app", stableID(resource), inputs, missingApps(verified), 1},
+		{"unsafe managed data identity", stableID(resource), inputs, mismatchedLocalDataProviderAndEndpoint(verified), 1},
+		{"missing managed data", stableID(resource), inputs, missingLocalData(verified), 1},
+		{"not ready managed data", stableID(resource), inputs, notReadyLocalData(verified), 1},
+	} {
+		scenario := scenario
+		t.Run(scenario.name, func(t *testing.T) {
+			r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(scenario.observed))}}
+			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+			got, err := h.read(t.Context(), p.ReadRequest{ID: scenario.id, Inputs: scenario.inputs, Properties: scenario.inputs})
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != scenario.calls || hasWrite(r) {
+				t.Fatalf("unsafe Import claimed state or wrote remotely: %#v, %v, %#v", got, err, r.calls)
+			}
+			if scenario.calls == 1 {
+				assertInspect(t, r.calls[0], inputs, revision)
+			}
+			assertNoCanary(t, errString(err))
+		})
+	}
+}
+
 func TestLifecycleReadFailuresPreserveCheckpointAndDoNotClaimNotFound(t *testing.T) {
 	inputs := lifecycleInputs("edge")
 	priorRevision := revisionForInputs(t, inputs)
