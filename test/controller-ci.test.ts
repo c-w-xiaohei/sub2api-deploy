@@ -21,6 +21,45 @@ describe("Host controller CI evidence contract", () => {
     expect(prerequisite).toBeGreaterThan(workflow.indexOf("Race-test Host controller"));
   });
 
+  it("assigns provider-runtime race coverage exclusively to its dedicated job", () => {
+    const hostStart = workflow.indexOf("  host-controller:");
+    const hostEnd = workflow.indexOf("  engine-graph:", hostStart);
+    const hostJob = workflow.slice(hostStart, hostEnd);
+    const targetPackage = "github.com/c-w-xiaohei/sub2api-deploy/internal/integration/providerruntime";
+
+    expect(hostJob).toMatch(
+      /^\s*package_file="\$RUNNER_TEMP\/host-controller-packages\.txt"\s*$/m,
+    );
+    expect(hostJob).toContain('if ! go list ./internal/... ./cmd/... > "$package_file"; then');
+    expect(hostJob).toContain("exit 1");
+    expect(hostJob).toContain('mapfile -t packages < "$package_file"');
+    expect(hostJob).toContain('rm -f "$package_file"');
+    expect(hostJob).not.toContain("mapfile -t packages < <(go list ./internal/... ./cmd/...)");
+    expect(hostJob.indexOf('if ! go list ./internal/... ./cmd/... > "$package_file"; then')).toBeLessThan(
+      hostJob.indexOf('mapfile -t packages < "$package_file"'),
+    );
+    expect(hostJob.indexOf('mapfile -t packages < "$package_file"')).toBeLessThan(
+      hostJob.indexOf('rm -f "$package_file"'),
+    );
+    expect(hostJob.indexOf('rm -f "$package_file"')).toBeLessThan(
+      hostJob.indexOf('go test -race -count=1 "${filtered[@]}"'),
+    );
+    expect(hostJob).toContain(`target_package=\"${targetPackage}\"`);
+    expect(hostJob).toContain('if [[ "$package" == "$target_package" ]]; then');
+    expect(hostJob).toContain("found=true");
+    expect(hostJob).toContain("filtered=()");
+    expect(hostJob).toContain('filtered+=("$package")');
+    expect(hostJob).toContain('test "$found" = true');
+    expect(hostJob).toContain('test "${#filtered[@]}" -gt 0');
+    expect(hostJob).toContain('go test -race -count=1 "${filtered[@]}"');
+    expect(hostJob).not.toContain("go test -race -count=1 ./internal/... ./cmd/...");
+
+    const runtimeStart = workflow.indexOf("  provider-runtime:");
+    expect(runtimeStart).toBeGreaterThanOrEqual(0);
+    const runtimeJob = workflow.slice(runtimeStart);
+    expect(runtimeJob).toContain("go test -race -json -count=1 -timeout=15m -run \"$tests\" ./internal/integration/providerruntime");
+  });
+
   it("records fixed candidate tests and fails skipped or absent evidence", () => {
     for (const symbol of [
       "TestRegisterFoundationGraph",
@@ -167,33 +206,54 @@ describe("Host controller CI evidence contract", () => {
     expect(job).toContain(
       "tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime)$'",
     );
-    expect(job).toMatch(/^\s*timeout-minutes:\s*25\s*$/m);
+    expect(job).toMatch(/^\s*timeout-minutes:\s*30\s*$/m);
     expect(job).toMatch(
-      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$evidence\/normal-events\.jsonl"\n\s*normal_status=\?/,
+      /^\s*normal_events="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-normal-events\.jsonl"\s*$/m,
     );
     expect(job).toMatch(
-      /go test -race -json -count=1 -timeout=10m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$evidence\/race-events\.jsonl"\n\s*race_status=\?/,
+      /^\s*normal_stderr="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-normal-stderr\.log"\s*$/m,
     );
+    expect(job).toMatch(
+      /^\s*race_events="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-race-events\.jsonl"\s*$/m,
+    );
+    expect(job).toMatch(
+      /^\s*race_stderr="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-race-stderr\.log"\s*$/m,
+    );
+    expect(job).toMatch(
+      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$normal_events" 2> "\$normal_stderr"\n\s*normal_status=\?/,
+    );
+    expect(job).toMatch(
+      /go test -race -json -count=1 -timeout=15m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$race_events" 2> "\$race_stderr"\n\s*race_status=\?/,
+    );
+    expect(job).toMatch(
+      /extract_sanitized_trace "\$normal_events" "\$evidence\/trace\/normal\.jsonl"\n\s*normal_trace_status=\?/,
+    );
+    expect(job).toMatch(
+      /extract_sanitized_trace "\$race_events" "\$evidence\/trace\/race\.jsonl"\n\s*race_trace_status=\?/,
+    );
+    expect(job).toContain('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"');
     expect(job).not.toMatch(/go test[^\n]*\.\/\.\./);
 
     for (const [parser, events, status] of [
-      ["verify_normal_required_tests", "normal-events.jsonl", "normal_status"],
-      ["verify_race_required_tests", "race-events.jsonl", "race_status"],
+      ["verify_normal_required_tests", "normal_events", "normal_status"],
+      ["verify_race_required_tests", "race_events", "race_status"],
     ]) {
-      const parserCall = `${parser} "$evidence/${events}" "$${status}"`;
+      const parserCall = `${parser} "$${events}" "$${status}"`;
       const statusGate = `test "$${status}" -eq 0`;
+      const parserStatus = status.replace("_status", "_parser_status");
       const marker = parser === "verify_normal_required_tests" ? "NODE_NORMAL" : "NODE_RACE";
       expect(job).toContain(`${parser}()`);
-      expect(job).toContain(`node <<'${marker}'`);
+      expect(job).toContain(`node - "$1" <<'${marker}'`);
       expect(job).toContain(marker);
-      expect(job).toMatch(new RegExp(String.raw`${parser}\(\)\s*\{\s*node <<'${marker}'`));
+      expect(job).toMatch(new RegExp(String.raw`${parser}\(\)\s*\{\s*node - "\$1" <<'${marker}'`));
       const nodeBodyMatch = job.match(
-        new RegExp(String.raw`^\s*node <<'${marker}'\s*$\n([\s\S]*?)^\s*${marker}\s*$`, "m"),
+        new RegExp(String.raw`^\s*node - "\$1" <<'${marker}'\s*$\n([\s\S]*?)^\s*${marker}\s*$`, "m"),
       );
       expect(nodeBodyMatch).not.toBeNull();
       const body = nodeBodyMatch?.[1] ?? "";
       expect(body).toContain("JSON.parse(line)");
       expect(body).toContain('if (!line) continue;');
+      expect(body).toContain("process.argv[2]");
       expect(body).toContain(
         'const terminal = new Map(required.map((name) => [name, "absent"]));',
       );
@@ -205,8 +265,14 @@ describe("Host controller CI evidence contract", () => {
       expect(body).toContain('if (result !== "pass")');
       expect(body).toContain("required test did not pass");
       expect(body).toContain("if (!event.Test || !required.includes(event.Test)) continue;");
+      expect(job).toMatch(
+        new RegExp(
+          String.raw`${marker}\s*\n\s*parser_status=\$\?\s*\n\s*if test "\$parser_status" -ne 0; then\s*\n\s*return "\$parser_status"\s*\n\s*fi\s*\n\s*test "\$2" -eq 0`,
+        ),
+      );
       expect(job.indexOf(parserCall)).toBeGreaterThan(job.indexOf(`${status}=$?`));
       expect(job.indexOf(statusGate)).toBeGreaterThan(job.indexOf(parserCall));
+      expect(job).toContain(`${parserCall}\n          ${parserStatus}=$?`);
     }
 
     expect(job).toContain('evidence="evidence/${TARGET_SHA}/provider-runtime"');
@@ -218,20 +284,63 @@ describe("Host controller CI evidence contract", () => {
     expect(job).toContain("trace/README.txt");
     expect(job).toContain("sanitized fixture traces");
     expect(job).toContain("no secrets or raw request frames");
+    for (const [events, sanitized] of [
+      ["normal_events", "normal.jsonl"],
+      ["race_events", "race.jsonl"],
+    ]) {
+      const extract = `extract_sanitized_trace "$${events}" "$evidence/trace/${sanitized}"`;
+      expect(job).toContain("extract_sanitized_trace()");
+      expect(job).toContain(extract);
+      expect(job.indexOf(extract)).toBeGreaterThan(job.indexOf("race_status=$?"));
+      expect(job.indexOf(extract)).toBeLessThan(
+        job.indexOf('verify_normal_required_tests "$normal_events" "$normal_status"'),
+      );
+    }
+    expect(job).toContain("extract_sanitized_trace()");
+    expect(job).toContain('node - "$1" "$2" <<\'NODE_TRACE\'');
+    const traceBodyMatch = job.match(
+      /^\s*node - "\$1" "\$2" <<'NODE_TRACE'\s*$\n([\s\S]*?)^\s*NODE_TRACE\s*$/m,
+    );
+    expect(traceBodyMatch).not.toBeNull();
+    const traceBody = traceBodyMatch?.[1] ?? "";
+    expect(traceBody).toContain("process.argv[2]");
+    expect(traceBody).toContain("process.argv[3]");
+    expect(traceBody).toContain("JSON.parse(line)");
+    expect(traceBody).toContain('if (!line) continue;');
+    expect(traceBody).toContain("if (!event.Test || !required.has(event.Test)) continue;");
+    expect(traceBody).toContain("{ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed }");
+    expect(traceBody).not.toContain("Output");
+    expect(traceBody).not.toContain("...");
     expect(job).toContain(
-      'trace_files=$(find "$evidence/trace" -type f ! -name README.txt -print)',
+      'expected_files=$(printf \'%s\\n\' "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/normal.jsonl" "$evidence/trace/race.jsonl")',
     );
-    expect(job).toContain('test -n "$trace_files"');
-    const traceLoop = job.match(
-      /while IFS= read -r trace_file; do([\s\S]*?)done <<< "\$trace_files"/,
-    );
-    expect(traceLoop).not.toBeNull();
-    const traceBody = traceLoop?.[1] ?? "";
-    expect(traceBody).toContain('test -s "$trace_file"');
-    expect(traceBody).toContain(
+    expect(job).toContain('actual_files=$(find "$evidence" -type f -print | sort)');
+    expect(job).toContain('test "$actual_files" = "$expected_files" || exit 1');
+    expect(job).toContain('for trace_file in "$evidence/trace/normal.jsonl" "$evidence/trace/race.jsonl"; do');
+    expect(job).toContain('test -s "$trace_file" || exit 1');
+    expect(job).toContain(
       "forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|\\\"authorization\\\"\\s*:|sub2api-host-v1 |\\\"secrets\\\"\\s*:'",
     );
-    expect(traceBody).toMatch(/if grep -E "\$forbidden" "\$trace_file"; then\s*exit 1\s*fi/);
+    expect(job).toMatch(/if grep -Eq "\$forbidden" "\$trace_file"; then\s*exit 1\s*fi/);
+    expect(job.indexOf('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"')).toBeGreaterThan(
+      job.indexOf('verify_race_required_tests "$race_events" "$race_status"'),
+    );
+    expect(job.indexOf('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"')).toBeLessThan(
+      job.indexOf('test "$normal_status" -eq 0'),
+    );
+    for (const status of [
+      "normal_trace_status",
+      "race_trace_status",
+      "trace_validation_status",
+      "normal_parser_status",
+      "normal_status",
+      "race_parser_status",
+      "race_status",
+    ]) {
+      expect(job.indexOf(`test "$${status}" -eq 0`)).toBeGreaterThan(
+        job.indexOf('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"'),
+      );
+    }
 
     const upload = job.match(
       /- name: Upload provider-runtime evidence[\s\S]*?if: always\(\)[\s\S]*?uses: actions\/upload-artifact@v4[\s\S]*?name: provider-runtime-evidence-\$\{\{ env\.TARGET_SHA \}\}\s*$[\s\S]*?path: evidence\/\$\{\{ env\.TARGET_SHA \}\}\/provider-runtime\s*$[\s\S]*?if-no-files-found: error/m,

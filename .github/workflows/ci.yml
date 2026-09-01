@@ -142,7 +142,26 @@ jobs:
 
       - name: Race-test Host controller
         if: matrix.arch == 'amd64'
-        run: go test -race -count=1 ./internal/... ./cmd/...
+        run: |
+          target_package="github.com/c-w-xiaohei/sub2api-deploy/internal/integration/providerruntime"
+          package_file="$RUNNER_TEMP/host-controller-packages.txt"
+          if ! go list ./internal/... ./cmd/... > "$package_file"; then
+            exit 1
+          fi
+          mapfile -t packages < "$package_file"
+          rm -f "$package_file"
+          found=false
+          filtered=()
+          for package in "${packages[@]}"; do
+            if [[ "$package" == "$target_package" ]]; then
+              found=true
+              continue
+            fi
+            filtered+=("$package")
+          done
+          test "$found" = true
+          test "${#filtered[@]}" -gt 0
+          go test -race -count=1 "${filtered[@]}"
 
       - name: Prepare offline OpenSSH prerequisites
         if: matrix.arch == 'amd64'
@@ -319,4 +338,171 @@ jobs:
         with:
           name: provider-ssh-evidence-${{ env.TARGET_SHA }}
           path: evidence/${{ env.TARGET_SHA }}/
+          if-no-files-found: error
+
+  provider-runtime:
+    name: Provider Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+
+      - name: Verify exact target SHA
+        run: |
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+
+      - name: Verify Go modules
+        run: go mod verify
+
+      - name: Prepare offline OpenSSH prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server
+          command -v sshd
+
+      - name: Record required provider-runtime test evidence
+        run: |
+          evidence="evidence/${TARGET_SHA}/provider-runtime"
+          mkdir -p "$evidence/trace"
+          TARGET_SHA="$TARGET_SHA" GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" node <<'NODE'
+          const fs = require("node:fs");
+          const root = `evidence/${process.env.TARGET_SHA}/provider-runtime`;
+          fs.writeFileSync(`${root}/metadata.json`, JSON.stringify({
+            sha: process.env.TARGET_SHA,
+            runUrl: process.env.GITHUB_RUN_URL,
+            gate: "provider-runtime",
+          }) + "\n");
+          fs.writeFileSync(`${root}/trace/README.txt`, "Sanitized fixture traces contain no secrets or raw request frames.\n");
+          NODE
+          tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime)$'
+
+          verify_normal_required_tests() {
+          node - "$1" <<'NODE_NORMAL'
+          const fs = require("node:fs");
+          const required = process.env.REQUIRED_TESTS.slice(2, -2).split("|");
+          const terminal = new Map(required.map((name) => [name, "absent"]));
+          for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (!event.Test || !required.includes(event.Test)) continue;
+            if (event.Action === "skip" || event.Action === "fail") {
+              throw new Error(`required test did not pass: ${event.Test} (${event.Action})`);
+            }
+            if (event.Action === "pass") terminal.set(event.Test, "pass");
+          }
+          for (const name of required) {
+            const result = terminal.get(name);
+            if (result !== "pass") throw new Error(`required test did not pass: ${name} (${result ?? "absent"})`);
+          }
+          NODE_NORMAL
+          parser_status=$?
+          if test "$parser_status" -ne 0; then
+            return "$parser_status"
+          fi
+          test "$2" -eq 0
+          }
+
+          verify_race_required_tests() {
+          node - "$1" <<'NODE_RACE'
+          const fs = require("node:fs");
+          const required = process.env.REQUIRED_TESTS.slice(2, -2).split("|");
+          const terminal = new Map(required.map((name) => [name, "absent"]));
+          for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (!event.Test || !required.includes(event.Test)) continue;
+            if (event.Action === "skip" || event.Action === "fail") {
+              throw new Error(`required test did not pass: ${event.Test} (${event.Action})`);
+            }
+            if (event.Action === "pass") terminal.set(event.Test, "pass");
+          }
+          for (const name of required) {
+            const result = terminal.get(name);
+            if (result !== "pass") throw new Error(`required test did not pass: ${name} (${result ?? "absent"})`);
+          }
+          NODE_RACE
+          parser_status=$?
+          if test "$parser_status" -ne 0; then
+            return "$parser_status"
+          fi
+          test "$2" -eq 0
+          }
+
+          extract_sanitized_trace() {
+          node - "$1" "$2" <<'NODE_TRACE'
+          const fs = require("node:fs");
+          const required = new Set(process.env.REQUIRED_TESTS.slice(2, -2).split("|"));
+          const sanitized = [];
+          for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (!event.Test || !required.has(event.Test)) continue;
+            sanitized.push(JSON.stringify({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed }));
+          }
+          fs.writeFileSync(process.argv[3], sanitized.join("\n") + (sanitized.length ? "\n" : ""));
+          NODE_TRACE
+          }
+
+          normal_events="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal-events.jsonl"
+          normal_stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal-stderr.log"
+          race_events="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race-events.jsonl"
+          race_stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race-stderr.log"
+          set +e
+          go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerruntime > "$normal_events" 2> "$normal_stderr"
+          normal_status=$?
+          set -e
+          set +e
+          go test -race -json -count=1 -timeout=15m -run "$tests" ./internal/integration/providerruntime > "$race_events" 2> "$race_stderr"
+          race_status=$?
+          set -e
+          set +e
+          REQUIRED_TESTS="$tests" extract_sanitized_trace "$normal_events" "$evidence/trace/normal.jsonl"
+          normal_trace_status=$?
+          REQUIRED_TESTS="$tests" extract_sanitized_trace "$race_events" "$evidence/trace/race.jsonl"
+          race_trace_status=$?
+          set -e
+          set +e
+          (
+            expected_files=$(printf '%s\n' "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/normal.jsonl" "$evidence/trace/race.jsonl")
+            actual_files=$(find "$evidence" -type f -print | sort)
+            test "$actual_files" = "$expected_files" || exit 1
+            for trace_file in "$evidence/trace/normal.jsonl" "$evidence/trace/race.jsonl"; do
+              test -s "$trace_file" || exit 1
+              forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|\"authorization\"\s*:|sub2api-host-v1 |\"secrets\"\s*:'
+              if grep -Eq "$forbidden" "$trace_file"; then
+                exit 1
+              fi
+            done
+          )
+          trace_validation_status=$?
+          REQUIRED_TESTS="$tests" verify_normal_required_tests "$normal_events" "$normal_status"
+          normal_parser_status=$?
+          REQUIRED_TESTS="$tests" verify_race_required_tests "$race_events" "$race_status"
+          race_parser_status=$?
+          set -e
+          rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"
+          test "$normal_trace_status" -eq 0
+          test "$race_trace_status" -eq 0
+          test "$trace_validation_status" -eq 0
+          test "$normal_parser_status" -eq 0
+          test "$normal_status" -eq 0
+          test "$race_parser_status" -eq 0
+          test "$race_status" -eq 0
+
+      - name: Upload provider-runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-runtime-evidence-${{ env.TARGET_SHA }}
+          path: evidence/${{ env.TARGET_SHA }}/provider-runtime
           if-no-files-found: error
