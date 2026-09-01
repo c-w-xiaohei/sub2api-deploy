@@ -310,12 +310,13 @@ func TestProviderProcessReachesSharedTemporaryRuntimeServe(t *testing.T) {
 	inputs := createInputs()
 	writeTargetExpectation(t, h, inputs)
 	writeHostActionQueue(t, h, hostcontract.ActionInspect)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), prerequisiteCreateTimeout)
 	defer cancel()
 	response, err := h.client.Create(ctx, &pulumirpc.CreateRequest{
 		Urn:        "urn:pulumi:test::runtime::sub2api-host:index:Host::edge",
 		Properties: rpcProperties(t, inputs),
 	})
+	assertHostActionQueueEmpty(t, h)
 	if err != nil {
 		if detail, readErr := os.ReadFile(filepath.Join(h.trace, "docker.error")); readErr == nil {
 			t.Fatalf("Provider Create through shared temporary Runtime: %v; Docker fixture: %s", err, detail)
@@ -351,6 +352,7 @@ type providerProcess struct {
 	trace     string
 	root      string
 	approvals *approvalRecorder
+	lifecycle bool
 }
 
 type targetExpectation struct {
@@ -390,7 +392,7 @@ func buildProvider(t *testing.T, directory string) string {
 	workspace := repositoryRoot(t)
 	providerPath := filepath.Join(directory, "pulumi-resource-sub2api-host")
 	writeArtifactFixture(t, filepath.Dir(filepath.Dir(providerPath)))
-	buildCtx, cancelBuild := context.WithTimeout(t.Context(), 30*time.Second)
+	buildCtx, cancelBuild := context.WithTimeout(t.Context(), providerBuildTimeout)
 	defer cancelBuild()
 	args := []string{"build", "-o", providerPath, "./cmd/pulumi-resource-sub2api-host"}
 	if providerRaceEnabled {
@@ -475,7 +477,7 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 	}
 	cleanup.identity = &identity
 	port := readProviderPort(t, stdout)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), configureReadDeleteTimeout)
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, net.JoinHostPort("127.0.0.1", port), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
@@ -490,7 +492,7 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 	if _, err := configureProvider(t, client); err != nil {
 		t.Fatal(err)
 	}
-	return &providerProcess{client: client, caseDir: caseDir, trace: trace, root: root, approvals: approvals}
+	return &providerProcess{client: client, caseDir: caseDir, trace: trace, root: root, approvals: approvals, lifecycle: lifecycleScenario}
 }
 
 func createInputs() property.Map {
@@ -1316,7 +1318,7 @@ func readProviderPort(t *testing.T, output io.ReadCloser) string {
 			t.Fatal("Provider emitted no valid gRPC port")
 		}
 		return port
-	case <-time.After(5 * time.Second):
+	case <-time.After(providerPortReadTimeout):
 		_ = output.Close()
 		select {
 		case <-result:
@@ -1611,7 +1613,11 @@ func createProviderResource(t *testing.T, h *providerProcess, inputs property.Ma
 	t.Helper()
 	writeTargetExpectation(t, h, inputs)
 	writeHostActionQueue(t, h, hostcontract.ActionInspect)
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	timeout := prerequisiteCreateTimeout
+	if h.lifecycle {
+		timeout = matrixCreateUpdateTimeout
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	response, err := h.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:test::runtime::sub2api-host:index:Host::edge", Properties: rpcProperties(t, inputs)})
 	assertHostActionQueueEmpty(t, h)
@@ -1623,7 +1629,7 @@ func createProviderResource(t *testing.T, h *providerProcess, inputs property.Ma
 
 func configureProvider(t *testing.T, client pulumirpc.ResourceProviderClient) (*pulumirpc.ConfigureResponse, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), configureReadDeleteTimeout)
 	defer cancel()
 	return client.Configure(ctx, &pulumirpc.ConfigureRequest{Args: rpcProperties(t, property.NewMap(map[string]property.Value{"revisionKey": property.New(ciKey).WithSecret(true)}))})
 }
@@ -1631,7 +1637,7 @@ func updateProviderResource(t *testing.T, h *providerProcess, request *pulumirpc
 	t.Helper()
 	writeTargetExpectation(t, h, inputs, request.OldInputs)
 	writeHostActionQueue(t, h, actions...)
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), matrixCreateUpdateTimeout)
 	defer cancel()
 	response, err := h.client.Update(ctx, request)
 	assertHostActionQueueEmpty(t, h)
@@ -1644,7 +1650,7 @@ func deleteProviderResource(t *testing.T, h *providerProcess, request *pulumirpc
 	t.Helper()
 	writeTargetExpectation(t, h, inputs)
 	writeHostActionQueue(t, h, actions...)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), configureReadDeleteTimeout)
 	defer cancel()
 	response, err := h.client.Delete(ctx, request)
 	assertHostActionQueueEmpty(t, h)
@@ -1653,7 +1659,7 @@ func deleteProviderResource(t *testing.T, h *providerProcess, request *pulumirpc
 func readProviderResource(t *testing.T, h *providerProcess, request *pulumirpc.ReadRequest, actions ...hostcontract.Action) (*pulumirpc.ReadResponse, error) {
 	t.Helper()
 	writeHostActionQueue(t, h, actions...)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), configureReadDeleteTimeout)
 	defer cancel()
 	response, err := h.client.Read(ctx, request)
 	assertHostActionQueueEmpty(t, h)
