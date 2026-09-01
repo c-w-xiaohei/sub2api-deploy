@@ -92,6 +92,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 	assertFrozenNormalizationOracle(t)
 	providerBinary := buildProviderForMatrix(t)
 	t.Run("A-create-read-ordinary-update-delete", func(t *testing.T) {
+		runLifecycleSubtest(t)
 		h := startProviderWithApproval(t, providerBinary, approvalExact)
 		created := createProviderResource(t, h, createInputs())
 		before := runtimeSnapshot(t, h)
@@ -143,7 +144,9 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 		{"C-one-dangerous-exact", 1, approvalExact, 1},
 		{"C-two-dangerous-fail-closed", 2, approvalExact, 0},
 	} {
+		scenario := scenario
 		t.Run(scenario.name, func(t *testing.T) {
+			runLifecycleSubtest(t)
 			h := startProviderWithApproval(t, providerBinary, scenario.decision)
 			old := createInputsWithDataLinks(scenario.changes, "old")
 			created := createProviderResource(t, h, old)
@@ -188,6 +191,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 	}
 
 	t.Run("B-response-loss-same-revision-resumes-once", func(t *testing.T) {
+		runLifecycleSubtest(t)
 		h := startProviderWithApproval(t, providerBinary, approvalExact)
 		old := createInputsWithDataLinks(1, "old")
 		created := createProviderResource(t, h, old)
@@ -215,6 +219,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 	})
 
 	t.Run("C-different-revision-cannot-reuse-approval", func(t *testing.T) {
+		runLifecycleSubtest(t)
 		h := startProviderWithApproval(t, providerBinary, approvalExact)
 		old := createInputsWithDataLinks(1, "old")
 		created := createProviderResource(t, h, old)
@@ -265,6 +270,7 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 	})
 
 	t.Run("D-retire-response-loss-preserves-data-and-removes-secrets", func(t *testing.T) {
+		runLifecycleSubtest(t)
 		h := startProviderWithApproval(t, providerBinary, approvalExact)
 		created := createProviderResource(t, h, createInputs())
 		writeDataSentinel(t, h)
@@ -297,10 +303,22 @@ func TestProviderLifecycleWithHostProcessTempRuntime(t *testing.T) {
 	})
 
 	t.Run("E-secret-canary-is-confined-to-env-before-retire", func(t *testing.T) {
+		runLifecycleSubtest(t)
 		h := startProviderWithApproval(t, providerBinary, approvalExact)
 		created := createProviderResource(t, h, createInputs())
 		assertSecretIsolation(t, h, created)
 	})
+}
+
+// runLifecycleSubtest limits concurrent race-instrumented provider processes.
+func runLifecycleSubtest(t *testing.T) {
+	t.Helper()
+	if !providerRaceEnabled {
+		return
+	}
+	t.Parallel()
+	lifecycleSubtestSlots <- struct{}{}
+	t.Cleanup(func() { <-lifecycleSubtestSlots })
 }
 
 // TestProviderProcessReachesSharedTemporaryRuntimeServe is the permanent 7a

@@ -6,6 +6,10 @@ import "time"
 
 const providerRaceEnabled = true
 
+const lifecycleSubtestParallelism = 3
+
+var lifecycleSubtestSlots = make(chan struct{}, lifecycleSubtestParallelism)
+
 const (
 	providerBuildTimeout       = 60 * time.Second
 	prerequisiteCreateTimeout  = 30 * time.Second

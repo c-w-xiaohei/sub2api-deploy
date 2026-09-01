@@ -6,6 +6,8 @@ import "time"
 
 const providerRaceEnabled = false
 
+var lifecycleSubtestSlots chan struct{}
+
 const (
 	providerBuildTimeout       = 30 * time.Second
 	prerequisiteCreateTimeout  = 10 * time.Second
