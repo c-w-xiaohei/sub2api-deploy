@@ -1,18 +1,36 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const script = new URL("../scripts/release-bundle.sh", import.meta.url).pathname;
+const root = process.cwd();
+const script = join(root, "scripts", "release-bundle.sh");
+const manifest = join(root, "scripts", "release-bundle-files.txt");
+
+const targetInventory = [
+  "Pulumi.production.example.yaml",
+  "Pulumi.yaml",
+  "README.md",
+  "artifacts/sub2api-host/manifest.json",
+  "artifacts/sub2api-host/sub2api-host-linux-amd64",
+  "artifacts/sub2api-host/sub2api-host-linux-arm64",
+  "bin/go",
+  "bin/pulumi",
+  "bin/pulumi-program",
+  "bin/pulumi-resource-sub2api-host",
+  "bin/sub2api-deploy",
+  "go.mod",
+  "scripts/pulumi-plugins/cloudflare/pulumi-plugin.json",
+  "scripts/pulumi-plugins/upstash/pulumi-plugin.json",
+].sort();
 
 function elf(machine: "amd64" | "arm64") {
   const binary = Buffer.alloc(64);
   binary.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
   binary.writeUInt16LE(2, 16);
   binary.writeUInt16LE(machine === "amd64" ? 62 : 183, 18);
-  binary.writeUInt32LE(1, 20);
   return binary;
 }
 
@@ -20,40 +38,43 @@ function sha256(contents: Buffer) {
   return createHash("sha256").update(contents).digest("hex");
 }
 
+function files(directory: string, base = directory): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? files(path, base) : [relative(base, path)];
+  }).sort();
+}
+
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "sub2api-release-bundle-"));
-  const components = join(root, "components");
-  const bundle = join(root, "bundle");
-  const archive = join(root, "bundle.tar.gz");
-  const fakeBin = join(root, "bin");
-  const dockerLog = join(root, "docker-invoked");
+  const temp = mkdtempSync(join(tmpdir(), "sub2api-release-bundle-"));
+  const components = join(temp, "components");
+  const bundle = join(temp, "bundle");
+  const archive = join(temp, "bundle.tar.gz");
+  const safeBin = join(temp, "safe-bin");
   mkdirSync(components);
-  mkdirSync(fakeBin);
-  const fakeDocker = join(fakeBin, "docker");
-  writeFileSync(fakeDocker, "#!/usr/bin/env bash\ntouch \"$FAKE_DOCKER_LOG\"\nexit 97\n");
-  chmodSync(fakeDocker, 0o755);
+  mkdirSync(safeBin);
+  const docker = join(safeBin, "docker");
+  writeFileSync(docker, "#!/bin/sh\nexit 97\n");
+  chmodSync(docker, 0o755);
   for (const name of ["sub2api-deploy", "pulumi-program", "pulumi-resource-sub2api-host"]) {
     const path = join(components, name);
-    writeFileSync(path, `#!/usr/bin/env bash\n# ${name}\n`);
+    writeFileSync(path, `#!/usr/bin/env bash\nprintf '%s\\n' '${name}'\n`);
     chmodSync(path, 0o755);
   }
   writeFileSync(join(components, "sub2api-host-linux-amd64"), elf("amd64"), { mode: 0o755 });
   writeFileSync(join(components, "sub2api-host-linux-arm64"), elf("arm64"), { mode: 0o755 });
 
   return {
-    root,
+    temp,
     bundle,
     assemble: () => execFileSync("bash", [script, "assemble", bundle, components, "test-release"], { stdio: "pipe" }),
-    verify: () => execFileSync("bash", [script, "verify-host-artifacts", bundle], { stdio: "pipe" }),
-    verifyArchive: () => {
-      execFileSync("tar", ["-C", root, "-czf", archive, "bundle"], { stdio: "pipe" });
-      execFileSync("bash", [script, "verify", archive], {
-        stdio: "pipe",
-        env: { ...process.env, FAKE_DOCKER_LOG: dockerLog, PATH: `${fakeBin}:${process.env.PATH}` },
-      });
-    },
-    manifestPath: join(bundle, "artifacts", "sub2api-host", "manifest.json"),
-    dockerLog,
+    archive: () => execFileSync("tar", ["-C", temp, "-czf", archive, "bundle"], { stdio: "pipe" }),
+    verify: () => execFileSync("/usr/bin/bash", [script, "verify", archive], {
+      stdio: "pipe",
+      env: { ...process.env, PATH: `${safeBin}:/usr/bin:/bin` },
+    }),
+    hostManifest: join(bundle, "artifacts", "sub2api-host", "manifest.json"),
+    archivePath: archive,
   };
 }
 
@@ -63,7 +84,7 @@ function withBundle(check: (bundle: ReturnType<typeof fixture>) => void) {
     bundle.assemble();
     check(bundle);
   } finally {
-    rmSync(bundle.root, { recursive: true, force: true });
+    rmSync(bundle.temp, { recursive: true, force: true });
   }
 }
 
@@ -76,273 +97,239 @@ function readManifest(path: string) {
   };
 }
 
-function writeManifest(path: string, manifest: ReturnType<typeof readManifest>) {
-  writeFileSync(path, `${JSON.stringify(manifest)}\n`);
+function writeManifest(path: string, value: ReturnType<typeof readManifest>) {
+  writeFileSync(path, `${JSON.stringify(value)}\n`);
 }
 
-function failureStderr(action: () => void) {
-  try {
-    action();
-  } catch (error) {
-    return (error as { stderr?: Buffer }).stderr?.toString() ?? "";
-  }
-  throw new Error("expected command to fail");
+function loadProviderReleaseBundle(providerPath: string, architecture: "amd64" | "arm64") {
+  const root = join(dirname(dirname(providerPath)), "artifacts", "sub2api-host");
+  const manifestPath = join(root, "manifest.json");
+  expect(lstatSync(providerPath).isSymbolicLink()).toBe(false);
+  expect(statSync(providerPath).isFile()).toBe(true);
+  expect(statSync(providerPath).mode & 0o111).not.toBe(0);
+  expect(lstatSync(root).isSymbolicLink()).toBe(false);
+  expect(lstatSync(manifestPath).isSymbolicLink()).toBe(false);
+
+  const value = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+  expect(Object.keys(value).sort()).toEqual(["linux-amd64", "linux-arm64", "release", "schemaVersion"]);
+  expect(value.schemaVersion).toBe(1);
+  expect(typeof value.release).toBe("string");
+  expect(value.release).not.toBe("");
+  const entry = value[`linux-${architecture}`] as Record<string, unknown>;
+  expect(Object.keys(entry).sort()).toEqual(["path", "sha256", "size"]);
+  expect(entry.path).toBe(`sub2api-host-linux-${architecture}`);
+  expect(basename(entry.path as string)).toBe(entry.path);
+  expect(typeof entry.sha256).toBe("string");
+  expect(entry.sha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(Number.isSafeInteger(entry.size)).toBe(true);
+  expect(entry.size).toBeGreaterThanOrEqual(0);
+
+  const artifactPath = join(root, entry.path as string);
+  expect(lstatSync(artifactPath).isSymbolicLink()).toBe(false);
+  const artifact = readFileSync(artifactPath);
+  expect(statSync(artifactPath).isFile()).toBe(true);
+  expect(statSync(artifactPath).mode & 0o111).not.toBe(0);
+  expect(artifact.length).toBe(entry.size);
+  expect(sha256(artifact)).toBe(entry.sha256);
+  expect(artifact.subarray(0, 6)).toEqual(Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1]));
+  expect(artifact.readUInt16LE(18)).toBe(architecture === "amd64" ? 62 : 183);
+  return { root, release: value.release as string, artifactPath };
 }
 
-function workflowJobs(workflow: string) {
-  return [...workflow.matchAll(/^  ([A-Za-z0-9_-]+):\n([\s\S]*?)(?=^  [A-Za-z0-9_-]+:\n|(?![\s\S]))/gm)]
-    .map(([, name, body]) => ({ name, body }));
-}
-
-function needsJob(body: string, job: string) {
-  const escaped = job.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(
-    `^ {4}needs:\\s*(?:${escaped}\\s*$|\\[[^\\]]*\\b${escaped}\\b[^\\]]*\\])|^ {4}needs:\\s*\\n(?: {6}- [^\\n]+\\n)* {6}- ${escaped}\\s*$`,
-    "m",
-  ).test(body);
-}
-
-function hostEntry(architecture: "amd64" | "arm64") {
-  return architecture === "amd64" ? "linux-amd64" : "linux-arm64";
-}
-
-function hostBinary(architecture: "amd64" | "arm64") {
-  return `sub2api-host-linux-${architecture}`;
-}
-
-function producesHostArchitecture(body: string, architecture: "amd64" | "arm64") {
-  const namedBinary = new RegExp(`sub2api-host[^\\n]*${architecture}|${architecture}[^\\n]*sub2api-host`);
-  const matrixArchitecture = new RegExp(`matrix:[\\s\\S]*?arch:[\\s\\S]*?- ${architecture}`);
-  return namedBinary.test(body) || (body.includes("sub2api-host") && matrixArchitecture.test(body));
-}
-
-function artifactSteps(body: string, verb: "upload" | "download") {
-  const step = new RegExp(`uses:\\s*[^\\n]*${verb}-artifact[^\\n]*\\n([\\s\\S]*?)(?=^ {6}- name:|^ {4}- name:|$)`, "gmi");
-  return [...body.matchAll(step)].map((match) => ({
-    index: match.index!,
-    selectors: [...match[1].matchAll(/^ {10}(?:name|pattern):\s*(.+?)(?:\s+#.*)?$/gm)].map(([, selector]) => selector.trim()),
-    paths: [...match[1].matchAll(/^ {10}path:\s*(.+?)(?:\s+#.*)?$/gm)].map(([, path]) => path.trim()),
-  }));
-}
-
-function selectorMatchesArtifact(selector: string, artifact: string) {
-  const expression = /\$\{\{[^}]+\}\}/g;
-  const pattern = selector.replace(expression, "*").replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
-  return new RegExp(`^${pattern}$`).test(artifact);
-}
-
-function hostBuildOutputs(body: string, architecture: "amd64" | "arm64") {
-  const builds = [...body.matchAll(/\bgo\s+build\b[^\n]*?\s-o\s+["']?([^\s"']+)/gi)];
-  return builds.flatMap((match) => {
-    const output = match[1];
-    const exact = output.toLowerCase().includes(hostBinary(architecture));
-    const loopArchitectures = /for\s+(?:arch|goarch)\s+in\s+[^\n]*\bamd64\b[^\n]*\barm64\b[^\n]*;?\s*do/i.test(body);
-    const variableArchitecture = /sub2api-host-linux-\$\{?(?:goarch|arch)\}?/i.test(output) && loopArchitectures;
-    return exact || variableArchitecture ? [{ index: match.index!, output }] : [];
-  });
-}
-
-function uploadCoversOutput(paths: string[], output: string) {
-  const directory = output.slice(0, output.lastIndexOf("/") + 1);
-  return paths.some((path) => path.includes(output) || (directory !== "" && path.includes(directory)));
-}
-
-function makesHostBinaryAvailable(job: string, source: string, sourceIndex: number, componentDirectory: string | undefined, architecture: "amd64" | "arm64", assembleAt: number) {
-  if (componentDirectory === undefined) return false;
-  const expected = `${componentDirectory}/${hostBinary(architecture)}`;
-  const resolvedSource = source.replace(/\$\{?(?:goarch|arch)\}?/gi, architecture);
-  if (resolvedSource === expected) return sourceIndex < assembleAt;
-  const beforeAssembly = job.slice(0, assembleAt);
-  const escapedSource = resolvedSource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedExpected = expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const transfer = new RegExp(`\\b(?:cp|install|mv)\\b[^\\n]*${escapedSource}[^\\n]*${escapedExpected}`, "g");
-  return [...beforeAssembly.matchAll(transfer)].some((match) => sourceIndex < match.index! && match.index! < assembleAt);
-}
-
-function assemblyInvocations(body: string) {
-  return [...body.matchAll(/release-bundle\.sh\s+assemble\s+[^\s]+\s+([^\s]+)/g)].map((match) => ({
-    index: match.index!,
-    componentDirectory: match[1].replace(/^(["'])(.*)\1$/, "$2"),
-  }));
-}
-
-describe("release bundle verification fixtures", () => {
-  it("supplies an existing per-Site app env file to Site Compose verification", () => {
-    const contents = readFileSync(script, "utf8");
-    expect(contents).toContain('app_env="$verification_dir/sites/$site_id.app.env"');
-    expect(contents).toContain('SITE_APP_ENV_PATH=$app_env');
-    expect(contents).toContain('> "$app_env"');
+describe("target release bundle", () => {
+  it("ships only target controller files and runtime metadata", () => {
+    const activePaths = readFileSync(manifest, "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
+    expect(activePaths).toEqual([
+      "Pulumi.yaml",
+      "Pulumi.production.example.yaml",
+      "README.md",
+      "go.mod",
+      "scripts/pulumi-plugins/cloudflare/pulumi-plugin.json",
+      "scripts/pulumi-plugins/upstash/pulumi-plugin.json",
+    ]);
+    expect(activePaths).not.toContain(expect.stringMatching(/^(infra|compose|traefik)\//));
+    expect(activePaths).not.toContain(expect.stringMatching(/command|neon|sing-box|migration|adopt/i));
   });
 
-  it("assembles the control plane and a strict, verifiable Host artifact manifest", () => {
+  it("assembles the exact target inventory with executable, regular Host artifacts", () => {
     withBundle((bundle) => {
-      for (const path of [
-        "bin/sub2api-deploy",
-        "bin/pulumi-program",
-        "bin/pulumi-resource-sub2api-host",
-        "artifacts/sub2api-host/sub2api-host-linux-amd64",
-        "artifacts/sub2api-host/sub2api-host-linux-arm64",
-      ]) {
-        expect(existsSync(join(bundle.bundle, path))).toBe(true);
+      expect(files(bundle.bundle)).toEqual(targetInventory);
+      for (const path of targetInventory) {
+        expect(statSync(join(bundle.bundle, path)).isSymbolicLink()).toBe(false);
       }
-      for (const path of ["bin/sub2api-deploy", "bin/pulumi-program", "bin/pulumi-resource-sub2api-host"]) {
+      for (const path of [
+        "bin/go", "bin/pulumi", "bin/sub2api-deploy", "bin/pulumi-program", "bin/pulumi-resource-sub2api-host",
+        "artifacts/sub2api-host/sub2api-host-linux-amd64", "artifacts/sub2api-host/sub2api-host-linux-arm64",
+      ]) {
         expect(statSync(join(bundle.bundle, path)).mode & 0o111).not.toBe(0);
       }
-
-      const manifest = readManifest(bundle.manifestPath);
-      expect(manifest.schemaVersion).toBe(1);
-      expect(manifest.release).toBe("test-release");
-      for (const architecture of ["amd64", "arm64"] as const) {
-        const name = hostBinary(architecture);
-        const contents = readFileSync(join(bundle.bundle, "artifacts", "sub2api-host", name));
-        expect(manifest[hostEntry(architecture)]).toEqual({ path: name, sha256: sha256(contents), size: contents.length });
-      }
-      bundle.verify();
     });
+  });
+
+  it("writes a strict dual-architecture Host manifest with exact hashes, sizes, and ELF machines", () => {
+    withBundle((bundle) => {
+      const contents = readManifest(bundle.hostManifest);
+      expect(contents.schemaVersion).toBe(1);
+      expect(contents.release).toBe("test-release");
+      for (const architecture of ["amd64", "arm64"] as const) {
+        const name = `sub2api-host-linux-${architecture}`;
+        const artifact = readFileSync(join(bundle.bundle, "artifacts", "sub2api-host", name));
+        expect(contents[`linux-${architecture}`]).toEqual({ path: name, sha256: sha256(artifact), size: artifact.length });
+        expect(artifact.subarray(0, 4)).toEqual(Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+        expect(artifact.readUInt16LE(18)).toBe(architecture === "amd64" ? 62 : 183);
+      }
+    });
+  });
+
+  it("TestTargetSupportedReleaseBundleIsConsumableByProviderCreate", () => {
+    withBundle((bundle) => {
+      bundle.archive();
+      const consumer = mkdtempSync(join(tmpdir(), "sub2api-target-consumer-"));
+      try {
+        execFileSync("tar", ["-xzf", bundle.archivePath, "-C", consumer], { stdio: "pipe" });
+        const extracted = join(consumer, "bundle");
+        const safeBin = join(consumer, "safe-bin");
+        mkdirSync(safeBin);
+        const bash = join(safeBin, "bash");
+        writeFileSync(bash, "#!/bin/sh\nexec /usr/bin/bash \"$@\"\n");
+        chmodSync(bash, 0o755);
+        const dirname = join(safeBin, "dirname");
+        writeFileSync(dirname, "#!/bin/sh\nexec /usr/bin/dirname \"$@\"\n");
+        chmodSync(dirname, 0o755);
+        const fakePulumi = join(safeBin, "pulumi");
+        writeFileSync(fakePulumi, "#!/usr/bin/env bash\n[[ \"${PATH%%:*}\" == \"$EXPECTED_BUNDLE_BIN\" ]]\nprintf 'safe-pulumi\\n'\n");
+        chmodSync(fakePulumi, 0o755);
+        const environment = { PATH: `${join(extracted, "bin")}:${safeBin}`, EXPECTED_BUNDLE_BIN: join(extracted, "bin") };
+
+        // This is an isolated release consumer plus the lower-level Create locator contract,
+        // not a claim that a provider RPC Create has been executed.
+        expect(execFileSync("/usr/bin/bash", [join(extracted, "bin", "pulumi")], { cwd: consumer, env: environment, encoding: "utf8" }).trim()).toBe("safe-pulumi");
+        const provider = join(extracted, "bin", "pulumi-resource-sub2api-host");
+        expect(loadProviderReleaseBundle(provider, "amd64")).toEqual({
+          root: join(extracted, "artifacts", "sub2api-host"),
+          release: "test-release",
+          artifactPath: join(extracted, "artifacts", "sub2api-host", "sub2api-host-linux-amd64"),
+        });
+        for (const [name, version, server] of [
+          ["cloudflare", "6.18.0", undefined],
+          ["upstash", undefined, "github://api.github.com/upstash/pulumi-upstash"],
+        ]) {
+          const metadataPath = join(extracted, "scripts", "pulumi-plugins", name, "pulumi-plugin.json");
+          expect(lstatSync(metadataPath).isSymbolicLink()).toBe(false);
+          expect(JSON.parse(readFileSync(metadataPath, "utf8"))).toEqual({ resource: true, name, ...(version ? { version } : {}), ...(server ? { server } : {}) });
+        }
+        const locator = readFileSync(join(root, "internal", "hostprovider", "provider.go"), "utf8");
+        expect(locator).toContain("func loadReleaseBundle(providerPath string)");
+        expect(locator).toContain('filepath.Join(filepath.Dir(filepath.Dir(providerPath)), "artifacts", "sub2api-host")');
+        expect(locator).toContain("artifact.LoadBundle(root)");
+      } finally {
+        rmSync(consumer, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("verifies the target archive shape without Docker or legacy Compose validation", () => {
+    withBundle((bundle) => {
+      bundle.archive();
+      expect(bundle.verify).not.toThrow();
+    });
+  });
+
+  it("rejects a manifest source symlink", () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "sub2api-release-source-"));
+    const sourceScripts = join(sourceRoot, "scripts");
+    const source = join(sourceRoot, "README.md");
+    const external = join(sourceRoot, "external.md");
+    mkdirSync(sourceScripts);
+    writeFileSync(join(sourceScripts, "release-bundle.sh"), readFileSync(script), { mode: 0o755 });
+    writeFileSync(join(sourceScripts, "release-bundle-files.txt"), "README.md\n");
+    writeFileSync(external, "public metadata\n");
+    symlinkSync(external, source);
+    try {
+      expect(() => execFileSync("bash", [join(sourceScripts, "release-bundle.sh"), "assemble", join(sourceRoot, "bundle"), join(sourceRoot, "components"), "test-release"], { stdio: "pipe" })).toThrow();
+    } finally {
+      rmSync(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a manifest source with a symlink ancestor", () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "sub2api-release-source-"));
+    const sourceScripts = join(sourceRoot, "scripts");
+    const external = join(sourceRoot, "external");
+    mkdirSync(sourceScripts);
+    mkdirSync(external);
+    mkdirSync(join(sourceRoot, "components"));
+    writeFileSync(join(sourceScripts, "release-bundle.sh"), readFileSync(script), { mode: 0o755 });
+    writeFileSync(join(sourceScripts, "release-bundle-files.txt"), "metadata/README.md\n");
+    writeFileSync(join(external, "README.md"), "public metadata\n");
+    symlinkSync(external, join(sourceRoot, "metadata"));
+    try {
+      expect(() => execFileSync("bash", [join(sourceScripts, "release-bundle.sh"), "assemble", join(sourceRoot, "bundle"), join(sourceRoot, "components"), "test-release"], { encoding: "utf8", stdio: "pipe" })).toThrow(/symlink/);
+    } finally {
+      rmSync(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a component source symlink", () => {
+    const bundle = fixture();
+    const component = join(bundle.temp, "components", "pulumi-program");
+    const external = join(mkdtempSync(join(tmpdir(), "sub2api-external-component-")), "pulumi-program");
+    writeFileSync(external, readFileSync(component), { mode: 0o755 });
+    rmSync(component);
+    symlinkSync(external, component);
+    try {
+      expect(bundle.assemble).toThrow();
+    } finally {
+      rmSync(bundle.temp, { recursive: true, force: true });
+      rmSync(dirname(external), { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a component directory symlink", () => {
+    const bundle = fixture();
+    const componentLink = join(bundle.temp, "components-link");
+    symlinkSync(join(bundle.temp, "components"), componentLink);
+    try {
+      expect(() => execFileSync("bash", [script, "assemble", bundle.bundle, componentLink, "test-release"], { encoding: "utf8", stdio: "pipe" })).toThrow(/component directory.*symlink/);
+    } finally {
+      rmSync(bundle.temp, { recursive: true, force: true });
+    }
   });
 
   it.each(["amd64", "arm64"] as const)("rejects %s Host content tampering while ELF metadata and size remain valid", (architecture) => {
     withBundle((bundle) => {
-      const path = join(bundle.bundle, "artifacts", "sub2api-host", hostBinary(architecture));
+      const path = join(bundle.bundle, "artifacts", "sub2api-host", `sub2api-host-linux-${architecture}`);
       const contents = readFileSync(path);
       contents[contents.length - 1] ^= 0xff;
       writeFileSync(path, contents, { mode: 0o755 });
+      expect(() => execFileSync("bash", [script, "verify-host-artifacts", bundle.bundle], { stdio: "pipe" })).toThrow();
+    });
+  });
+
+  it("rejects a malformed Host manifest before reading its payload", () => {
+    withBundle((bundle) => {
+      const contents = readManifest(bundle.hostManifest);
+      contents.release = "";
+      writeManifest(bundle.hostManifest, contents);
+      expect(() => execFileSync("bash", [script, "verify-host-artifacts", bundle.bundle], { stdio: "pipe" })).toThrow();
+    });
+  });
+
+  it.each(["bin/sub2api-deploy", "artifacts/sub2api-host/sub2api-host-linux-amd64", "Pulumi.yaml"])("rejects an archive containing a symlink at %s", (path) => {
+    withBundle((bundle) => {
+      rmSync(join(bundle.bundle, path));
+      symlinkSync("pulumi-program", join(bundle.bundle, path));
+      bundle.archive();
       expect(bundle.verify).toThrow();
     });
   });
 
-  it.each(["amd64", "arm64"] as const)("rejects a false declared size for the %s Host binary", (architecture) => {
+  it.each(["bin/sub2api-deploy", "artifacts/sub2api-host/sub2api-host-linux-amd64", "Pulumi.yaml"])("rejects an archive containing a directory at %s", (path) => {
     withBundle((bundle) => {
-      const manifest = readManifest(bundle.manifestPath);
-      manifest[hostEntry(architecture)].size += 1;
-      writeManifest(bundle.manifestPath, manifest);
+      rmSync(join(bundle.bundle, path));
+      mkdirSync(join(bundle.bundle, path));
+      bundle.archive();
       expect(bundle.verify).toThrow();
     });
-  });
-
-  it.each([
-    ["an empty release", (manifest: ReturnType<typeof readManifest>) => { manifest.release = ""; }],
-    ["a Host size above 64 MiB", (manifest: ReturnType<typeof readManifest>) => { manifest["linux-amd64"].size = 64 * 1024 * 1024 + 1; }],
-  ])("rejects %s as an invalid Host manifest before reading its payload", (_description, mutate) => {
-    withBundle((bundle) => {
-      const manifest = readManifest(bundle.manifestPath);
-      mutate(manifest);
-      writeManifest(bundle.manifestPath, manifest);
-      const stderr = failureStderr(bundle.verify);
-      expect(stderr).toMatch(/Host artifact manifest has an invalid schema/i);
-      expect(stderr).not.toMatch(/Host artifact size mismatch/i);
-    });
-  });
-
-  it.each(["amd64", "arm64"] as const)("rejects a %s Host binary with the other ELF architecture even when its manifest entry is updated", (architecture) => {
-    withBundle((bundle) => {
-      const path = join(bundle.bundle, "artifacts", "sub2api-host", hostBinary(architecture));
-      const contents = elf(architecture === "amd64" ? "arm64" : "amd64");
-      writeFileSync(path, contents, { mode: 0o755 });
-      const manifest = readManifest(bundle.manifestPath);
-      manifest[hostEntry(architecture)].sha256 = sha256(contents);
-      manifest[hostEntry(architecture)].size = contents.length;
-      writeManifest(bundle.manifestPath, manifest);
-      expect(bundle.verify).toThrow();
-    });
-  });
-
-  it("rejects missing, malformed, obsolete, and incomplete Host artifact manifests", () => {
-    withBundle((bundle) => {
-      const valid = readManifest(bundle.manifestPath);
-      rmSync(bundle.manifestPath);
-      expect(bundle.verify).toThrow();
-      writeFileSync(bundle.manifestPath, "not json\n");
-      expect(bundle.verify).toThrow();
-
-      for (const invalid of [
-        { version: 1, artifacts: {} },
-        { ...valid, unexpected: true },
-        (() => { const manifest = { ...valid }; delete (manifest as Partial<typeof valid>).release; return manifest; })(),
-        (() => { const manifest = { ...valid }; delete (manifest as Partial<typeof valid>)["linux-arm64"]; return manifest; })(),
-        (() => {
-          const { sha256, ...entry } = valid["linux-amd64"];
-          return { ...valid, "linux-amd64": entry };
-        })(),
-      ]) {
-        writeManifest(bundle.manifestPath, invalid as ReturnType<typeof readManifest>);
-        expect(bundle.verify).toThrow();
-      }
-    });
-  });
-
-  it.each([
-    ["control executable", "bin/sub2api-deploy"],
-    ["manifest-listed Host payload", "artifacts/sub2api-host/sub2api-host-linux-amd64"],
-    ["ordinary manifest-listed payload", "Pulumi.yaml"],
-  ])("rejects a full archive containing a %s symlink", (_description, relativePath) => {
-    withBundle((bundle) => {
-      const path = join(bundle.bundle, relativePath);
-      rmSync(path);
-      symlinkSync("pulumi-program", path);
-      expect(bundle.verifyArchive).toThrow();
-      expect(existsSync(bundle.dockerLog)).toBe(false);
-    });
-  });
-
-  it.each([
-    ["control executable", "bin/sub2api-deploy"],
-    ["manifest-listed Host payload", "artifacts/sub2api-host/sub2api-host-linux-amd64"],
-    ["ordinary manifest-listed payload", "Pulumi.yaml"],
-  ])("rejects a full archive containing a %s directory", (_description, relativePath) => {
-    withBundle((bundle) => {
-      const path = join(bundle.bundle, relativePath);
-      rmSync(path);
-      mkdirSync(path);
-      expect(bundle.verifyArchive).toThrow();
-      expect(existsSync(bundle.dockerLog)).toBe(false);
-    });
-  });
-
-  it("reaches content verification for an intact archive", () => {
-    withBundle((bundle) => {
-      expect(bundle.verifyArchive).toThrow();
-      expect(existsSync(bundle.dockerLog)).toBe(true);
-    });
-  });
-
-  it("routes archive verification through Host artifact verification", () => {
-    const contents = readFileSync(script, "utf8");
-    const verifyContent = contents.slice(contents.indexOf("verify_content()"), contents.indexOf("verify()"));
-    expect(verifyContent).toMatch(/^\s*(?!#)verify(?:_|-)host(?:_|-)artifacts\b[^\n]*"\$bundle_root"/m);
-  });
-
-  it("transfers both Host architectures into every release assembly job", () => {
-    const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-    const jobs = workflowJobs(workflow);
-    const assemblies = jobs.flatMap((job) => assemblyInvocations(job.body).map((invocation) => ({ ...job, ...invocation })));
-
-    expect(assemblies).not.toEqual([]);
-    for (const assembly of assemblies) {
-      const assembleAt = assembly.index;
-      const componentDirectory = assembly.componentDirectory;
-      const buildsBothHere = (["amd64", "arm64"] as const).every((architecture) =>
-        hostBuildOutputs(assembly.body, architecture).some(({ index, output }) =>
-          makesHostBinaryAvailable(assembly.body, output, index, componentDirectory, architecture, assembleAt),
-        ),
-      );
-      const downloads = artifactSteps(assembly.body, "download");
-      const receivesBoth = (["amd64", "arm64"] as const).every((architecture) =>
-        jobs.some((producer) => {
-          const build = hostBuildOutputs(producer.body, architecture).find(({ index }) => index >= 0);
-          if (!build || !needsJob(assembly.body, producer.name)) return false;
-          return artifactSteps(producer.body, "upload").some((upload) =>
-            upload.index > build.index
-            && uploadCoversOutput(upload.paths, build.output)
-            && upload.selectors.some((name) => downloads.some((download) =>
-              download.index < assembleAt
-              && download.selectors.some((selector) => selectorMatchesArtifact(selector, name))
-              && download.paths.some((path) => makesHostBinaryAvailable(assembly.body, `${path}/${hostBinary(architecture)}`, download.index, componentDirectory, architecture, assembleAt)),
-            )),
-          );
-        }),
-      );
-      expect(buildsBothHere || receivesBoth).toBe(true);
-    }
   });
 });
