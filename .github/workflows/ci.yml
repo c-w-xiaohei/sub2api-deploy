@@ -506,3 +506,126 @@ jobs:
           name: provider-runtime-evidence-${{ env.TARGET_SHA }}
           path: evidence/${{ env.TARGET_SHA }}/provider-runtime
           if-no-files-found: error
+
+  provider-import:
+    name: Provider Import
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+
+      - name: Verify exact target SHA
+        run: |
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+
+      - name: Verify Go modules
+        run: go mod verify
+
+      - name: Prepare offline OpenSSH prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server
+          command -v sshd
+
+      - name: Record required provider-import test evidence
+        run: |
+          evidence="evidence/${TARGET_SHA}/provider-import"
+          mkdir -p "$evidence/trace"
+          TARGET_SHA="$TARGET_SHA" GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" node <<'PROVIDER_IMPORT_METADATA'
+          const fs = require("node:fs");
+          const root = `evidence/${process.env.TARGET_SHA}/provider-import`;
+          fs.writeFileSync(`${root}/metadata.json`, JSON.stringify({
+            sha: process.env.TARGET_SHA,
+            runUrl: process.env.GITHUB_RUN_URL,
+            gate: "provider-import",
+          }) + "\n");
+          fs.writeFileSync(`${root}/trace/README.txt`, "Sanitized test events contain no secrets or raw request frames.\n");
+          PROVIDER_IMPORT_METADATA
+          test_name='TestEngineImportPreviewIsNoOpOrAcceptedDiff'
+          tests='^TestEngineImportPreviewIsNoOpOrAcceptedDiff$'
+
+          extract_sanitized_trace() {
+          node - "$1" "$2" <<'PROVIDER_IMPORT_TRACE'
+          const fs = require("node:fs");
+          const testName = process.env.REQUIRED_TEST;
+          const sanitized = [];
+          for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (event.Test !== testName) continue;
+            sanitized.push(JSON.stringify({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed }));
+          }
+          fs.writeFileSync(process.argv[3], sanitized.join("\n") + (sanitized.length ? "\n" : ""));
+          PROVIDER_IMPORT_TRACE
+          }
+
+          events="$RUNNER_TEMP/provider-import-${TARGET_SHA}-events.jsonl"
+          stderr="$RUNNER_TEMP/provider-import-${TARGET_SHA}-stderr.log"
+          set +e
+          go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerimport > "$events" 2> "$stderr"
+          test_status=$?
+          REQUIRED_TEST="$test_name" extract_sanitized_trace "$events" "$evidence/trace/test.jsonl"
+          trace_status=$?
+          REQUIRED_TEST="$test_name" TARGET_STATUS="$test_status" node - "$events" "$stderr" <<'PROVIDER_IMPORT_PARSE'
+          const fs = require("node:fs");
+          const testName = process.env.REQUIRED_TEST;
+          const eventsPath = process.argv[2];
+          const stderrPath = process.argv[3];
+          let terminal = "absent";
+          for (const line of fs.readFileSync(eventsPath, "utf8").split("\n")) {
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (event.Test !== testName) continue;
+            if (event.Action === "skip" || event.Action === "fail") {
+              throw new Error(`required test did not pass: ${testName} (${event.Action})`);
+            }
+            if (event.Action === "pass") terminal = "pass";
+          }
+          if (terminal !== "pass") {
+            throw new Error(`required test did not pass: ${testName} (${terminal})`);
+          }
+          const status = Number(process.env.TARGET_STATUS);
+          if (status === 0 && fs.readFileSync(stderrPath, "utf8") !== "") {
+            throw new Error("successful test wrote stderr");
+          }
+          PROVIDER_IMPORT_PARSE
+          parser_status=$?
+          set -e
+          rm -f "$events" "$stderr"
+          set +e
+          (
+            expected_files=$(printf '%s\n' "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/test.jsonl")
+            actual_files=$(find "$evidence" -type f -print | sort)
+            test "$actual_files" = "$expected_files" || exit 1
+            test -s "$evidence/trace/test.jsonl" || exit 1
+            forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|\"authorization\"\s*:|sub2api-host-v1 |\"secrets\"\s*:'
+            for evidence_file in "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/test.jsonl"; do
+              if grep -qE "$forbidden" "$evidence_file"; then
+                exit 1
+              fi
+            done
+          )
+          evidence_status=$?
+          set -e
+          test "$trace_status" -eq 0
+          test "$parser_status" -eq 0
+          test "$evidence_status" -eq 0
+          test "$test_status" -eq 0
+
+      - name: Upload provider-import evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-import-evidence-${{ env.TARGET_SHA }}
+          path: evidence/${{ env.TARGET_SHA }}/provider-import
+          if-no-files-found: error
