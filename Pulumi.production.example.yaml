@@ -1,47 +1,49 @@
-# The public Pulumi interface has four structured objects only:
-# edge, sites, edgeSecrets, and siteSecrets. This example contains ordinary
-# values only. Set the two secret objects with encrypted Pulumi commands below.
-# Optional per-Site application settings belong in siteSecrets.<site>.appEnv.
-# Run a reviewed preview before applying a real stack.
 config:
-  sub2api-vps-deploy:edge:
-    originIp: 203.0.113.10
-    cloudflareZoneId: replace-with-zone-id
-    acmeEmail: ops@example.com
-    # Shared Edge exception: Traefik may use a stable version tag. Site images
-    # below must remain immutable name@sha256 digests.
-    traefikImage: traefik:v3.3.3
-    singBox:
-      serverName: www.cloudflare.com
-      target: host.docker.internal:8443
-  sub2api-vps-deploy:sites:
-    # code2 is the existing application adopted during the maintenance window.
-    code2:
-      domain: code2.example.com
-      image: weishaw/sub2api@sha256:0000000000000000000000000000000000000000000000000000000000000000
-      adminEmail: admin@example.com
-      appProbePath: /
-      database:
-        mode: docker
-        resourceMode: existing
-        # For managed Neon (mode: neon, resourceMode: create), set region and
-        # compute explicitly when needed. The release bundle validates the
-        # created project's endpoint region; the current provider cannot select
-        # region during creation. Defaults are region=aws-us-east-1,
-        # compute.minCU=0.25, compute.maxCU=0.25, and
-        # compute.suspendTimeoutSeconds=300.
-      redis:
-        mode: docker
-        resourceMode: existing
-    # code3 is declared in the same Stack after code2 adoption is complete.
-    code3:
-      domain: code3.example.com
-      image: weishaw/sub2api@sha256:0000000000000000000000000000000000000000000000000000000000000000
-      adminEmail: admin@example.com
-      appProbePath: /
-      database:
-        mode: docker
-        resourceMode: existing
-      redis:
-        mode: docker
-        resourceMode: existing
+  sub2api-environment:environmentConfig: |
+    version: 1
+    reverseProxy:
+      image: traefik@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      acmeEmail: ops@example.com
+    servers:
+      edge:
+        sshAlias: production-edge
+        addresses:
+          public:
+            ipv4: 203.0.113.10
+    postgres:
+      app:
+        type: docker
+        server: edge
+    redis:
+      app:
+        type: docker
+        server: edge
+      cache:
+        type: upstash
+        region: us-east-1
+    apps:
+      api:
+        hostname: api.example.com
+        image: ghcr.io/example/sub2api@sha256:2222222222222222222222222222222222222222222222222222222222222222
+        initialAdminEmail: admin@example.com
+        readinessPath: /healthz
+        drainTimeout: 30s
+        servers:
+          - edge
+        postgres:
+          name: app
+          database: sub2api
+        redis:
+          name: app
+          database: 0
+        publicAccess:
+          type: cloudflare
+          servers:
+            - edge
+          cloudflare:
+            mode: dns
+            connectBy: publicAddress
+    cloudflare:
+      zoneId: replace-with-zone-id
+  sub2api-environment:environmentSecrets:
+    secure: replace-with-encrypted-environment-secrets

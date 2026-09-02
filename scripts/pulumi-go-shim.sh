@@ -10,29 +10,38 @@ go_version="go1.25.11"
 json_module() {
   local module_path="$1"
   local module_dir="$bundle_root"
-  local module_version="v0.0.0"
+  local module_version
 
   case "$module_path" in
+    github.com/c-w-xiaohei/sub2api-deploy)
+      module_version="v0.0.0"
+      ;;
+    github.com/pulumi/pulumi/sdk/v3|github.com/pulumi/pulumi/pkg/v3)
+      module_version="v3.256.0"
+      ;;
     github.com/pulumi/pulumi-cloudflare/sdk/v6)
       module_dir="$bundle_root/scripts/pulumi-plugins/cloudflare"
       module_version="v6.18.0"
-      ;;
-    github.com/pulumi/pulumi-command/sdk)
-      module_dir="$bundle_root/scripts/pulumi-plugins/command"
-      module_version="v1.2.1"
       ;;
     github.com/upstash/pulumi-upstash/sdk)
       module_dir="$bundle_root/scripts/pulumi-plugins/upstash"
       module_version="v0.5.0"
       ;;
-    github.com/kislerdm/pulumi-sdk-neon)
-      module_dir="$bundle_root/scripts/pulumi-plugins/neon"
-      module_version="v0.0.0-20241217015548-601a1132b220"
+    *)
+      printf 'unsupported bundled Go module: %s\n' "$module_path" >&2
+      return 2
       ;;
   esac
 
   printf '{"Path":"%s","Version":"%s","Dir":"%s"}\n' \
     "$module_path" "$module_version" "$module_dir"
+}
+
+supported_module() {
+  case "$1" in
+    github.com/c-w-xiaohei/sub2api-deploy|github.com/pulumi/pulumi/sdk/v3|github.com/pulumi/pulumi/pkg/v3|github.com/pulumi/pulumi-cloudflare/sdk/v6|github.com/upstash/pulumi-upstash/sdk) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 module_list() {
@@ -41,7 +50,9 @@ module_list() {
     case "$module_path" in
       -*|'') continue ;;
     esac
-    json_module "$module_path"
+    if supported_module "$module_path"; then
+      json_module "$module_path"
+    fi
   done
 }
 

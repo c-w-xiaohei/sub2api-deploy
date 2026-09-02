@@ -5,14 +5,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 go test -count=1 ./...
 go vet ./...
-go build -o /tmp/sub2api-pulumi-go ./infra
 go mod verify
 
-npm ci
-npm test
-npm run build
 bash -n scripts/*.sh
-bash scripts/validate-compose.sh
 
 component_dir=/tmp/sub2api-release-components
 bundle_dir=/tmp/sub2api-release-bundle

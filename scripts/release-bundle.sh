@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CANONICAL_ROOT="$(readlink -f -- "$ROOT_DIR")"
 MANIFEST="$ROOT_DIR/scripts/release-bundle-files.txt"
 
 die() {
@@ -18,14 +19,36 @@ manifest_paths() {
 }
 
 validate_manifest() {
-  local path
+  local path source ancestor resolved
   declare -A seen=()
   while IFS= read -r path; do
     [[ "$path" != /* && "$path" != ../* && "$path" != */../* && "$path" != */.. ]] || die "unsafe manifest path: $path"
     [[ -z "${seen[$path]+present}" ]] || die "duplicate manifest path: $path"
     seen["$path"]=1
-    [[ -f "$ROOT_DIR/$path" ]] || die "manifest file is missing: $path"
+    source="$ROOT_DIR/$path"
+    ancestor="$ROOT_DIR"
+    IFS=/ read -r -a segments <<<"$path"
+    for segment in "${segments[@]}"; do
+      ancestor="$ancestor/$segment"
+      [[ ! -L "$ancestor" ]] || die "manifest source has a symlink ancestor: $path"
+    done
+    [[ -f "$source" ]] || die "manifest file is missing or not regular: $path"
+    resolved="$(readlink -f -- "$source")"
+    [[ "$resolved" == "$CANONICAL_ROOT/"* ]] || die "manifest source escapes repository: $path"
   done < <(manifest_paths)
+}
+
+# CI supplies immutable checkout and component trees. These checks and no-deref
+# copying minimize shell-level TOCTOU exposure without claiming atomic openat safety.
+copy_regular() {
+  local source="$1"
+  local destination="$2"
+  local mode="$3"
+  [[ -f "$source" && ! -L "$source" ]] || die "source is missing, not regular, or a symlink: $source"
+  cp -p --no-dereference -- "$source" "$destination"
+  [[ -f "$destination" && ! -L "$destination" ]] || die "copied file is not regular: $destination"
+  chmod "$mode" "$destination"
+  [[ "$(stat -c %a "$destination")" == "${mode#0}" ]] || die "copied file mode is incorrect: $destination"
 }
 
 assemble() {
@@ -33,22 +56,26 @@ assemble() {
   local bundle_dir="$1"
   local component_dir="$2"
   local release_id="$3"
-  local path destination host_dir amd64_hash arm64_hash amd64_size arm64_size
+  local path destination host_dir amd64_hash arm64_hash amd64_size arm64_size canonical_component_dir source resolved_source
 
   validate_manifest
-  [[ -d "$component_dir" ]] || die "component directory is missing: $component_dir"
+  [[ -d "$component_dir" && ! -L "$component_dir" ]] || die "component directory is missing or a symlink: $component_dir"
+  canonical_component_dir="$(readlink -f -- "$component_dir")"
   for path in sub2api-deploy pulumi-program pulumi-resource-sub2api-host sub2api-host-linux-amd64 sub2api-host-linux-arm64; do
-    [[ -f "$component_dir/$path" && -x "$component_dir/$path" ]] || die "required component is missing or not executable: $component_dir/$path"
+    source="$component_dir/$path"
+    [[ -f "$source" && ! -L "$source" && -x "$source" ]] || die "required component is missing, not regular, executable, or is a symlink: $source"
+    resolved_source="$(readlink -f -- "$source")"
+    [[ "$(dirname -- "$resolved_source")" == "$canonical_component_dir" ]] || die "component source escapes component directory: $source"
   done
   [[ ! -e "$bundle_dir" ]] || die "bundle directory already exists: $bundle_dir"
   mkdir -p "$bundle_dir/bin" "$bundle_dir/artifacts/sub2api-host"
-  install -m 0755 "$component_dir/sub2api-deploy" "$bundle_dir/bin/sub2api-deploy"
-  install -m 0755 "$component_dir/pulumi-program" "$bundle_dir/bin/pulumi-program"
-  install -m 0755 "$component_dir/pulumi-resource-sub2api-host" "$bundle_dir/bin/pulumi-resource-sub2api-host"
-  install -m 0755 "$component_dir/sub2api-host-linux-amd64" "$bundle_dir/artifacts/sub2api-host/sub2api-host-linux-amd64"
-  install -m 0755 "$component_dir/sub2api-host-linux-arm64" "$bundle_dir/artifacts/sub2api-host/sub2api-host-linux-arm64"
-  install -m 0755 "$ROOT_DIR/scripts/pulumi-go-shim.sh" "$bundle_dir/bin/go"
-  install -m 0755 "$ROOT_DIR/scripts/pulumi-cli-wrapper.sh" "$bundle_dir/bin/pulumi"
+  copy_regular "$canonical_component_dir/sub2api-deploy" "$bundle_dir/bin/sub2api-deploy" 0755
+  copy_regular "$canonical_component_dir/pulumi-program" "$bundle_dir/bin/pulumi-program" 0755
+  copy_regular "$canonical_component_dir/pulumi-resource-sub2api-host" "$bundle_dir/bin/pulumi-resource-sub2api-host" 0755
+  copy_regular "$canonical_component_dir/sub2api-host-linux-amd64" "$bundle_dir/artifacts/sub2api-host/sub2api-host-linux-amd64" 0755
+  copy_regular "$canonical_component_dir/sub2api-host-linux-arm64" "$bundle_dir/artifacts/sub2api-host/sub2api-host-linux-arm64" 0755
+  copy_regular "$ROOT_DIR/scripts/pulumi-go-shim.sh" "$bundle_dir/bin/go" 0755
+  copy_regular "$ROOT_DIR/scripts/pulumi-cli-wrapper.sh" "$bundle_dir/bin/pulumi" 0755
 
   host_dir="$bundle_dir/artifacts/sub2api-host"
   amd64_hash="$(sha256sum "$host_dir/sub2api-host-linux-amd64" | cut -d' ' -f1)"
@@ -69,7 +96,7 @@ assemble() {
   while IFS= read -r path; do
     destination="$bundle_dir/$path"
     mkdir -p "$(dirname "$destination")"
-    cp -p -- "$ROOT_DIR/$path" "$destination"
+    copy_regular "$(readlink -f -- "$ROOT_DIR/$path")" "$destination" 0644
   done < <(manifest_paths)
 }
 
@@ -175,129 +202,8 @@ verify_host_artifacts() {
   done
 }
 
-require_text() {
-  local file="$1"
-  local text="$2"
-  local description="$3"
-  grep -Fq -- "$text" "$file" || die "$description"
-}
-
-require_count() {
-  local file="$1"
-  local text="$2"
-  local expected="$3"
-  local actual
-  actual="$(grep -Fc -- "$text" "$file")"
-  [[ "$actual" == "$expected" ]] || die "expected $expected occurrences of $text in $file, found $actual"
-}
-
-check_provider_metadata() {
-  local provider="$1"
-  local expected_name="$2"
-  local expected_version="$3"
-  local expected_server="$4"
-  local metadata="$bundle_root/scripts/pulumi-plugins/$provider/pulumi-plugin.json"
-  if ! jq -e \
-    --arg name "$expected_name" \
-    --arg version "$expected_version" \
-    --arg server "$expected_server" \
-    '.resource == true and .name == $name
-      and (if $version == "" then (has("version") | not) else .version == $version end)
-      and (if $server == "" then (has("server") | not) else .server == $server end)' \
-    "$metadata" >/dev/null; then
-    die "provider metadata contract failed: $provider"
-  fi
-}
-
-check_module_metadata() {
-  local module="$1"
-  local version="$2"
-  local provider="$3"
-  local output expected_dir
-  expected_dir="$bundle_root/scripts/pulumi-plugins/$provider"
-  output="$(PULUMI_BUNDLE_ROOT="$bundle_root" "$bundle_root/bin/go" list -m -json "$module")" \
-    || die "bundled Go metadata query failed: $module"
-  if ! jq -e \
-    --arg path "$module" \
-    --arg expected_version "$version" \
-    --arg expected_dir "$expected_dir" \
-    'type == "object" and .Path == $path and .Version == $expected_version and .Dir == $expected_dir' \
-    <<<"$output" >/dev/null; then
-    die "bundled Go metadata contract failed: $module"
-  fi
-}
-
-check_sing_box_template() {
-  awk '
-    function fail(message) { print message > "/dev/stderr"; exit 1 }
-    $0 == "  routers:" { section = "routers"; next }
-    $0 == "  services:" { section = "services"; next }
-    section == "routers" && $0 == "    sing-box-reality:" {
-      if (router++) fail("duplicate sing-box router")
-      section = "router"
-      next
-    }
-    section == "router" {
-      if ($0 == "      rule: \"HostSNI(`${SING_BOX_SERVER_NAME}`)\"") rule = 1
-      else if ($0 == "      entryPoints:") entry_points = 1
-      else if ($0 == "        - websecure") websecure = 1
-      else if ($0 == "      service: sing-box-reality") router_service = 1
-      else if ($0 == "      tls:") tls = 1
-      else if ($0 == "        passthrough: true") passthrough = 1
-    }
-    section == "services" && $0 == "    sing-box-reality:" {
-      if (service++) fail("duplicate sing-box service")
-      section = "service"
-      next
-    }
-    section == "service" {
-      if ($0 == "      loadBalancer:") load_balancer = 1
-      else if ($0 == "        servers:") servers = 1
-      else if ($0 == "          - address: \"${SING_BOX_TARGET}\"") address = 1
-    }
-    END {
-      if (router != 1 || service != 1 || !rule || !entry_points || !websecure || !router_service || !tls || !passthrough || !load_balancer || !servers || !address) exit 1
-    }
-  ' "$1" || die 'sing-box router/service template relationship is invalid'
-}
-
-check_site_route_template() {
-  awk '
-    function fail(message) { print message > "/dev/stderr"; exit 1 }
-    $0 == "  routers:" { section = "routers"; next }
-    $0 == "  services:" { section = "services"; next }
-    section == "routers" && $0 == "    site-${SITE_ID}-${SLOT}:" {
-      if (router++) fail("duplicate Site router")
-      section = "router"
-      next
-    }
-    section == "router" {
-      if ($0 == "      rule: \"Host(`${DOMAIN}`)\"") rule = 1
-      else if ($0 == "      entryPoints:") entry_points = 1
-      else if ($0 == "        - websecure") websecure = 1
-      else if ($0 == "      tls:") tls = 1
-      else if ($0 == "        certResolver: cloudflare") cert_resolver = 1
-      else if ($0 == "      service: site-${SITE_ID}-${SLOT}") router_service = 1
-    }
-    section == "services" && $0 == "    site-${SITE_ID}-${SLOT}:" {
-      if (service++) fail("duplicate Site service")
-      section = "service"
-      next
-    }
-    section == "service" {
-      if ($0 == "      loadBalancer:") load_balancer = 1
-      else if ($0 == "        servers:") servers = 1
-      else if ($0 == "          - url: \"http://${ACTIVE_EDGE_ALIAS}:8080\"") address = 1
-    }
-    END {
-      if (router != 1 || service != 1 || !rule || !entry_points || !websecure || !tls || !cert_resolver || !router_service || !load_balancer || !servers || !address) exit 1
-    }
-  ' "$1" || die 'Site router/service template relationship is invalid'
-}
-
 verify_content() {
   local bundle_root="$1"
-  local verification_dir edge_env edge_json site_env app_env site_json site_id
 
   for path in bin/go bin/pulumi bin/sub2api-deploy bin/pulumi-program bin/pulumi-resource-sub2api-host; do
     [[ -f "$bundle_root/$path" && ! -L "$bundle_root/$path" && -x "$bundle_root/$path" ]] || die "required executable is missing, not regular, or not executable: $path"
@@ -306,99 +212,8 @@ verify_content() {
   while IFS= read -r path; do
     [[ -f "$bundle_root/$path" && ! -L "$bundle_root/$path" ]] || die "required bundle file is missing or not regular: $path"
   done < <(manifest_paths)
-  for path in compose/edge.yml compose/site.yml traefik/dynamic/sing-box.yml traefik/dynamic/site.yml scripts/host-preflight.ts scripts/bootstrap-site.sh scripts/application-release.sh scripts/switch-slot.sh scripts/rollback-slot.sh scripts/reconcile-site.sh scripts/reconcile-edge.sh docs/migrations/single-site-to-multi-site.md; do
-    [[ -f "$bundle_root/$path" ]] || die "required active path is missing: $path"
-  done
-
-  verification_dir="$bundle_root/.release-verification"
-  mkdir -p "$verification_dir/edge" "$verification_dir/sites"
-  edge_env="$verification_dir/edge.env"
-  edge_json="$verification_dir/edge.json"
-  printf '%s\n' \
-    'TRAEFIK_IMAGE=traefik:v3.3.3' \
-    'CLOUDFLARE_DNS_API_TOKEN=not-used-in-verification' \
-    'ACME_EMAIL=ops@example.com' \
-    "EDGE_RUNTIME_ROOT=$verification_dir/edge" > "$edge_env"
-  docker compose \
-    --project-name sub2api-edge \
-    --env-file "$edge_env" \
-    -f "$bundle_root/compose/edge.yml" \
-    config --format json > "$edge_json"
-  jq -e '
-    (.services | keys) == ["traefik"] and
-    ([.services.traefik.ports[]? |
-      {target: (.target | tostring), published: (.published | tostring)}] |
-      sort_by(.target)) ==
-      ([{target: "443", published: "443"}, {target: "80", published: "80"}] |
-        sort_by(.target))
-  ' "$edge_json" >/dev/null || die 'Edge Compose must render only Traefik with exactly public ports 80 and 443'
-
-  require_text "$bundle_root/compose/edge.yml" 'host.docker.internal:host-gateway' 'host gateway mapping is missing from the assembled Edge Compose file'
-  require_text "$bundle_root/compose/edge.yml" 'name: sub2api-edge' 'Edge network name is missing from the assembled Edge Compose file'
-
-  for site_id in code2 code3; do
-    site_env="$verification_dir/sites/$site_id.env"
-    app_env="$verification_dir/sites/$site_id.app.env"
-    site_json="$verification_dir/sites/$site_id.json"
-    : > "$app_env"
-    printf '%s\n' \
-      'SUB2API_IMAGE=weishaw/sub2api@sha256:abcdef1234567890' \
-      "SITE_RUNTIME_ROOT=$verification_dir/sites/$site_id" \
-      "SITE_APP_ENV_PATH=$app_env" \
-      "BLUE_EDGE_ALIAS=sub2api-$site_id-blue" \
-      "GREEN_EDGE_ALIAS=sub2api-$site_id-green" \
-      'SLOT=blue' \
-      'SLOT_DATA_DIR=blue' \
-      'AUTO_SETUP=false' \
-      "DOMAIN=$site_id.example.com" \
-      'DATABASE_HOST=postgres' \
-      'DATABASE_PORT=5432' \
-      'DATABASE_USER=sub2api' \
-      'DATABASE_PASSWORD=not-used-in-verification' \
-      'DATABASE_DBNAME=sub2api' \
-      'DATABASE_SSLMODE=disable' \
-      'POSTGRES_USER=sub2api' \
-      'POSTGRES_PASSWORD=not-used-in-verification' \
-      'POSTGRES_DB=sub2api' \
-      'REDIS_HOST=redis' \
-      'REDIS_PORT=6379' \
-      'REDIS_PASSWORD=not-used-in-verification' \
-      'REDIS_ENABLE_TLS=false' \
-      'ADMIN_EMAIL=admin@example.com' > "$site_env"
-    docker compose \
-      --project-name "sub2api-$site_id" \
-      --env-file "$site_env" \
-      --profile app \
-      --profile postgres \
-      --profile redis \
-      -f "$bundle_root/compose/upstream.yml" \
-      -f "$bundle_root/compose/site.yml" \
-      config --format json > "$site_json"
-    jq -e '
-      ([.services[] | (.ports // [])[]? |
-        select((.published // null) != null)] | length) == 0 and
-      ((.services | has("sub2api-blue")) and
-        (.services | has("sub2api-green"))) and
-      (.services["sub2api-blue"].networks | has("sub2api-edge")) and
-      (.services["sub2api-green"].networks | has("sub2api-edge")) and
-      (.networks["sub2api-edge"].external == true) and
-      (.networks["sub2api-edge"].name == "sub2api-edge")
-    ' "$site_json" >/dev/null || die "Site Compose contract failed for $site_id"
-  done
-
-  check_sing_box_template "$bundle_root/traefik/dynamic/sing-box.yml"
-  check_site_route_template "$bundle_root/traefik/dynamic/site.yml"
-  require_text "$bundle_root/scripts/host-preflight.ts" 'checkHostPreflight' 'host preflight implementation is missing'
-
-  check_provider_metadata cloudflare cloudflare 6.18.0 ''
-  check_provider_metadata command command 1.2.1 ''
-  check_provider_metadata neon neon 0.0.1-alpha.1 'https://github.com/kislerdm/pulumi-neon/releases/download/v${VERSION}'
-  check_provider_metadata upstash upstash '' 'github://api.github.com/upstash/pulumi-upstash'
-  check_module_metadata github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.18.0 cloudflare
-  check_module_metadata github.com/pulumi/pulumi-command/sdk v1.2.1 command
-  check_module_metadata github.com/kislerdm/pulumi-sdk-neon v0.0.0-20241217015548-601a1132b220 neon
-  check_module_metadata github.com/upstash/pulumi-upstash/sdk v0.5.0 upstash
-
+  check_plugin_metadata "$bundle_root/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" cloudflare 6.18.0 ''
+  check_plugin_metadata "$bundle_root/scripts/pulumi-plugins/upstash/pulumi-plugin.json" upstash '' github://api.github.com/upstash/pulumi-upstash
   local fake_cli
   fake_cli="$(mktemp -d "${TMPDIR:-/tmp}/sub2api-fake-pulumi.XXXXXX")/pulumi"
   cat > "$fake_cli" <<'EOF'
@@ -413,6 +228,19 @@ EOF
   rm -rf "$(dirname "$fake_cli")"
 }
 
+check_plugin_metadata() {
+  local metadata="$1"
+  local name="$2"
+  local version="$3"
+  local server="$4"
+  jq -e --arg name "$name" --arg version "$version" --arg server "$server" '
+    type == "object" and
+    (if $version == "" then . == {resource: true, name: $name, server: $server}
+     elif $server == "" then . == {resource: true, name: $name, version: $version}
+     else false end)
+  ' "$metadata" >/dev/null || die "provider metadata contract failed: $name"
+}
+
 verify() {
   [[ $# -eq 1 ]] || die 'usage: release-bundle.sh verify ARCHIVE_PATH'
   local archive="$1"
@@ -425,9 +253,6 @@ verify() {
   bundle_root="$extraction/$BUNDLE_TOP"
   [[ -d "$bundle_root" ]] || die 'archive top-level bundle directory did not extract'
   verify_content "$bundle_root"
-  if grep -R -Fq -- 'active.yml' "$bundle_root"; then
-    die 'deleted traefik/dynamic/active.yml is referenced in the assembled bundle'
-  fi
 }
 
 operation="${1:-}"
