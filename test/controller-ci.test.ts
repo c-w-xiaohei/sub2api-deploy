@@ -348,4 +348,68 @@ describe("Host controller CI evidence contract", () => {
     expect(upload).not.toBeNull();
     expect(job).not.toContain("continue-on-error");
   });
+
+  it("requires a distinct exact-SHA provider-import evidence job with sanitized evidence only", () => {
+    const start = workflow.indexOf("  provider-import:");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const nextJobMatch = /\n  [a-z][a-z0-9-]*:\s*\n/g;
+    nextJobMatch.lastIndex = start + 3;
+    const nextJobResult = nextJobMatch.exec(workflow);
+    const nextJob = nextJobResult?.index ?? workflow.length;
+    const job = workflow.slice(start, nextJob);
+
+    expect(job).toMatch(/^\s*timeout-minutes:\s*30\s*$/m);
+    expect(job).toContain('go-version: "1.25.11"');
+    expect(job).toContain("go mod verify");
+    expect(job).toContain("openssh-server");
+    expect(job).toContain("command -v sshd");
+    expect(job).toMatch(/\[\[\s+"\$TARGET_SHA"\s+=~\s+\^\[0-9a-f\]\{40\}\$\s+\]\]/);
+    expect(job).toMatch(/ref:\s*\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
+    expect(job).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
+
+    expect(job).toContain("TestEngineImportPreviewIsNoOpOrAcceptedDiff");
+    expect(job).toContain("test_name='TestEngineImportPreviewIsNoOpOrAcceptedDiff'");
+    expect(job).toContain(
+      "tests='^TestEngineImportPreviewIsNoOpOrAcceptedDiff$'",
+    );
+    expect(job).toContain("./internal/integration/providerimport");
+    expect(job).toMatch(
+      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerimport > "\$events" 2> "\$stderr"\n\s*test_status=\$\?/,
+    );
+    expect(job).toMatch(/^\s*events="\$RUNNER_TEMP\/provider-import-\$\{TARGET_SHA\}-events\.jsonl"\s*$/m);
+    expect(job).toMatch(/^\s*stderr="\$RUNNER_TEMP\/provider-import-\$\{TARGET_SHA\}-stderr\.log"\s*$/m);
+    expect(job).toContain("JSON.parse(line)");
+    expect(job).toContain('if (!line) continue;');
+    expect(job).toContain('event.Action === "skip" || event.Action === "fail"');
+    expect(job).toContain('terminal !== "pass"');
+    expect(job).toContain('if (status === 0 && fs.readFileSync(stderrPath, "utf8") !== "")');
+    expect(job).toContain('{ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed }');
+    expect(job).not.toContain("go test -race");
+    expect(job).toMatch(
+      /extract_sanitized_trace\(\)\s*\{\s*node - "\$1" "\$2" <<'PROVIDER_IMPORT_TRACE'[\s\S]*?JSON\.parse\(line\)[\s\S]*?\{ Action: event\.Action, Test: event\.Test, Elapsed: event\.Elapsed \}[\s\S]*?PROVIDER_IMPORT_TRACE\s*\}/,
+    );
+    expect(job).toMatch(
+      /node - "\$events" "\$stderr" <<'PROVIDER_IMPORT_PARSE'[\s\S]*?JSON\.parse\(line\)[\s\S]*?event\.Action === "skip" \|\| event\.Action === "fail"[\s\S]*?terminal !== "pass"[\s\S]*?PROVIDER_IMPORT_PARSE\s*\n\s*parser_status=\$\?/,
+    );
+
+    expect(job).toContain('evidence="evidence/${TARGET_SHA}/provider-import"');
+    expect(job).toContain('gate: "provider-import"');
+    expect(job).toContain("Sanitized test events contain no secrets or raw request frames.");
+    expect(job).toContain('"$evidence/trace/test.jsonl"');
+    expect(job).toContain('rm -f "$events" "$stderr"');
+    expect(job).toContain('expected_files=$(printf \'%s\\n\' "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/test.jsonl")');
+    expect(job).toContain('actual_files=$(find "$evidence" -type f -print | sort)');
+    expect(job).toContain('test "$actual_files" = "$expected_files" || exit 1');
+    expect(job).toContain("forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|\\\"authorization\\\"\\s*:|sub2api-host-v1 |\\\"secrets\\\"\\s*:'");
+    expect(job).toMatch(/if grep -qE "\$forbidden" "\$evidence_file"; then\s*exit 1\s*fi/);
+    expect(job).toContain('name: provider-import-evidence-${{ env.TARGET_SHA }}');
+    expect(job).toContain('path: evidence/${{ env.TARGET_SHA }}/provider-import');
+    expect(job).toContain("if-no-files-found: error");
+    expect(job.indexOf('rm -f "$events" "$stderr"')).toBeGreaterThan(job.indexOf('extract_sanitized_trace'));
+    expect(job.indexOf('rm -f "$events" "$stderr"')).toBeGreaterThan(job.indexOf("parser_status=$?"));
+    expect(job.indexOf('test "$test_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
+    expect(job.indexOf('test "$trace_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
+    expect(job.indexOf('test "$parser_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
+    expect(job.indexOf('test "$evidence_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
+  });
 });
