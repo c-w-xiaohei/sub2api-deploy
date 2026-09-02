@@ -55,6 +55,7 @@ func TestRenderStagedStackEncryptsValuesWithoutLeakingPlaintext(t *testing.T) {
 	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
 	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
 	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+	assertStackValue(t, stack, "sub2api-environment:hostImportTarget", false, "", config.NopDecrypter)
 	for _, canary := range []string{stagePassphrase, stageUnrelatedSecret, stageSecrets, stageRevision, stageStaleConfig, stageStaleSecrets, stageStaleRevision} {
 		if bytes.Contains(rendered, []byte(canary)) {
 			t.Fatalf("rendered stack exposed %q", canary)
@@ -91,6 +92,7 @@ func TestRenderStagedStackPreservesUnrelatedStackContent(t *testing.T) {
 		"sub2api-environment:environmentConfig",
 		"sub2api-environment:environmentSecrets",
 		"sub2api-host:revisionKey",
+		"sub2api-environment:hostImportTarget",
 	} {
 		if mappingKeyCount(configNode, key) != 1 {
 			t.Fatalf("rendered stack has duplicate or missing %q", key)
@@ -114,11 +116,13 @@ func TestRenderStagedStackReplacesSemanticTargetKeyAliases(t *testing.T) {
 	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
 	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
 	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+	assertStackValue(t, stack, "sub2api-environment:hostImportTarget", false, "", config.NopDecrypter)
 	configNode := mappingValue(t, documentMapping(t, loadYAMLNode(t, rendered)), "config")
 	for _, key := range []string{
 		"sub2api-environment:environmentConfig",
 		"sub2api-environment:environmentSecrets",
 		"sub2api-host:revisionKey",
+		"sub2api-environment:hostImportTarget",
 	} {
 		if mappingKeyCount(configNode, key) != 1 {
 			t.Fatalf("rendered stack has duplicate or missing canonical key %q", key)

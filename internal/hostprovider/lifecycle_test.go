@@ -16,10 +16,12 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/artifact"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostimport"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/urn"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
@@ -949,7 +951,7 @@ func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
 	t.Run("verified program inputs construct a checkpoint through inspect only", func(t *testing.T) {
 		r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(verified))}}
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
-		request := p.ReadRequest{ID: stableID(resource), Inputs: inputs, Properties: inputs}
+		request := p.ReadRequest{ID: stableID(resource), Urn: lifecycleURN(resource), Inputs: inputs, Properties: inputs}
 		if !reflect.DeepEqual(request.Properties, request.Inputs) {
 			t.Fatal("program-first Import marker must use input-only Properties equal to Inputs")
 		}
@@ -1004,7 +1006,7 @@ func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(scenario.observed))}}
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
-			got, err := h.read(t.Context(), p.ReadRequest{ID: scenario.id, Inputs: scenario.inputs, Properties: scenario.inputs})
+			got, err := h.read(t.Context(), p.ReadRequest{ID: scenario.id, Urn: lifecycleURN(resource), Inputs: scenario.inputs, Properties: scenario.inputs})
 			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != scenario.calls || hasWrite(r) {
 				t.Fatalf("unsafe Import claimed state or wrote remotely: %#v, %v, %#v", got, err, r.calls)
 			}
@@ -1012,6 +1014,76 @@ func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
 				assertInspect(t, r.calls[0], inputs, revision)
 			}
 			assertNoCanary(t, errString(err))
+		})
+	}
+}
+
+func TestImportTokenBuildsStateFromEmptyProviderRead(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	revision := revisionForInputs(t, inputs)
+	tokenInputs := hostimport.Inputs{Resource: lifecycleResource(t, inputs), Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Target: decodeTarget(t, inputs), Secrets: decodeSecrets(t, inputs)}
+	token, err := hostimport.Encode(hostcontract.RevisionKey([]byte("01234567890123456789012345678901")), tokenInputs)
+	if err != nil { t.Fatal(err) }
+	r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(observationFor(tokenInputs.Target, revision)))}}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+	got, err := h.read(t.Context(), p.ReadRequest{ID: token, Urn: lifecycleURN(tokenInputs.Resource)})
+	if err != nil || got.ID != stableID(tokenInputs.Resource) || !onlyInspect(r) || hasWrite(r) { t.Fatalf("token import = %#v, %v, %#v", got, err, r.calls) }
+	assertCheckpoint(t, got.Properties, inputs, observationFor(tokenInputs.Target, revision), revision)
+	if !valueAt(t, got.Inputs, "secrets").Secret() { t.Fatal("token import did not mark reconstructed secrets secret") }
+}
+
+func TestImportTokenRequiresExactHostURNBeforeInspect(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	resource := lifecycleResource(t, inputs)
+	token, err := hostimport.Encode(hostcontract.RevisionKey([]byte("01234567890123456789012345678901")), hostimport.Inputs{Resource: resource, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Target: decodeTarget(t, inputs), Secrets: decodeSecrets(t, inputs)})
+	if err != nil { t.Fatal(err) }
+	wrongKeyToken, err := hostimport.Encode(hostcontract.RevisionKey([]byte("abcdefghijklmnopqrstuvwxyz012345")), hostimport.Inputs{Resource: resource, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Target: decodeTarget(t, inputs), Secrets: decodeSecrets(t, inputs)})
+	if err != nil { t.Fatal(err) }
+
+	for _, scenario := range []struct {
+		name string
+		id   string
+		urn  urn.URN
+	}{
+		{"invalid token", "not-an-import-token", lifecycleURN(resource)},
+		{"wrong token key", wrongKeyToken, lifecycleURN(resource)},
+		{"missing URN", token, ""},
+		{"wrong project", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("other-project"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong stack", token, urn.New("other-stack", tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong type", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type("sub2api-host:index:Other"), "host-"+resource.ServerKey)},
+		{"parent-qualified type", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), tokens.Type("sub2api-host:index:Component"), tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong name", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-other")},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			r := &recordingLifecycleTransport{}
+			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+			got, err := h.read(t.Context(), p.ReadRequest{ID: scenario.id, Urn: scenario.urn})
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 { t.Fatalf("invalid token import returned %#v, %v", got, err) }
+			assertNoCalls(t, r)
+		})
+	}
+}
+
+func TestInputOnlyImportRequiresExactHostURNBeforeInspect(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	resource := lifecycleResource(t, inputs)
+	for _, scenario := range []struct {
+		name string
+		urn  urn.URN
+	}{
+		{"missing URN", ""},
+		{"wrong project", urn.New(tokens.QName(resource.Environment), tokens.PackageName("other-project"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong stack", urn.New("other-stack", tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong type", urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type("sub2api-host:index:Other"), "host-"+resource.ServerKey)},
+		{"parent-qualified type", urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), tokens.Type("sub2api-host:index:Component"), tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong name", urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-other")},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			r := &recordingLifecycleTransport{}
+			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+			got, err := h.read(t.Context(), p.ReadRequest{ID: stableID(resource), Urn: scenario.urn, Inputs: inputs, Properties: inputs})
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 { t.Fatalf("invalid input-only import returned %#v, %v", got, err) }
+			assertNoCalls(t, r)
 		})
 	}
 }
@@ -1287,6 +1359,17 @@ func assertInputsPreserved(t *testing.T, state, inputs property.Map) { t.Helper(
 func valueAt(t *testing.T, values property.Map, key string) property.Value { t.Helper(); value, ok := values.GetOk(key); if !ok { t.Fatalf("missing property %s", key) }; return value }
 func decodeTarget(t *testing.T, values property.Map) hostcontract.Target { t.Helper(); var target hostcontract.Target; if err := decode(valueAt(t, values, "target"), &target); err != nil { t.Fatal("target fixture decode failed") }; return target }
 func decodeSecrets(t *testing.T, values property.Map) hostcontract.Secrets { t.Helper(); var secrets hostcontract.Secrets; if err := decode(valueAt(t, values, "secrets"), &secrets); err != nil { t.Fatal("secret fixture decode failed") }; return secrets }
+
+func lifecycleURN(resource hostcontract.ResourceIdentity) urn.URN {
+	return urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)
+}
+
+func readRequest(inputs property.Map, id string, properties, refreshInputs property.Map) p.ReadRequest {
+	resource := valueAtMap(inputs, "resource").AsMap()
+	environment, _ := resource.GetOk("environment")
+	serverKey, _ := resource.GetOk("serverKey")
+	return p.ReadRequest{ID: id, Urn: lifecycleURN(hostcontract.ResourceIdentity{Environment: environment.AsString(), ServerKey: serverKey.AsString()}), Properties: properties, Inputs: refreshInputs}
+}
 func encodeValue(t *testing.T, value any) property.Value { t.Helper(); encoded, err := json.Marshal(value); if err != nil { t.Fatal("fixture encode failed") }; var raw any; if err := json.Unmarshal(encoded, &raw); err != nil { t.Fatal("fixture decode failed") }; return propertyFromRaw(t, raw) }
 func propertyFromRaw(t *testing.T, raw any) property.Value { t.Helper(); switch value := raw.(type) { case nil: return property.New(property.Null); case string: return property.New(value); case bool: return property.New(value); case float64: return property.New(value); case []any: values := make([]property.Value, len(value)); for i := range value { values[i] = propertyFromRaw(t, value[i]) }; return property.New(property.NewArray(values)); case map[string]any: values := map[string]property.Value{}; for key, nested := range value { values[key] = propertyFromRaw(t, nested) }; return property.New(property.NewMap(values)); default: t.Fatal("unsupported fixture value"); return property.New(property.Null) } }
 func createWithReadyHost(t *testing.T, inputs property.Map) string { t.Helper(); bundle, binary := lifecycleBundle(t, release(t, inputs)); digest := fmt.Sprintf("%x", sha256.Sum256(binary)); r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}; h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }}); desired := revision(t, h, inputs); r.outcomes = []lifecycleOutcome{response(applied(desired)), response(inspected(observationFor(decodeTarget(t, inputs), desired)))}; got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs}); if err != nil { t.Fatal("Create failed") }; return got.ID }

@@ -175,11 +175,12 @@ func TestDiffReportsRefreshedDriftAndAppliedRevisionMismatch(t *testing.T) {
 	}
 }
 
-func TestReadRejectsImportStyleEmptyRequestBeforeTransport(t *testing.T) {
+// TestReadRejectsOpaqueHostImportToken is baseline-compilable RED coverage.
+func TestReadRejectsOpaqueHostImportTokenBeforeTransport(t *testing.T) {
 	r := &recordingLifecycleTransport{}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
-	got, err := h.read(t.Context(), p.ReadRequest{ID: "host-imported-without-context"})
-	if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 0 || !strings.Contains(err.Error(), "import") || !strings.Contains(err.Error(), "context") {
+	got, err := h.read(t.Context(), p.ReadRequest{ID: "hit1:opaque"})
+	if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 0 || !strings.Contains(err.Error(), "import") {
 		t.Fatalf("empty import-style Read did not fail explicitly before transport: %#v, %v", got, err)
 	}
 }

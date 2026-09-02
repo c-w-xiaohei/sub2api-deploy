@@ -12,10 +12,13 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/artifact"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostimport"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/sshcheck"
 	p "github.com/pulumi/pulumi-go-provider"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/urn"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
@@ -389,9 +392,23 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 }
 
 func (h *host) lifecycleRead(ctx context.Context, req p.ReadRequest) (p.ReadResponse, error) {
-	if req.ID == "" || req.Inputs.Len() == 0 || req.Properties.Len() == 0 {
-		return p.ReadResponse{}, fmt.Errorf("import read requires registered input and checkpoint context")
+	if req.ID == "" { return p.ReadResponse{}, fmt.Errorf("invalid resource ID") }
+	if req.Inputs.Len() == 0 && req.Properties.Len() == 0 {
+		decoded, err := hostimport.Decode(h.key, req.ID)
+		if err != nil { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
+		if !matchesImportURN(req.Urn, decoded.Resource) { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
+		inputs, err := importInputs(decoded)
+		if err != nil { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
+		in, err := h.parseInputs(inputs)
+		if err != nil { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
+		result, err := h.inspect(ctx, in)
+		if err != nil { return p.ReadResponse{}, err }
+		if result.Status != hostprotocol.ResultInspected || result.Observation == nil || validateImportedObservation(*result.Observation, in.target, in.revision) != nil { return p.ReadResponse{}, fmt.Errorf("invalid import observation") }
+		state, err := checkpointState(inputs, *result.Observation, in.revision)
+		if err != nil { return p.ReadResponse{}, err }
+		return p.ReadResponse{ID: stableID(in.resource), Inputs: inputs, Properties: state}, nil
 	}
+	if req.Inputs.Len() == 0 || req.Properties.Len() == 0 { return p.ReadResponse{}, fmt.Errorf("read requires registered input and checkpoint context") }
 	in, err := h.parseInputs(req.Inputs)
 	if err != nil {
 		return p.ReadResponse{}, err
@@ -400,6 +417,9 @@ func (h *host) lifecycleRead(ctx context.Context, req p.ReadRequest) (p.ReadResp
 		return p.ReadResponse{}, fmt.Errorf("invalid resource ID")
 	}
 	if isImportRead(req) {
+		if !matchesImportURN(req.Urn, in.resource) {
+			return p.ReadResponse{}, fmt.Errorf("invalid import request")
+		}
 		result, err := h.inspect(ctx, in)
 		if err != nil {
 			return p.ReadResponse{}, err
@@ -455,13 +475,29 @@ func (h *host) lifecycleRead(ctx context.Context, req p.ReadRequest) (p.ReadResp
 	return p.ReadResponse{ID: req.ID, Properties: state, Inputs: req.Inputs}, nil
 }
 
-// Pulumi's import ReadStep supplies complete Program inputs as both Inputs and
-// Properties. Any output key or extra property makes this an ordinary Read.
+func matchesImportURN(value urn.URN, resource hostcontract.ResourceIdentity) bool {
+	return value != "" &&
+		value.Project() == tokens.PackageName("sub2api-environment") &&
+		value.Stack() == tokens.QName(resource.Environment) &&
+		value.QualifiedType() == tokens.Type(hostToken) &&
+		value.Name() == "host-"+resource.ServerKey
+}
+
+// Older compatibility paths supplied program inputs as both fields. Engine import
+// proof uses the empty-field encrypted-token branch above.
 func isImportRead(req p.ReadRequest) bool {
 	if hasCheckpointOutputs(req.Properties) || req.Properties.Len() != req.Inputs.Len() {
 		return false
 	}
 	return reflect.DeepEqual(req.Properties, req.Inputs)
+}
+
+func importInputs(decoded hostimport.Inputs) (property.Map, error) {
+	resource, err := propertyValue(decoded.Resource); if err != nil { return property.Map{}, err }
+	server, err := propertyValue(decoded.Server); if err != nil { return property.Map{}, err }
+	target, err := propertyValue(decoded.Target); if err != nil { return property.Map{}, err }
+	secrets, err := propertyValue(decoded.Secrets); if err != nil { return property.Map{}, err }
+	return property.NewMap(map[string]property.Value{"resource": resource, "server": server, "target": target, "secrets": secrets.WithSecret(true)}), nil
 }
 
 func (h *host) lifecycleDelete(ctx context.Context, req p.DeleteRequest) error {

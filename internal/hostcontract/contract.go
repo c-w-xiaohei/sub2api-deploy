@@ -340,6 +340,10 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 	}
 	return target, secrets
 }
+
+// NormalizeTargetSecrets returns the canonical target/secrets representation used
+// by TargetRevision. Callers that persist or authenticate Host inputs must use it.
+func NormalizeTargetSecrets(target Target, secrets Secrets) (Target, Secrets) { return normalize(target, secrets) }
 func copyStrings(values map[string]string) map[string]string {
 	if len(values) == 0 {
 		return nil

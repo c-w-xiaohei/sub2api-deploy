@@ -20,6 +20,7 @@ type stackConfigValues struct {
 	environmentConfig  string
 	environmentSecrets string
 	revisionKey        string
+	hostImportTarget   string
 }
 
 func renderStagedStack(ctx context.Context, project *workspace.Project, source []byte, sourcePath, passphrase string, values stackConfigValues) ([]byte, error) {
@@ -58,11 +59,12 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 		return nil, errInvalidStagedStack
 	}
 
-	targetKeyNames := []string{"sub2api-environment:environmentConfig", "sub2api-environment:environmentSecrets", "sub2api-host:revisionKey"}
+	targetKeyNames := []string{"sub2api-environment:environmentConfig", "sub2api-environment:environmentSecrets", "sub2api-host:revisionKey", "sub2api-environment:hostImportTarget"}
 	targetKeys := []config.Key{
 		config.MustMakeKey("sub2api-environment", "environmentConfig"),
 		config.MustMakeKey("sub2api-environment", "environmentSecrets"),
 		config.MustMakeKey("sub2api-host", "revisionKey"),
+		config.MustMakeKey("sub2api-environment", "hostImportTarget"),
 	}
 	content := make([]*yaml.Node, 0, len(configNode.Content)+2*len(targetKeyNames))
 	for i := 0; i < len(configNode.Content); i += 2 {
@@ -150,6 +152,7 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 		"sub2api-environment:environmentConfig":  {Kind: yaml.ScalarNode, Tag: "!!str", Value: values.environmentConfig},
 		"sub2api-environment:environmentSecrets": {Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: "secure"}, {Kind: yaml.ScalarNode, Tag: "!!str", Value: ciphertexts[0]}}},
 		"sub2api-host:revisionKey":               {Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: "secure"}, {Kind: yaml.ScalarNode, Tag: "!!str", Value: ciphertexts[1]}}},
+		"sub2api-environment:hostImportTarget":   {Kind: yaml.ScalarNode, Tag: "!!str", Value: values.hostImportTarget},
 	}
 	content = content[:len(content)-2*len(targetKeyNames)]
 	for _, key := range targetKeyNames {
@@ -180,6 +183,7 @@ func renderStagedStack(ctx context.Context, project *workspace.Project, source [
 		"sub2api-environment:environmentConfig":  {values.environmentConfig, false},
 		"sub2api-environment:environmentSecrets": {values.environmentSecrets, true},
 		"sub2api-host:revisionKey":               {values.revisionKey, true},
+		"sub2api-environment:hostImportTarget":   {values.hostImportTarget, false},
 	} {
 		value, ok := verified.Config[config.MustParseKey(key)]
 		if !ok || value.Secure() != want.secure {

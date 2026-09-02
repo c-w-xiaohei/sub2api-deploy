@@ -107,6 +107,19 @@ func withStagedStackSource(ctx context.Context, project *workspace.Project, sour
 	if err := revalidateStagedStackSource(source); err != nil {
 		return errInvalidStagedStack
 	}
+	passphrasePath := filepath.Join(directory, "passphrase")
+	passphraseFile, err := os.OpenFile(passphrasePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return errInvalidStagedStack
+	}
+	if passphraseFile.Chmod(0o600) != nil || writeStagedStack(passphraseFile, []byte(passphrase)) != nil || passphraseFile.Sync() != nil || passphraseFile.Close() != nil {
+		_ = passphraseFile.Close()
+		return errInvalidStagedStack
+	}
+	info, err := os.Lstat(passphrasePath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 { return errInvalidStagedStack }
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) || info.Size() != int64(len(passphrase)) { return errInvalidStagedStack }
 	return operation(finalPath)
 }
 

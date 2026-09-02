@@ -1,6 +1,9 @@
 package program
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -8,13 +11,17 @@ import (
 	"time"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostimport"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
 	"github.com/pulumi/pulumi-cloudflare/sdk/v6/go/cloudflare"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 	"github.com/upstash/pulumi-upstash/sdk/go/upstash"
 )
 
 var releaseArtifactPattern = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+const importTargetConfigKey = "sub2api-environment:hostImportTarget"
 
 type hostResource struct{ pulumi.CustomResourceState }
 
@@ -42,6 +49,10 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		return fmt.Errorf("release artifact must be a nonempty immutable sha256 image reference")
 	}
 	if err := preflight(validated); err != nil {
+		return err
+	}
+	importTarget, key, err := importPreflight(ctx, validated, secrets)
+	if err != nil {
 		return err
 	}
 
@@ -83,7 +94,7 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		}
 	}
 
-	hosts, err := registerHosts(ctx, validated, secrets, releaseArtifact, managedRedis)
+	hosts, err := registerHosts(ctx, validated, secrets, releaseArtifact, managedRedis, importTarget, key)
 	if err != nil {
 		return err
 	}
@@ -124,7 +135,22 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 	return nil
 }
 
-func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, secrets environment.Secrets, release string, managed map[string]managedRedisInputs) (map[string]*hostResource, error) {
+func importPreflight(ctx *pulumi.Context, validated environment.ValidatedConfig, secrets environment.Secrets) (string, hostcontract.RevisionKey, error) {
+	importTarget, _ := ctx.GetConfig(importTargetConfigKey)
+	if importTarget == "" {
+		return "", nil, nil
+	}
+	if !contains(validated.ServerIDs, importTarget) {
+		return "", nil, fmt.Errorf("invalid Host import target")
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(secrets.RevisionKey)
+	if err != nil || len(decoded) != 32 {
+		return "", nil, fmt.Errorf("invalid Host import target")
+	}
+	return importTarget, hostcontract.RevisionKey(decoded), nil
+}
+
+func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, secrets environment.Secrets, release string, managed map[string]managedRedisInputs, importTarget string, key hostcontract.RevisionKey) (map[string]*hostResource, error) {
 	hosts := make(map[string]*hostResource, len(validated.ServerIDs))
 	for _, serverID := range validated.ServerIDs {
 		var host hostResource
@@ -132,7 +158,7 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 		if dependencies := appDependencies(serverID, validated.Config, hosts); len(dependencies) != 0 {
 			options = append(options, pulumi.DependsOn(dependencies))
 		}
-		err := ctx.RegisterResource(hostresource.HostToken, "host-"+serverID, pulumi.Map{
+		inputs := pulumi.Map{
 			"resource": pulumi.Map{
 				"environment": pulumi.String(ctx.Stack()),
 				"serverKey":   pulumi.String(serverID),
@@ -140,13 +166,50 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 			"server": pulumi.Map{"sshAlias": pulumi.String(validated.Servers[serverID].SSHAlias)},
 			"target": hostTarget(validated.Config, release, serverID, managed),
 			"secrets": hostSecrets(validated.Config, secrets, serverID, managed),
-		}, &host, options...)
+		}
+		if serverID == importTarget {
+			id, importErr := hostImportID(ctx, key, inputs)
+			if importErr != nil {
+				return nil, importErr
+			}
+			options = append(options, pulumi.Import(id))
+		}
+		err := ctx.RegisterResource(hostresource.HostToken, "host-"+serverID, inputs, &host, options...)
 		if err != nil {
 			return nil, err
 		}
 		hosts[serverID] = &host
 	}
 	return hosts, nil
+}
+
+func hostImportID(ctx *pulumi.Context, key hostcontract.RevisionKey, inputs pulumi.Map) (pulumi.ID, error) {
+	id := pulumi.ToOutput(inputs).ApplyT(func(value any) (pulumi.ID, error) {
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return "", fmt.Errorf("invalid Host import inputs")
+		}
+		var tokenInputs hostimport.Inputs
+		if json.Unmarshal(payload, &tokenInputs) != nil {
+			return "", fmt.Errorf("invalid Host import inputs")
+		}
+		token, err := hostimport.Encode(key, tokenInputs)
+		if err != nil {
+			return "", fmt.Errorf("invalid Host import inputs")
+		}
+		return pulumi.ID(token), nil
+	}).(pulumi.IDOutput)
+	// Import IDs are a synchronous SDK requirement. Do not await through the
+	// engine context, which may itself be waiting for this registration.
+	resolved, err := internals.UnsafeAwaitOutput(context.Background(), id)
+	if err != nil || !resolved.Known {
+		return "", fmt.Errorf("invalid Host import inputs")
+	}
+	value, ok := resolved.Value.(pulumi.ID)
+	if !ok {
+		return "", fmt.Errorf("invalid Host import inputs")
+	}
+	return value, nil
 }
 
 func preflight(config environment.ValidatedConfig) error {

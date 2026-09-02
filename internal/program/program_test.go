@@ -10,6 +10,7 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostimport"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -69,6 +70,18 @@ func (m *recordingMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, e
 
 func runRegister(t *testing.T, mocks *recordingMocks, release, config, secrets string) error {
 	t.Helper()
+	return pulumi.RunErr(func(ctx *pulumi.Context) error {
+		return Register(ctx, release, []byte(config), []byte(secrets))
+	}, pulumi.WithMocks("sub2api-environment", "canary", mocks))
+}
+
+func runRegisterWithConfig(t *testing.T, mocks *recordingMocks, release, config, secrets string, values map[string]string) error {
+	t.Helper()
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pulumi.EnvConfig, string(encoded))
 	return pulumi.RunErr(func(ctx *pulumi.Context) error {
 		return Register(ctx, release, []byte(config), []byte(secrets))
 	}, pulumi.WithMocks("sub2api-environment", "canary", mocks))
@@ -148,6 +161,96 @@ func TestRegisterFoundationGraph(t *testing.T) {
 		if item.TypeToken != "pulumi:providers:cloudflare" && item.TypeToken != "pulumi:providers:upstash" {
 			assertNotContains(t, item.Inputs, cloudflareToken, upstashToken)
 		}
+	}
+}
+
+func TestRegisterImportsOnlySelectedHostAndDoesNotRetainImportTarget(t *testing.T) {
+	imported := &recordingMocks{}
+	if err := runRegisterWithConfig(t, imported, pinnedRelease, managedConfig(), managedSecrets(), map[string]string{importTargetConfigKey: "alpha"}); err != nil {
+		t.Fatalf("Register() import error = %v", err)
+	}
+	importedHosts := resourcesOfType(imported.resources, hostresource.HostToken)
+	if len(importedHosts) != 2 {
+		t.Fatalf("Host registrations = %d, want 2", len(importedHosts))
+	}
+	alpha := hostForServer(t, importedHosts, "alpha")
+	bravo := hostForServer(t, importedHosts, "bravo")
+	if alpha.RegisterRPC.GetImportId() == "" || bravo.RegisterRPC.GetImportId() != "" {
+		t.Fatalf("Host import IDs = alpha=%q bravo=%q", hostForServer(t, importedHosts, "alpha").RegisterRPC.GetImportId(), hostForServer(t, importedHosts, "bravo").RegisterRPC.GetImportId())
+	}
+	target, secrets := decodeKnownHost(t, alpha)
+	wantImportID, err := hostimport.Encode(hostcontract.RevisionKey([]byte("0123456789abcdef0123456789abcdef")), hostimport.Inputs{
+		Resource: hostcontract.ResourceIdentity{Environment: "canary", ServerKey: "alpha"},
+		Server:   hostcontract.ServerTarget{SSHAlias: "alpha-ssh"},
+		Target:   target,
+		Secrets:  secrets,
+	})
+	if err != nil || alpha.RegisterRPC.GetImportId() != wantImportID {
+		t.Fatalf("Host import ID = %q, want deterministic %q (err=%v)", alpha.RegisterRPC.GetImportId(), wantImportID, err)
+	}
+	if len(resourcesOfType(imported.resources, "pulumi:providers:cloudflare")) != 1 || len(resourcesOfType(imported.resources, "pulumi:providers:upstash")) != 1 || len(resourcesOfType(imported.resources, "upstash:index/redisDatabase:RedisDatabase")) != 1 || len(resourcesOfType(imported.resources, "cloudflare:index/dnsRecord:DnsRecord")) != 2 {
+		t.Fatal("import changed unrelated managed resources")
+	}
+
+	t.Setenv(pulumi.EnvConfig, "")
+	normal := &recordingMocks{}
+	if err := runRegister(t, normal, pinnedRelease, managedConfig(), managedSecrets()); err != nil {
+		t.Fatalf("Register() normal error = %v", err)
+	}
+	if len(normal.resources) != len(imported.resources) {
+		t.Fatalf("normal registration resources = %d, import registration resources = %d", len(normal.resources), len(imported.resources))
+	}
+	for _, host := range resourcesOfType(normal.resources, hostresource.HostToken) {
+		if host.RegisterRPC.GetImportId() != "" {
+			t.Fatalf("normal Host %q retained import ID %q", host.Name, host.RegisterRPC.GetImportId())
+		}
+	}
+}
+
+func TestRegisterRejectsUnknownImportTargetBeforeResourceRegistration(t *testing.T) {
+	mocks := &recordingMocks{}
+	err := runRegisterWithConfig(t, mocks, pinnedRelease, managedConfig(), managedSecrets(), map[string]string{importTargetConfigKey: "unknown"})
+	if err == nil || len(mocks.resources) != 0 || len(mocks.calls) != 0 {
+		t.Fatalf("unknown import target registered resources/calls: err=%v resources=%d calls=%d", err, len(mocks.resources), len(mocks.calls))
+	}
+}
+
+func TestRegisterImportPreflightRejectsInvalidRevisionBeforeManagedRegistration(t *testing.T) {
+	mocks := &recordingMocks{}
+	secrets := strings.Replace(managedSecrets(), "revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", "revisionKey: invalid", 1)
+	err := runRegisterWithConfig(t, mocks, pinnedRelease, managedConfig(), secrets, map[string]string{importTargetConfigKey: "alpha"})
+	if err == nil || len(mocks.resources) != 0 || len(mocks.calls) != 0 {
+		t.Fatalf("invalid import revision registered resources/calls: err=%v resources=%d calls=%d", err, len(mocks.resources), len(mocks.calls))
+	}
+}
+
+type unknownManagedOutputsMocks struct{ recordingMocks }
+
+func (m *unknownManagedOutputsMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	id, state, err := m.recordingMocks.NewResource(args)
+	if args.TypeToken == "upstash:index/redisDatabase:RedisDatabase" {
+		delete(state, "endpoint")
+		delete(state, "port")
+		delete(state, "password")
+	}
+	return id, state, err
+}
+
+func TestRegisterImportRejectsUnknownManagedOutputsWithoutHostRegistration(t *testing.T) {
+	t.Setenv(pulumi.EnvDryRun, "true")
+	mocks := &unknownManagedOutputsMocks{}
+	t.Setenv(pulumi.EnvConfig, `{"sub2api-environment:hostImportTarget":"alpha"}`)
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		return Register(ctx, pinnedRelease, []byte(managedConfig()), []byte(managedSecrets()))
+	}, pulumi.WithMocks("sub2api-environment", "canary", mocks))
+	if err == nil {
+		t.Fatal("unknown managed import inputs were accepted")
+	}
+	if len(resourcesOfType(mocks.resources, hostresource.HostToken)) != 0 {
+		t.Fatal("unknown managed import inputs registered a Host operation")
+	}
+	if len(resourcesOfType(mocks.resources, "upstash:index/redisDatabase:RedisDatabase")) != 1 {
+		t.Fatal("expected dependency registration before synchronous import validation")
 	}
 }
 

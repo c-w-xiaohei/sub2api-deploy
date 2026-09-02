@@ -19,9 +19,7 @@ func TestParsePulumiPlanBuildsOwnedArguments(t *testing.T) {
 		{"up", []string{"pulumi", "production", "up", "--yes", "--message=release candidate"}, []string{"up", "--stack=production", "--config-file=" + configPath, "--yes", "--message=release candidate"}},
 		{"refresh", []string{"pulumi", "staging-2", "refresh", "-y"}, []string{"refresh", "--stack=staging-2", "--config-file=" + configPath, "-y"}},
 		{"destroy", []string{"pulumi", "production", "destroy", "--yes"}, []string{"destroy", "--stack=production", "--config-file=" + configPath, "--yes"}},
-		{"import", []string{"pulumi", "production", "import", "aws:s3/bucket:Bucket", "logs", "bucket-id"}, []string{"import", "--stack=production", "--config-file=" + configPath, "aws:s3/bucket:Bucket", "logs", "bucket-id"}},
-		{"import separator between type and name", []string{"pulumi", "production", "import", "pkg:index:Thing", "--", "thing", "id"}, []string{"import", "--stack=production", "--config-file=" + configPath, "pkg:index:Thing", "--", "thing", "id"}},
-		{"import separator before dash ID", []string{"pulumi", "production", "import", "pkg:index:Thing", "thing", "--", "-id"}, []string{"import", "--stack=production", "--config-file=" + configPath, "pkg:index:Thing", "thing", "--", "-id"}},
+		{"managed Host import", []string{"pulumi", "production", "import", "sub2api-host:index:Host", "host-edge", "edge", "--yes", "--message=adopt"}, []string{"up", "--stack=production", "--config-file=" + configPath, "--yes", "--message=adopt"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			plan, err := parsePulumiPlan(test.argv)
@@ -154,11 +152,8 @@ func TestParsePulumiPlanRejectsPositionalsOutsideSupportedImport(t *testing.T) {
 
 func TestParsePulumiPlanAcceptsAndRejectsImportShapes(t *testing.T) {
 	for _, argv := range [][]string{
-		{"pulumi", "production", "import", "pkg:index:Thing", "thing", "id"},
-		{"pulumi", "production", "import", "--file=imports.json", "--protect=false"},
-		{"pulumi", "production", "import", "pkg:index:Thing", "--", "thing", "id"},
-		{"pulumi", "production", "import", "pkg:index:Thing", "thing", "--", "-id"},
-		{"pulumi", "production", "import", "--", "pkg:index:Thing", "thing", "-id"},
+		{"pulumi", "production", "import", "sub2api-host:index:Host", "host-edge", "edge"},
+		{"pulumi", "production", "import", "sub2api-host:index:Host", "host-edge", hostStableID("production", "edge")},
 	} {
 		if _, err := parsePulumiPlan(argv); err != nil {
 			t.Fatalf("parsePulumiPlan(%q) error = %v", argv, err)
@@ -173,6 +168,9 @@ func TestParsePulumiPlanAcceptsAndRejectsImportShapes(t *testing.T) {
 		{"pulumi", "production", "import", "--file", "imports.json"},
 		{"pulumi", "production", "import", "--file=imports.json", "type", "name", "id"},
 		{"pulumi", "production", "import", "--file=imports.json", "--", "extra"},
+		{"pulumi", "production", "import", "pkg:index:Thing", "thing", "id"},
+		{"pulumi", "production", "import", "sub2api-host:index:Host", "host-edge", "other"},
+		{"pulumi", "production", "import", "sub2api-host:index:Host", "host-EDGE", "EDGE"},
 		{"pulumi", "production", "import", "--", "--file=imports.json"},
 		{"pulumi", "production", "import", "--message", "note", "pkg:index:Thing", "thing"},
 		{"pulumi", "production", "import", "--parallel", "4", "pkg:index:Thing", "thing"},
