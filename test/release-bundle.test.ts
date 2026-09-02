@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 const root = process.cwd();
 const script = join(root, "scripts", "release-bundle.sh");
 const manifest = join(root, "scripts", "release-bundle-files.txt");
+const verifyRelease = join(root, "scripts", "verify-release.sh");
 
 const targetInventory = [
   "Pulumi.production.example.yaml",
@@ -149,6 +150,26 @@ describe("target release bundle", () => {
     ]);
     expect(activePaths).not.toContain(expect.stringMatching(/^(infra|compose|traefik)\//));
     expect(activePaths).not.toContain(expect.stringMatching(/command|neon|sing-box|migration|adopt/i));
+  });
+
+  it("verifies every Go package except the exact legacy infra package", () => {
+    const releaseVerification = readFileSync(verifyRelease, "utf8");
+
+    expect(releaseVerification).toContain('module="$(go list -m)"');
+    expect(releaseVerification).toMatch(/\[\[ -n "\$module" \]\]/);
+    expect(releaseVerification).toContain('package_file="$(mktemp');
+    expect(releaseVerification).toContain("trap 'rm -f \"$package_file\"' EXIT");
+    expect(releaseVerification).toContain('go list ./... > "$package_file"');
+    expect(releaseVerification).toContain('mapfile -t packages < "$package_file"');
+    expect(releaseVerification).toContain('[[ "$package" == "$module/infra" ]]');
+    expect(releaseVerification).toContain("infra_found=true");
+    expect(releaseVerification).toMatch(/\[\[ "\$infra_found" == true \]\]/);
+    expect(releaseVerification).toMatch(/\(\(\$\{#target_packages\[@\]\} > 0\)\)/);
+    expect(releaseVerification).toContain('go test -count=1 "${target_packages[@]}"');
+    expect(releaseVerification).toContain('go vet "${target_packages[@]}"');
+    expect(releaseVerification).not.toMatch(/go (test|vet).*\.\/\.\./);
+    expect(releaseVerification).not.toMatch(/grep|sed|awk|\*infra\*|\^.*infra|infra\$/);
+    expect(releaseVerification).not.toMatch(/exclude.*(cmd|internal|integration)/i);
   });
 
   it("assembles the exact target inventory with executable, regular Host artifacts", () => {

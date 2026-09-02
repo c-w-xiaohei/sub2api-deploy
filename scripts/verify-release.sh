@@ -3,8 +3,26 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-go test -count=1 ./...
-go vet ./...
+module="$(go list -m)"
+[[ -n "$module" ]] || { printf 'release verification failed: Go module is empty\n' >&2; exit 1; }
+package_file="$(mktemp)"
+trap 'rm -f "$package_file"' EXIT
+go list ./... > "$package_file"
+mapfile -t packages < "$package_file"
+target_packages=()
+infra_found=false
+for package in "${packages[@]}"; do
+  if [[ "$package" == "$module/infra" ]]; then
+    infra_found=true
+    continue
+  fi
+  target_packages+=("$package")
+done
+[[ "$infra_found" == true ]] || { printf 'release verification failed: legacy infra package was not enumerated\n' >&2; exit 1; }
+((${#target_packages[@]} > 0)) || { printf 'release verification failed: no target Go packages were enumerated\n' >&2; exit 1; }
+# Legacy infra source remains in the repository but is not target release verification surface.
+go test -count=1 "${target_packages[@]}"
+go vet "${target_packages[@]}"
 go mod verify
 
 bash -n scripts/*.sh
