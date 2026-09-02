@@ -11,6 +11,8 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	p "github.com/pulumi/pulumi-go-provider"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/urn"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
@@ -24,7 +26,7 @@ func TestImportStepTokenBuildsReadOnlyStateFromVerifiedObservation(t *testing.T)
 
 	got, err := h.read(t.Context(), p.ReadRequest{
 		ID:  frozenImportToken(t, h.key, payload),
-		Urn: lifecycleURN(payload.Resource),
+		Urn: urn.New(tokens.QName(payload.Resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-"+payload.Resource.ServerKey),
 	})
 	if err != nil {
 		t.Fatal("token import Read returned an error")
