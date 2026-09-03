@@ -354,6 +354,7 @@ func TestProviderProcessReachesSharedTemporaryRuntimeServe(t *testing.T) {
 	}
 	assertSSHRecords(t, h.trace)
 	assertBootstrapMetadata(t, h.trace)
+	assertCandidateReleaseArtifact(t, h.trace)
 	assertDockerTrace(t, h)
 	assertRuntimePersistence(t, h, checkpoint)
 	for _, name := range []string{"machine", "ownership", "appliedRevision", "observation"} {
@@ -388,7 +389,46 @@ type expectedTargetApp struct {
 }
 
 func startProvider(t *testing.T) *providerProcess {
-	return startProviderApproval(t, buildProviderForPrerequisite(t), approvalAbsent, false)
+	return startProviderApproval(t, providerBinaryForPrerequisite(t), approvalAbsent, false)
+}
+
+func providerBinaryForPrerequisite(t *testing.T) string {
+	t.Helper()
+	provider := os.Getenv("SUB2API_TEST_PROVIDER_BINARY")
+	releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT")
+	if provider == "" && releaseRoot == "" {
+		return buildProviderForPrerequisite(t)
+	}
+	if provider == "" || releaseRoot == "" {
+		t.Fatal("candidate Provider overrides must be set together")
+	}
+	for name, path := range map[string]string{"SUB2API_TEST_PROVIDER_BINARY": provider, "SUB2API_TEST_RELEASE_ROOT": releaseRoot} {
+		if !filepath.IsAbs(path) {
+			t.Fatalf("%s must be an absolute path", name)
+		}
+	}
+	info, err := os.Lstat(provider)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		t.Fatalf("SUB2API_TEST_PROVIDER_BINARY must be an executable regular file: %v", err)
+	}
+	rootInfo, err := os.Stat(releaseRoot)
+	if err != nil || !rootInfo.IsDir() {
+		t.Fatalf("SUB2API_TEST_RELEASE_ROOT must be a directory: %v", err)
+	}
+	if provider != filepath.Join(releaseRoot, "bin", "pulumi-resource-sub2api-host") {
+		t.Fatal("candidate Provider must be the exact release-root provider binary")
+	}
+	for _, path := range []string{
+		filepath.Join(releaseRoot, "artifacts", "sub2api-host", "manifest.json"),
+		filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64"),
+		filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-arm64"),
+	} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("candidate release artifact must be a regular file: %s: %v", path, err)
+		}
+	}
+	return provider
 }
 
 func startProviderWithApproval(t *testing.T, providerBinary string, decision approvalDecision) *providerProcess {
@@ -435,7 +475,12 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 			t.Fatal(err)
 		}
 	}
-	writeArtifactFixture(t, caseDir)
+	artifact := filepath.Join(caseDir, "artifacts", "sub2api-host", "host-amd64")
+	if releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT"); releaseRoot != "" {
+		artifact = filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64")
+	} else {
+		writeArtifactFixture(t, caseDir)
+	}
 	writeSSHFixture(t, filepath.Join(binDir, "ssh"))
 	writeDockerFixture(t, filepath.Join(binDir, "docker"))
 	writeExpectedSSHCommands(t, trace)
@@ -458,7 +503,7 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 		"PROVIDER_RUNTIME_ROOT="+root,
 		"PROVIDER_RUNTIME_MACHINE_ID="+machinePath,
 		"PROVIDER_RUNTIME_TRACE="+trace,
-		"PROVIDER_RUNTIME_ARTIFACT="+filepath.Join(caseDir, "artifacts", "sub2api-host", "host-amd64"),
+		"PROVIDER_RUNTIME_ARTIFACT="+artifact,
 		"PROVIDER_RUNTIME_REQUEST_DIGEST="+filepath.Join(trace, "request.sha256"),
 		"PROVIDER_RUNTIME_DOCKER_LOG="+filepath.Join(trace, "docker.args"),
 		"PROVIDER_RUNTIME_DOCKER_STATE="+filepath.Join(trace, "docker-state"),
@@ -1296,7 +1341,11 @@ func assertSSHRecords(t *testing.T, trace string) {
 
 func assertBootstrapMetadata(t *testing.T, trace string) {
 	t.Helper()
-	artifact, err := os.ReadFile(filepath.Join(filepath.Dir(trace), "artifacts", "sub2api-host", "host-amd64"))
+	artifactPath := filepath.Join(filepath.Dir(trace), "artifacts", "sub2api-host", "host-amd64")
+	if releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT"); releaseRoot != "" {
+		artifactPath = filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64")
+	}
+	artifact, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1304,6 +1353,36 @@ func assertBootstrapMetadata(t *testing.T, trace string) {
 	want := fmt.Sprintf("size=%d\ndigest=%s\n", len(artifact), hex.EncodeToString(sum[:]))
 	if got := string(mustRead(t, filepath.Join(trace, "bootstrap.meta"))); got != want {
 		t.Fatalf("bootstrap artifact metadata = %q, want %q", got, want)
+	}
+}
+
+func assertCandidateReleaseArtifact(t *testing.T, trace string) {
+	t.Helper()
+	releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT")
+	if releaseRoot == "" {
+		return
+	}
+	artifact, err := os.ReadFile(filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		LinuxAMD64 struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+			Size   int    `json:"size"`
+		} `json:"linux-amd64"`
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(releaseRoot, "artifacts", "sub2api-host", "manifest.json")), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(artifact)
+	if manifest.LinuxAMD64.Path != "sub2api-host-linux-amd64" || manifest.LinuxAMD64.Size != len(artifact) || manifest.LinuxAMD64.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatal("Provider Create bootstrap artifact did not come from the selected candidate manifest")
+	}
+	want := fmt.Sprintf("size=%d\ndigest=%s\n", len(artifact), hex.EncodeToString(sum[:]))
+	if got := string(mustRead(t, filepath.Join(trace, "bootstrap.meta"))); got != want {
+		t.Fatalf("Provider Create bootstrap artifact body/digest = %q, want selected candidate %q", got, want)
 	}
 }
 

@@ -3,413 +3,240 @@ import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 
-describe("Host controller CI evidence contract", () => {
-  it("binds evidence to an explicit exact target SHA", () => {
-    expect(workflow).toContain("target_sha:");
-    expect(workflow).toContain("github.event.pull_request.head.sha");
-    expect(workflow).toContain("github.sha");
-    expect(workflow).toMatch(/ref:\s*\$\{\{[^\n]*TARGET_SHA[^\n]*\}\}/);
-    expect(workflow).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
-    expect(workflow).toMatch(/\[\[\s+"\$TARGET_SHA"\s+=~\s+\^\[0-9a-f\]\{40\}\$\s+\]\]/);
+function normalized(value: string) {
+  return value.replace(/[ \t]+$/gm, "").replace(/\n*$/, "\n");
+}
+
+function workflowJobs(source: string) {
+  const lines = source.split("\n");
+  const start = lines.findIndex((line) => line === "jobs:");
+  if (start < 0) throw new Error("workflow has no top-level jobs block");
+  const end = lines.slice(start + 1).findIndex((line) => line !== "" && !line.startsWith(" "));
+  const jobsBlock = lines.slice(start + 1, end < 0 ? undefined : start + 1 + end).join("\n");
+  const jobs = new Map<string, string>();
+  for (const match of jobsBlock.matchAll(/^  ([a-z][a-z0-9-]*):\s*\n([\s\S]*?)(?=^  [a-z][a-z0-9-]*:\s*\n|(?![\s\S]))/gm)) {
+    if (jobs.has(match[1])) throw new Error(`duplicate workflow job: ${match[1]}`);
+    jobs.set(match[1], `  ${match[1]}:\n${match[2]}`);
+  }
+  return jobs;
+}
+
+function jobSteps(job: string) {
+  return [...job.matchAll(/^      - name:\s*["']?([^"'\n]+?)["']?\s*\n([\s\S]*?)(?=^      - name:|(?![\s\S]))/gm)]
+    .map((match) => ({ name: match[1], source: match[0] }));
+}
+
+const targetInventory = [
+  "Pulumi.production.example.yaml", "Pulumi.yaml", "README.md", "artifacts/sub2api-host/manifest.json",
+  "artifacts/sub2api-host/sub2api-host-linux-amd64", "artifacts/sub2api-host/sub2api-host-linux-arm64", "bin/go",
+  "bin/pulumi", "bin/pulumi-program", "bin/pulumi-resource-sub2api-host", "bin/sub2api-deploy", "go.mod",
+  "scripts/pulumi-plugins/cloudflare/pulumi-plugin.json", "scripts/pulumi-plugins/upstash/pulumi-plugin.json",
+];
+
+// The exact candidate job makes every promotion input explicit and forbids an unreviewed execution surface.
+const expectedTargetReleaseJob = `  target-release:
+    name: Target Release
+    needs: [verify, host-controller, engine-graph, provider-ssh, provider-runtime, provider-import]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: \${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build and verify target candidate
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/target-release-$TARGET_SHA"
+          components="$candidate_dir/components"
+          archive_name="sub2api-controller-$TARGET_SHA.tar.gz"
+          archive="$candidate_dir/$archive_name"
+          bundle="$candidate_dir/bundle"
+          mkdir -p "$components"
+          go build -trimpath -o "$components/sub2api-deploy" ./cmd/sub2api-deploy
+          scripts/build-pulumi-release.sh "$components/pulumi-program"
+          go build -trimpath -o "$components/pulumi-resource-sub2api-host" ./cmd/pulumi-resource-sub2api-host
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$components/sub2api-host-linux-amd64" ./cmd/sub2api-host
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o "$components/sub2api-host-linux-arm64" ./cmd/sub2api-host
+          bash scripts/release-bundle.sh assemble "$bundle" "$components" "$TARGET_SHA"
+          tar -C "$candidate_dir" -czf "$archive" bundle
+          bash scripts/release-bundle.sh verify "$archive"
+          (cd "$candidate_dir" && sha256sum "$archive_name" > "$archive_name.sha256")
+          (cd "$candidate_dir" && sha256sum -c "$archive_name.sha256")
+      - name: Consume isolated target candidate
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/target-release-$TARGET_SHA"
+          archive="$candidate_dir/sub2api-controller-$TARGET_SHA.tar.gz"
+          consumer="$RUNNER_TEMP/target-release-consumer-$TARGET_SHA"
+          rm -rf "$consumer"
+          mkdir -p "$consumer"
+          tar -xzf "$archive" -C "$consumer"
+          expected_files="$(printf '%s\\n'${targetInventory.map((path) => ` "$consumer/bundle/${path}"`).join("")} | sort)"
+          actual_files="$(find "$consumer" -type f -print | sort)"
+          test "$actual_files" = "$expected_files"
+          raw_output="$RUNNER_TEMP/target-release-$TARGET_SHA-provider-create.raw"
+          SUB2API_TEST_PROVIDER_BINARY="$consumer/bundle/bin/pulumi-resource-sub2api-host" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" GOMAXPROCS=2 go test -count=1 -p=1 -run '^TestProviderProcessReachesSharedTemporaryRuntimeServe$' ./internal/integration/providerruntime > "$raw_output" 2>&1
+          digest="$(sha256sum "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" | cut -d ' ' -f1)"
+          node - "$candidate_dir/consumer-trace.json" "$TARGET_SHA" "$digest" <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync(process.argv[2], JSON.stringify({ sha: process.argv[3], providerCreate: "pass", hostAMD64SHA256: process.argv[4] }) + "\\n");
+          NODE
+          rm -f "$raw_output"
+          test "$(readelf -h "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" | grep 'Machine:.*Advanced Micro Devices')"
+          test "$(readelf -h "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-arm64" | grep 'Machine:.*AArch64')"
+          test -x "$consumer/bundle/bin/go"
+          test -x "$consumer/bundle/bin/pulumi"
+          test -x "$consumer/bundle/bin/pulumi-program"
+          test -x "$consumer/bundle/bin/pulumi-resource-sub2api-host"
+          node - "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$consumer/bundle/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" "$consumer/bundle/scripts/pulumi-plugins/upstash/pulumi-plugin.json" <<'NODE'
+          const fs = require("node:fs");
+          const [manifest, cloudflare, upstash] = process.argv.slice(2).map((path) => JSON.parse(fs.readFileSync(path, "utf8")));
+          if (manifest.schemaVersion !== 1 || cloudflare.name !== "cloudflare" || upstash.name !== "upstash") throw new Error("candidate consumer metadata mismatch");
+          NODE
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\\s*:|sub2api-host-v1 |"secrets"\\s*:'
+          for text_file in "$consumer/bundle/Pulumi.production.example.yaml" "$consumer/bundle/Pulumi.yaml" "$consumer/bundle/README.md" "$consumer/bundle/go.mod" "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$consumer/bundle/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" "$consumer/bundle/scripts/pulumi-plugins/upstash/pulumi-plugin.json" "$candidate_dir/consumer-trace.json"; do
+            if grep -qE "$forbidden" "$text_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+      - name: Write target candidate metadata
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/target-release-$TARGET_SHA"
+          archive="sub2api-controller-$TARGET_SHA.tar.gz"
+          sha256="$(sha256sum "$candidate_dir/$archive" | cut -d ' ' -f1)"
+          TARGET_SHA="$TARGET_SHA" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" ARCHIVE="$archive" SHA256="$sha256" node <<'NODE'
+          const fs = require("node:fs");
+          const gateSymbols = { verify: ["test/environment-program-target.test.ts::targets the environment program without an infra fallback"], "host-controller": ["TestRegisterFoundationGraph", "TestRegisterPreservesComputedUpstashOutputs", "TestConfigAndHostCheckPreservePropertyClassesWithoutEffects", "TestRunUsesFixedSSHArgvAndFramedStdin", "TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry", "TestStdioProcessExitsAfterOneFrameAndRejectsTwo", "TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi"], "engine-graph": ["TestEngineGraphFailureStopsPublication", "TestEngineGraphReadyPublishesAfterOrderedHosts", "TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication", "TestEngineConfiguredServerCountZero", "TestEngineConfiguredServerCountOneTwo", "TestEngineAppPlacementOneReadyFailure", "TestEngineManagedUpstashPreviewPreservesComputedSecretProjection", "TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor", "TestEngineManagedUpstashStateIsProtectedAndRetained"], "provider-ssh": ["TestProviderProcessUsesScriptedSSHTransport", "TestProtocolFrameBoundaries", "TestLoopbackStrictKnownHostAndOptionTerminator"], "provider-runtime": ["TestProviderProcessReachesSharedTemporaryRuntimeServe", "TestProviderLifecycleWithHostProcessTempRuntime"], "provider-import": ["TestEngineImportPreviewIsNoOpOrAcceptedDiff"] };
+          fs.writeFileSync(process.env.RUNNER_TEMP + "/target-release-" + process.env.TARGET_SHA + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runId: process.env.GITHUB_RUN_ID, runUrl: process.env.GITHUB_RUN_URL, gate: "target-release", archive: process.env.ARCHIVE, sha256: process.env.SHA256, requiredGateIds: ["verify", "host-controller", "engine-graph", "provider-ssh", "provider-runtime", "provider-import"], gateSymbols }) + "\\n");
+          NODE
+          expected_artifact="$(printf '%s\\n' "$candidate_dir/$archive" "$candidate_dir/$archive.sha256" "$candidate_dir/metadata.json" "$candidate_dir/consumer-trace.json" | sort)"
+          actual_artifact="$(find "$candidate_dir" -maxdepth 1 -type f -print | sort)"
+          test "$actual_artifact" = "$expected_artifact"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\\s*:|sub2api-host-v1 |"secrets"\\s*:'
+          for text_file in "$candidate_dir/metadata.json" "$candidate_dir/consumer-trace.json"; do
+            if grep -qE "$forbidden" "$text_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+      - name: Upload target release candidate
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-release-\${{ env.TARGET_SHA }}
+          path: |
+            \${{ runner.temp }}/target-release-\${{ env.TARGET_SHA }}/sub2api-controller-\${{ env.TARGET_SHA }}.tar.gz
+            \${{ runner.temp }}/target-release-\${{ env.TARGET_SHA }}/sub2api-controller-\${{ env.TARGET_SHA }}.tar.gz.sha256
+            \${{ runner.temp }}/target-release-\${{ env.TARGET_SHA }}/metadata.json
+            \${{ runner.temp }}/target-release-\${{ env.TARGET_SHA }}/consumer-trace.json
+          if-no-files-found: error
+`;
+
+function expectedFinalization(gate: string, recordID: string, eventNames: string[], stderrNames: string[], traces: string[], symbols: string[], guard = "always()") {
+  return `      - name: Finalize ${gate} evidence
+        id: finalize-${gate}
+        if: ${guard}
+        env:
+          RECORD_OUTCOME: \${{ steps.${recordID}.outcome }}
+          TARGET_SHA: \${{ env.TARGET_SHA }}
+        run: |
+          safe="$RUNNER_TEMP/${gate}-safe-\${TARGET_SHA}"
+          mkdir -p "$safe/trace"
+          trap 'rc=$?; rm -f${[...eventNames, ...stderrNames].map((name) => ` "$RUNNER_TEMP/${gate}-\${TARGET_SHA}-${name}"`).join("")}; exit "$rc"' EXIT
+          TARGET_SHA="$TARGET_SHA" RECORD_OUTCOME="$RECORD_OUTCOME" node - "$safe"${eventNames.map((name) => ` "$RUNNER_TEMP/${gate}-\${TARGET_SHA}-${name}"`).join("")} <<'NODE'
+          const fs = require("node:fs");
+          const [safe, ...events] = process.argv.slice(2);
+          const required = new Set(${JSON.stringify(symbols)});
+          const trace = [];
+          const recordOutcome = process.env.RECORD_OUTCOME;
+          if (recordOutcome === "success") {
+            for (const path of events) for (const line of fs.readFileSync(path, "utf8").split("\\n")) {
+              if (!line) continue;
+              const event = JSON.parse(line);
+              if (event.Test && required.has(event.Test)) trace.push({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed });
+            }
+            for (const name of required) if (!trace.some((event) => event.Test === name && event.Action === "pass")) throw new Error("required sanitized test missing or nonpass");
+          }
+          fs.writeFileSync(safe + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runUrl: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID, gate: "${gate}", recordOutcome }) + "\\n");
+          fs.writeFileSync(safe + "/trace/README.txt", "Sanitized test events only.\\n");
+          for (const name of ${JSON.stringify(traces)}) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\\n") + "\\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0 }) + "\\n");
+          NODE
+          if test "$RECORD_OUTCOME" = success; then${stderrNames.map((name) => ` test ! -s "$RUNNER_TEMP/${gate}-\${TARGET_SHA}-${name}";`).join("")} fi
+          expected_files=$(printf '%s\\n' "$safe/metadata.json" "$safe/trace/README.txt"${traces.map((trace) => ` "$safe/trace/${trace}"`).join("")})
+          actual_files=$(find "$safe" -type f -print | sort)
+          test "$actual_files" = "$expected_files"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\\s*:|sub2api-host-v1 |"secrets"\\s*:'
+          for evidence_file in "$safe/metadata.json" "$safe/trace/README.txt"${traces.map((trace) => ` "$safe/trace/${trace}"`).join("")}; do
+            if grep -qE "$forbidden" "$evidence_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled`;
+}
+
+describe("Task10 CI release candidate contracts", () => {
+  it("has unique bounded workflow job slices and no CI-side release authority", () => {
+    expect(() => workflowJobs(workflow)).not.toThrow();
+    // Static defense-in-depth; top-level contents: read and no actions: write remain authoritative.
+    expect(workflow).toMatch(/^permissions:\n  contents: read$/m);
+    expect(workflow).not.toMatch(/^  actions:\s*write$/m);
+    expect(workflow).not.toMatch(/softprops\/action-gh-release|ncipollo\/release-action|marvinpinto\/action-automatic-releases|actions\/create-release|upload-release-asset|gh\s+release|gh\s+api[^\n]*(POST|PATCH|DELETE)[^\n]*\/(releases|uploads)|(?:POST|PATCH|DELETE)[^\n]*\/(releases|uploads)|contents:\s*write/);
   });
 
-  it("prepares the required offline OpenSSH environment without contacting a VPS", () => {
-    expect(workflow).toMatch(/apt-get install[^\n]*openssh-server/);
-    expect(workflow).toMatch(/command -v sshd/);
-    const prerequisite = workflow.indexOf("Prepare offline OpenSSH prerequisites");
-    expect(prerequisite).toBeGreaterThan(workflow.indexOf("Test Host controller"));
-    expect(prerequisite).toBeGreaterThan(workflow.indexOf("Race-test Host controller"));
+  it("matches the complete exact target-release candidate job", () => {
+    expect(normalized(workflowJobs(workflow).get("target-release") ?? "")).toBe(normalized(expectedTargetReleaseJob));
   });
 
-  it("assigns provider-runtime race coverage exclusively to its dedicated job", () => {
-    const hostStart = workflow.indexOf("  host-controller:");
-    const hostEnd = workflow.indexOf("  engine-graph:", hostStart);
-    const hostJob = workflow.slice(hostStart, hostEnd);
-    const targetPackage = "github.com/c-w-xiaohei/sub2api-deploy/internal/integration/providerruntime";
-
-    expect(hostJob).toMatch(
-      /^\s*package_file="\$RUNNER_TEMP\/host-controller-packages\.txt"\s*$/m,
-    );
-    expect(hostJob).toContain('if ! go list ./internal/... ./cmd/... > "$package_file"; then');
-    expect(hostJob).toContain("exit 1");
-    expect(hostJob).toContain('mapfile -t packages < "$package_file"');
-    expect(hostJob).toContain('rm -f "$package_file"');
-    expect(hostJob).not.toContain("mapfile -t packages < <(go list ./internal/... ./cmd/...)");
-    expect(hostJob.indexOf('if ! go list ./internal/... ./cmd/... > "$package_file"; then')).toBeLessThan(
-      hostJob.indexOf('mapfile -t packages < "$package_file"'),
-    );
-    expect(hostJob.indexOf('mapfile -t packages < "$package_file"')).toBeLessThan(
-      hostJob.indexOf('rm -f "$package_file"'),
-    );
-    expect(hostJob.indexOf('rm -f "$package_file"')).toBeLessThan(
-      hostJob.indexOf('go test -race -count=1 "${filtered[@]}"'),
-    );
-    expect(hostJob).toContain(`target_package=\"${targetPackage}\"`);
-    expect(hostJob).toContain('if [[ "$package" == "$target_package" ]]; then');
-    expect(hostJob).toContain("found=true");
-    expect(hostJob).toContain("filtered=()");
-    expect(hostJob).toContain('filtered+=("$package")');
-    expect(hostJob).toContain('test "$found" = true');
-    expect(hostJob).toContain('test "${#filtered[@]}" -gt 0');
-    expect(hostJob).toContain('go test -race -count=1 "${filtered[@]}"');
-    expect(hostJob).not.toContain("go test -race -count=1 ./internal/... ./cmd/...");
-
-    const runtimeStart = workflow.indexOf("  provider-runtime:");
-    expect(runtimeStart).toBeGreaterThanOrEqual(0);
-    const runtimeJob = workflow.slice(runtimeStart);
-    expect(runtimeJob).toContain("go test -race -json -count=1 -timeout=15m -run \"$tests\" ./internal/integration/providerruntime");
-  });
-
-  it("records fixed candidate tests and fails skipped or absent evidence", () => {
-    for (const symbol of [
-      "TestRegisterFoundationGraph",
-      "TestRegisterPreservesComputedUpstashOutputs",
-      "TestConfigAndHostCheckPreservePropertyClassesWithoutEffects",
-      "TestRunUsesFixedSSHArgvAndFramedStdin",
-      "TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry",
-      "TestStdioProcessExitsAfterOneFrameAndRejectsTwo",
-      "TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi",
+  it("requires every diagnostic evidence upload to follow its bounded sanitized finalization", () => {
+    const jobs = workflowJobs(workflow);
+    for (const [id, uploadName, artifactName, gate, recordID, eventNames, stderrNames, traces, symbols, guard] of [
+      ["host-controller", "Upload controller evidence", "controller-evidence", "controller", "record-controller", ["events.jsonl"], ["stderr.log"], ["controller.jsonl"], ["TestRegisterFoundationGraph", "TestRegisterPreservesComputedUpstashOutputs", "TestConfigAndHostCheckPreservePropertyClassesWithoutEffects", "TestRunUsesFixedSSHArgvAndFramedStdin", "TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry", "TestStdioProcessExitsAfterOneFrameAndRejectsTwo", "TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi"], "always() && matrix.arch == 'amd64'"],
+      ["engine-graph", "Upload engine-graph evidence", "engine-graph-evidence", "engine-graph", "record-engine-graph", ["events.jsonl"], ["stderr.log"], ["engine-graph.jsonl"], ["TestEngineGraphFailureStopsPublication", "TestEngineGraphReadyPublishesAfterOrderedHosts", "TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication", "TestEngineConfiguredServerCountZero", "TestEngineConfiguredServerCountOneTwo", "TestEngineAppPlacementOneReadyFailure", "TestEngineManagedUpstashPreviewPreservesComputedSecretProjection", "TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor", "TestEngineManagedUpstashStateIsProtectedAndRetained"], "always()"],
+      ["provider-ssh", "Upload provider-ssh evidence", "provider-ssh-evidence", "provider-ssh", "record-provider-ssh", ["events.jsonl"], ["stderr.log"], ["provider-ssh.jsonl"], ["TestProviderProcessUsesScriptedSSHTransport", "TestProtocolFrameBoundaries", "TestLoopbackStrictKnownHostAndOptionTerminator"], "always()"],
+      ["provider-runtime", "Upload provider-runtime evidence", "provider-runtime-evidence", "provider-runtime", "record-provider-runtime", ["normal-events.jsonl", "race-events.jsonl"], ["stderr.log"], ["normal.jsonl", "race.jsonl"], ["TestProviderProcessReachesSharedTemporaryRuntimeServe", "TestProviderLifecycleWithHostProcessTempRuntime"], "always()"],
+      ["provider-import", "Upload provider-import evidence", "provider-import-evidence", "provider-import", "record-provider-import", ["events.jsonl"], ["stderr.log"], ["test.jsonl"], ["TestEngineImportPreviewIsNoOpOrAcceptedDiff"], "always()"],
     ]) {
-      expect(workflow).toContain(symbol);
+      const job = jobs.get(id);
+      expect(job, `${id} job`).toBeDefined();
+      expect(job).toContain(`id: ${recordID}`);
+      const record = jobSteps(job ?? "").find((step) => step.source.includes(`id: ${recordID}`));
+      expect(record, `${id} record step`).toBeDefined();
+      for (const rawName of [...eventNames, ...stderrNames]) {
+        const raw = `$RUNNER_TEMP/${gate}-\${TARGET_SHA}-${rawName}`;
+        expect(record?.source).toContain(raw);
+        expect(record?.source).toMatch(new RegExp(`(?:[A-Za-z_][A-Za-z0-9_]*=\")?${raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\"?`));
+        expect(record?.source).toContain(`> "$${rawName.endsWith("stderr.log") ? "stderr" : "events"}"`);
+      }
+      expect(job).toContain(expectedFinalization(gate, recordID, eventNames, stderrNames, traces, symbols, guard));
+      const finalization = job?.indexOf(`id: finalize-${gate}`) ?? -1;
+      const uploads = jobSteps(job ?? "").filter((step) => step.source.includes("uses: actions/upload-artifact@v4"));
+      const evidenceUploads = uploads.filter((step) => step.name === uploadName);
+      expect(evidenceUploads, `${id} named evidence upload`).toHaveLength(1);
+      const evidenceUpload = evidenceUploads[0];
+      expect(evidenceUpload?.source).toContain(`if: ${guard} && steps.finalize-${gate}.outcome == 'success'`);
+      expect(evidenceUpload?.source).toContain(`name: ${artifactName}-\${{ env.TARGET_SHA }}`);
+      expect(evidenceUpload?.source).toContain(`path: \${{ runner.temp }}/${gate}-safe-\${{ env.TARGET_SHA }}`);
+      expect(evidenceUpload?.source).toContain("if-no-files-found: error");
+      for (const upload of uploads) {
+        if (upload.name !== "Upload Host controller binaries") {
+          expect(upload.source).toContain(`path: \${{ runner.temp }}/${gate}-safe-\${{ env.TARGET_SHA }}`);
+        }
+      }
+      const uploadNameIndex = job?.indexOf(`- name: ${uploadName}`) ?? -1;
+      const upload = uploadNameIndex;
+      expect(finalization).toBeGreaterThanOrEqual(0);
+      expect(uploadNameIndex).toBeGreaterThan(finalization);
+      expect(upload).toBeGreaterThan(finalization);
     }
-    expect(workflow).toContain("go test -json");
-    expect(workflow).toContain('event.Action === "skip"');
-    expect(workflow).toContain('event.Action === "pass"');
-    expect(workflow).toContain('event.Action === "fail"');
-    expect(workflow).toContain("required test did not pass");
-    expect(workflow).toContain("test_status=$?");
-    expect(workflow).toContain('test "$test_status" -eq 0');
-  });
-
-  it("uploads SHA-bound JSON events and a common trace intake", () => {
-    expect(workflow).toContain("evidence/${TARGET_SHA}");
-    expect(workflow).toContain("trace/");
-    expect(workflow).toMatch(/name:\s*controller-evidence-\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
-    expect(workflow).toContain("events.jsonl");
-    expect(workflow).toContain("metadata.json");
-    expect(workflow).toContain("if: always() && matrix.arch == 'amd64'");
-    const metadata = workflow.indexOf("metadata.json");
-    const events = workflow.indexOf("go test -json");
-    const parser = workflow.indexOf("required test did not pass");
-    expect(metadata).toBeLessThan(events);
-    expect(workflow.indexOf("trace/README.txt")).toBeLessThan(events);
-    expect(parser).toBeGreaterThan(events);
-  });
-
-  it("runs the exact-SHA engine-graph gate with every implemented engine test", () => {
-    for (const symbol of [
-      "TestEngineGraphFailureStopsPublication",
-      "TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor",
-      "TestEngineManagedUpstashStateIsProtectedAndRetained",
-      "TestEngineGraphReadyPublishesAfterOrderedHosts",
-      "TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication",
-      "TestEngineConfiguredServerCountZero",
-      "TestEngineConfiguredServerCountOneTwo",
-      "TestEngineAppPlacementOneReadyFailure",
-      "TestEngineManagedUpstashPreviewPreservesComputedSecretProjection",
-    ]) {
-      expect(workflow).toContain(symbol);
-    }
-
-    expect(workflow).toContain("engine-graph");
-    expect(workflow).toContain("go test -json");
-    expect(workflow).toContain('event.Action === "skip"');
-    expect(workflow).toContain('event.Action === "pass"');
-    expect(workflow).toContain('event.Action === "fail"');
-    expect(workflow).toContain("required test did not pass");
-    expect(workflow).toContain("test_status=$?");
-    expect(workflow).toContain('test "$test_status" -eq 0');
-  });
-
-  it("publishes engine-graph JSON evidence and trace under its exact target SHA", () => {
-    const gate = workflow.indexOf("engine-graph");
-    expect(gate).toBeGreaterThanOrEqual(0);
-
-    expect(workflow).toContain('sha: process.env.TARGET_SHA');
-    expect(workflow).toContain('gate: "engine-graph"');
-    expect(workflow).toContain("evidence/${TARGET_SHA}");
-    expect(workflow).toMatch(
-      /^\s*(?:export\s+)?ENGINE_GRAPH_TRACE_DIR\s*=\s*(?:\$\{GITHUB_WORKSPACE\}\/evidence\/\$\{TARGET_SHA\}\/trace|"\$\{GITHUB_WORKSPACE\}\/evidence\/\$\{TARGET_SHA\}\/trace"|'\$\{GITHUB_WORKSPACE\}\/evidence\/\$\{TARGET_SHA\}\/trace')\s*$/m,
-    );
-    expect(workflow).toMatch(
-      /(?:export\s+ENGINE_GRAPH_TRACE_DIR|ENGINE_GRAPH_TRACE_DIR\s*=\s*[^\n]*go test -json|env:[\s\S]{0,160}ENGINE_GRAPH_TRACE_DIR)[\s\S]*go test -json/,
-    );
-    expect(workflow).toContain("events.jsonl");
-    expect(workflow).toContain("metadata.json");
-    const traceFindLine = workflow.split("\n").find((line) => line.includes('find "$ENGINE_GRAPH_TRACE_DIR"'));
-    expect(traceFindLine).toBeDefined();
-    expect(traceFindLine).toContain("-name '*.jsonl'");
-    expect(workflow).toContain('test -n "$trace_files"');
-    expect(workflow).toContain('test -s "$trace_file"');
-    expect(workflow).toMatch(/name:\s*engine-graph-evidence-\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
-    expect(workflow).toMatch(/path:\s*evidence\/\$\{\{\s*env\.TARGET_SHA\s*\}\}\//);
-  });
-
-  it("requires a distinct exact-SHA provider-ssh evidence job", () => {
-    const start = workflow.indexOf("  provider-ssh:");
-    expect(start).toBeGreaterThanOrEqual(0);
-    const nextJobMatch = /\n  [a-z][a-z0-9-]*:\s*\n/g;
-    nextJobMatch.lastIndex = start + 3;
-    const nextJobResult = nextJobMatch.exec(workflow);
-    const nextJob = nextJobResult?.index ?? -1;
-    const job = workflow.slice(start, nextJob < 0 ? workflow.length : nextJob);
-
-    expect(job).toContain("TestProviderProcessUsesScriptedSSHTransport");
-    expect(job).toContain("TestProtocolFrameBoundaries");
-    expect(job).toContain("TestLoopbackStrictKnownHostAndOptionTerminator");
-    expect(job).toContain("go test -json");
-    expect(job).toContain('event.Action === "skip"');
-    expect(job).toContain('event.Action === "fail"');
-    expect(job).toContain('event.Action === "pass"');
-    expect(job).toContain('result ?? "absent"');
-    expect(job).toContain("required test did not pass");
-    expect(job).toContain("test_status=$?");
-    expect(job).toContain('test "$test_status" -eq 0');
-
-    expect(job).toContain("openssh-server");
-    expect(job).toContain("command -v sshd");
-    expect(job).toMatch(/\[\[\s+"\$TARGET_SHA"\s+=~\s+\^\[0-9a-f\]\{40\}\$\s+\]\]/);
-    expect(job).toMatch(/ref:\s*\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
-    expect(job).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
-
-    expect(job).toContain('gate: "provider-ssh"');
-    expect(job).toContain("provider-ssh-evidence-${{ env.TARGET_SHA }}");
-    expect(job).toContain("evidence/${{ env.TARGET_SHA }}/");
-    expect(job).toContain("events.jsonl");
-    expect(job).toContain("metadata.json");
-    expect(job).toContain("trace/");
-  });
-
-  it("requires a distinct exact-SHA provider-runtime evidence job", () => {
-    const start = workflow.indexOf("  provider-runtime:");
-    expect(start).toBeGreaterThanOrEqual(0);
-    const nextJobMatch = /\n  [a-z][a-z0-9-]*:\s*\n/g;
-    nextJobMatch.lastIndex = start + 3;
-    const nextJobResult = nextJobMatch.exec(workflow);
-    const nextJob = nextJobResult?.index ?? -1;
-    const job = workflow.slice(start, nextJob < 0 ? workflow.length : nextJob);
-
-    expect(job).toContain('go-version: "1.25.11"');
-    expect(job).toContain("go mod verify");
-    expect(job).toContain("openssh-server");
-    expect(job).toContain("command -v sshd");
-    expect(job).toMatch(/\[\[\s+"\$TARGET_SHA"\s+=~\s+\^\[0-9a-f\]\{40\}\$\s+\]\]/);
-    expect(job).toMatch(/ref:\s*\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
-    expect(job).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
-
-    for (const symbol of [
-      "TestProviderProcessReachesSharedTemporaryRuntimeServe",
-      "TestProviderLifecycleWithHostProcessTempRuntime",
-    ]) {
-      expect(job).toContain(symbol);
-    }
-    expect(job).toContain(
-      "tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime)$'",
-    );
-    expect(job).toMatch(/^\s*timeout-minutes:\s*30\s*$/m);
-    expect(job).toMatch(
-      /^\s*normal_events="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-normal-events\.jsonl"\s*$/m,
-    );
-    expect(job).toMatch(
-      /^\s*normal_stderr="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-normal-stderr\.log"\s*$/m,
-    );
-    expect(job).toMatch(
-      /^\s*race_events="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-race-events\.jsonl"\s*$/m,
-    );
-    expect(job).toMatch(
-      /^\s*race_stderr="\$RUNNER_TEMP\/provider-runtime-\$\{TARGET_SHA\}-race-stderr\.log"\s*$/m,
-    );
-    expect(job).toMatch(
-      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$normal_events" 2> "\$normal_stderr"\n\s*normal_status=\$\?/,
-    );
-    expect(job).toMatch(
-      /go test -race -json -count=1 -timeout=15m -run "\$tests" \.\/internal\/integration\/providerruntime > "\$race_events" 2> "\$race_stderr"\n\s*race_status=\$\?/,
-    );
-    expect(job).toMatch(
-      /extract_sanitized_trace "\$normal_events" "\$evidence\/trace\/normal\.jsonl"\n\s*normal_trace_status=\$\?/,
-    );
-    expect(job).toMatch(
-      /extract_sanitized_trace "\$race_events" "\$evidence\/trace\/race\.jsonl"\n\s*race_trace_status=\$\?/,
-    );
-    expect(job).toContain('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"');
-    expect(job).not.toMatch(/go test[^\n]*\.\/\.\./);
-
-    for (const [parser, events, status] of [
-      ["verify_normal_required_tests", "normal_events", "normal_status"],
-      ["verify_race_required_tests", "race_events", "race_status"],
-    ]) {
-      const parserCall = `${parser} "$${events}" "$${status}"`;
-      const statusGate = `test "$${status}" -eq 0`;
-      const parserStatus = status.replace("_status", "_parser_status");
-      const marker = parser === "verify_normal_required_tests" ? "NODE_NORMAL" : "NODE_RACE";
-      expect(job).toContain(`${parser}()`);
-      expect(job).toContain(`node - "$1" <<'${marker}'`);
-      expect(job).toContain(marker);
-      expect(job).toMatch(new RegExp(String.raw`${parser}\(\)\s*\{\s*node - "\$1" <<'${marker}'`));
-      const nodeBodyMatch = job.match(
-        new RegExp(String.raw`^\s*node - "\$1" <<'${marker}'\s*$\n([\s\S]*?)^\s*${marker}\s*$`, "m"),
-      );
-      expect(nodeBodyMatch).not.toBeNull();
-      const body = nodeBodyMatch?.[1] ?? "";
-      expect(body).toContain("JSON.parse(line)");
-      expect(body).toContain('if (!line) continue;');
-      expect(body).toContain("process.argv[2]");
-      expect(body).toContain(
-        'const terminal = new Map(required.map((name) => [name, "absent"]));',
-      );
-      expect(body).toContain("for (const name of required)");
-      expect(body).toMatch(
-        /if \(event\.Action === "skip" \|\| event\.Action === "fail"\) \{[\s\S]*?throw new Error/,
-      );
-      expect(body).toMatch(/if \(event\.Action === "pass"\) terminal\.set\(event\.Test, "pass"\);/);
-      expect(body).toContain('if (result !== "pass")');
-      expect(body).toContain("required test did not pass");
-      expect(body).toContain("if (!event.Test || !required.includes(event.Test)) continue;");
-      expect(job).toMatch(
-        new RegExp(
-          String.raw`${marker}\s*\n\s*parser_status=\$\?\s*\n\s*if test "\$parser_status" -ne 0; then\s*\n\s*return "\$parser_status"\s*\n\s*fi\s*\n\s*test "\$2" -eq 0`,
-        ),
-      );
-      expect(job.indexOf(parserCall)).toBeGreaterThan(job.indexOf(`${status}=$?`));
-      expect(job.indexOf(statusGate)).toBeGreaterThan(job.indexOf(parserCall));
-      expect(job).toContain(`${parserCall}\n          ${parserStatus}=$?`);
-    }
-
-    expect(job).toContain('evidence="evidence/${TARGET_SHA}/provider-runtime"');
-    expect(job).toContain('const root = `evidence/${process.env.TARGET_SHA}/provider-runtime`');
-    expect(job).toContain('fs.writeFileSync(`${root}/metadata.json`');
-    expect(job).toContain('sha: process.env.TARGET_SHA');
-    expect(job).toContain("runUrl: process.env.GITHUB_RUN_URL");
-    expect(job).toContain('gate: "provider-runtime"');
-    expect(job).toContain("trace/README.txt");
-    expect(job).toMatch(/\bsanitized fixture traces contain\b/i);
-    expect(job).toContain("no secrets or raw request frames");
-    for (const [events, sanitized] of [
-      ["normal_events", "normal.jsonl"],
-      ["race_events", "race.jsonl"],
-    ]) {
-      const extract = `extract_sanitized_trace "$${events}" "$evidence/trace/${sanitized}"`;
-      expect(job).toContain("extract_sanitized_trace()");
-      expect(job).toContain(extract);
-      expect(job.indexOf(extract)).toBeGreaterThan(job.indexOf("race_status=$?"));
-      expect(job.indexOf(extract)).toBeLessThan(
-        job.indexOf('verify_normal_required_tests "$normal_events" "$normal_status"'),
-      );
-    }
-    expect(job).toContain("extract_sanitized_trace()");
-    expect(job).toContain('node - "$1" "$2" <<\'NODE_TRACE\'');
-    const traceBodyMatch = job.match(
-      /^\s*node - "\$1" "\$2" <<'NODE_TRACE'\s*$\n([\s\S]*?)^\s*NODE_TRACE\s*$/m,
-    );
-    expect(traceBodyMatch).not.toBeNull();
-    const traceBody = traceBodyMatch?.[1] ?? "";
-    expect(traceBody).toContain("process.argv[2]");
-    expect(traceBody).toContain("process.argv[3]");
-    expect(traceBody).toContain("JSON.parse(line)");
-    expect(traceBody).toContain('if (!line) continue;');
-    expect(traceBody).toContain("if (!event.Test || !required.has(event.Test)) continue;");
-    expect(traceBody).toContain("{ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed }");
-    expect(traceBody).not.toContain("Output");
-    expect(traceBody).not.toContain("...");
-    expect(job).toContain(
-      'expected_files=$(printf \'%s\\n\' "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/normal.jsonl" "$evidence/trace/race.jsonl")',
-    );
-    expect(job).toContain('actual_files=$(find "$evidence" -type f -print | sort)');
-    expect(job).toContain('test "$actual_files" = "$expected_files" || exit 1');
-    expect(job).toContain('for trace_file in "$evidence/trace/normal.jsonl" "$evidence/trace/race.jsonl"; do');
-    expect(job).toContain('test -s "$trace_file" || exit 1');
-    expect(job).toContain(
-      "forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|\\\"authorization\\\"\\s*:|sub2api-host-v1 |\\\"secrets\\\"\\s*:'",
-    );
-    expect(job).toMatch(/if grep -Eq "\$forbidden" "\$trace_file"; then\s*exit 1\s*fi/);
-    expect(job.indexOf('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"')).toBeGreaterThan(
-      job.indexOf('verify_race_required_tests "$race_events" "$race_status"'),
-    );
-    expect(job.indexOf('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"')).toBeLessThan(
-      job.indexOf('test "$normal_status" -eq 0'),
-    );
-    for (const status of [
-      "normal_trace_status",
-      "race_trace_status",
-      "trace_validation_status",
-      "normal_parser_status",
-      "normal_status",
-      "race_parser_status",
-      "race_status",
-    ]) {
-      expect(job.indexOf(`test "$${status}" -eq 0`)).toBeGreaterThan(
-        job.indexOf('rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"'),
-      );
-    }
-
-    const upload = job.match(
-      /- name: Upload provider-runtime evidence[\s\S]*?if: always\(\)[\s\S]*?uses: actions\/upload-artifact@v4[\s\S]*?name: provider-runtime-evidence-\$\{\{ env\.TARGET_SHA \}\}\s*$[\s\S]*?path: evidence\/\$\{\{ env\.TARGET_SHA \}\}\/provider-runtime\s*$[\s\S]*?if-no-files-found: error/m,
-    );
-    expect(upload).not.toBeNull();
-    expect(job).not.toContain("continue-on-error");
-  });
-
-  it("requires a distinct exact-SHA provider-import evidence job with sanitized evidence only", () => {
-    const start = workflow.indexOf("  provider-import:");
-    expect(start).toBeGreaterThanOrEqual(0);
-    const nextJobMatch = /\n  [a-z][a-z0-9-]*:\s*\n/g;
-    nextJobMatch.lastIndex = start + 3;
-    const nextJobResult = nextJobMatch.exec(workflow);
-    const nextJob = nextJobResult?.index ?? workflow.length;
-    const job = workflow.slice(start, nextJob);
-
-    expect(job).toMatch(/^\s*timeout-minutes:\s*30\s*$/m);
-    expect(job).toContain('go-version: "1.25.11"');
-    expect(job).toContain("go mod verify");
-    expect(job).toContain("openssh-server");
-    expect(job).toContain("command -v sshd");
-    expect(job).toMatch(/\[\[\s+"\$TARGET_SHA"\s+=~\s+\^\[0-9a-f\]\{40\}\$\s+\]\]/);
-    expect(job).toMatch(/ref:\s*\$\{\{\s*env\.TARGET_SHA\s*\}\}/);
-    expect(job).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
-
-    expect(job).toContain("TestEngineImportPreviewIsNoOpOrAcceptedDiff");
-    expect(job).toContain("test_name='TestEngineImportPreviewIsNoOpOrAcceptedDiff'");
-    expect(job).toContain(
-      "tests='^TestEngineImportPreviewIsNoOpOrAcceptedDiff$'",
-    );
-    expect(job).toContain("./internal/integration/providerimport");
-    expect(job).toMatch(
-      /go test -json -count=1 -timeout=8m -run "\$tests" \.\/internal\/integration\/providerimport > "\$events" 2> "\$stderr"\n\s*test_status=\$\?/,
-    );
-    expect(job).toMatch(/^\s*events="\$RUNNER_TEMP\/provider-import-\$\{TARGET_SHA\}-events\.jsonl"\s*$/m);
-    expect(job).toMatch(/^\s*stderr="\$RUNNER_TEMP\/provider-import-\$\{TARGET_SHA\}-stderr\.log"\s*$/m);
-    expect(job).toContain("JSON.parse(line)");
-    expect(job).toContain('if (!line) continue;');
-    expect(job).toContain('event.Action === "skip" || event.Action === "fail"');
-    expect(job).toContain('terminal !== "pass"');
-    expect(job).toContain('if (status === 0 && fs.readFileSync(stderrPath, "utf8") !== "")');
-    expect(job).toContain('{ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed }');
-    expect(job).not.toContain("go test -race");
-    expect(job).toMatch(
-      /extract_sanitized_trace\(\)\s*\{\s*node - "\$1" "\$2" <<'PROVIDER_IMPORT_TRACE'[\s\S]*?JSON\.parse\(line\)[\s\S]*?\{ Action: event\.Action, Test: event\.Test, Elapsed: event\.Elapsed \}[\s\S]*?PROVIDER_IMPORT_TRACE\s*\}/,
-    );
-    expect(job).toMatch(
-      /node - "\$events" "\$stderr" <<'PROVIDER_IMPORT_PARSE'[\s\S]*?JSON\.parse\(line\)[\s\S]*?event\.Action === "skip" \|\| event\.Action === "fail"[\s\S]*?terminal !== "pass"[\s\S]*?PROVIDER_IMPORT_PARSE\s*\n\s*parser_status=\$\?/,
-    );
-
-    expect(job).toContain('evidence="evidence/${TARGET_SHA}/provider-import"');
-    expect(job).toContain('gate: "provider-import"');
-    expect(job).toContain("Sanitized test events contain no secrets or raw request frames.");
-    expect(job).toContain('"$evidence/trace/test.jsonl"');
-    expect(job).toContain('rm -f "$events" "$stderr"');
-    expect(job).toContain('expected_files=$(printf \'%s\\n\' "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/test.jsonl")');
-    expect(job).toContain('actual_files=$(find "$evidence" -type f -print | sort)');
-    expect(job).toContain('test "$actual_files" = "$expected_files" || exit 1');
-    expect(job).toContain("forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|\\\"authorization\\\"\\s*:|sub2api-host-v1 |\\\"secrets\\\"\\s*:'");
-    expect(job).toMatch(/if grep -qE "\$forbidden" "\$evidence_file"; then\s*exit 1\s*fi/);
-    expect(job).toContain('name: provider-import-evidence-${{ env.TARGET_SHA }}');
-    expect(job).toContain('path: evidence/${{ env.TARGET_SHA }}/provider-import');
-    expect(job).toContain("if-no-files-found: error");
-    expect(job.indexOf('rm -f "$events" "$stderr"')).toBeGreaterThan(job.indexOf('extract_sanitized_trace'));
-    expect(job.indexOf('rm -f "$events" "$stderr"')).toBeGreaterThan(job.indexOf("parser_status=$?"));
-    expect(job.indexOf('test "$test_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
-    expect(job.indexOf('test "$trace_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
-    expect(job.indexOf('test "$parser_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
-    expect(job.indexOf('test "$evidence_status" -eq 0')).toBeGreaterThan(job.indexOf('rm -f "$events" "$stderr"'));
   });
 });
