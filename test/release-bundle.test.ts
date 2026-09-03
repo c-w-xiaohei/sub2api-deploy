@@ -202,6 +202,20 @@ describe("target release bundle", () => {
     });
   });
 
+  it("TestCandidateReleaseIdentityIsProgramConsumable", () => {
+    const commit = "0123456789abcdef0123456789abcdef01234567";
+    const release = `sub2api-host-controller@sha256:${sha256(Buffer.from(`sub2api-host-controller:${commit}`))}`;
+    const workflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+    const program = readFileSync(join(root, "internal", "program", "program.go"), "utf8");
+
+    expect(release).toMatch(/^sub2api-host-controller@sha256:[0-9a-f]{64}$/);
+    expect(program).toContain("releaseArtifactPattern");
+    expect(program).toContain("@sha256:[0-9a-f]{64}");
+    expect(workflow).toContain('release_id="sub2api-host-controller@sha256:$(printf \'sub2api-host-controller:%s\' "$TARGET_SHA" | sha256sum | cut -d \' \' -f1)"');
+    expect(workflow).toContain('bash scripts/release-bundle.sh assemble "$bundle" "$components" "$release_id"');
+    expect(workflow).not.toContain('bash scripts/release-bundle.sh assemble "$bundle" "$components" "$TARGET_SHA"');
+  });
+
   it("TestTargetSupportedReleaseBundleIsConsumableByProviderCreate", () => {
     withBundle((bundle) => {
       bundle.archive();
