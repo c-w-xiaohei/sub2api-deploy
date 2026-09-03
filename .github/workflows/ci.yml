@@ -52,7 +52,7 @@ jobs:
       - name: Verify target Environment Program contract
         run: |
           npm ci
-          npx vitest run test/environment-program-target.test.ts
+          npx vitest run test/environment-program-target.test.ts test/controller-ci.test.ts test/release-ci.test.ts
 
       - name: Verify repository
         run: bash scripts/verify-release.sh
@@ -87,10 +87,12 @@ jobs:
         run: go mod verify
 
       - name: Record required controller test evidence
+        id: record-controller
         if: matrix.arch == 'amd64'
         run: |
-          evidence="evidence/${TARGET_SHA}"
-          mkdir -p "$evidence/trace"
+          events="$RUNNER_TEMP/controller-${TARGET_SHA}-events.jsonl"
+          stderr="$RUNNER_TEMP/controller-${TARGET_SHA}-stderr.log"
+          mkdir -p "evidence/${TARGET_SHA}/trace"
           TARGET_SHA="$TARGET_SHA" GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" node <<'NODE'
           const fs = require("node:fs");
           const root = `evidence/${process.env.TARGET_SHA}`;
@@ -103,12 +105,12 @@ jobs:
           NODE
           tests='^(TestRegisterFoundationGraph|TestRegisterPreservesComputedUpstashOutputs|TestConfigAndHostCheckPreservePropertyClassesWithoutEffects|TestRunUsesFixedSSHArgvAndFramedStdin|TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry|TestStdioProcessExitsAfterOneFrameAndRejectsTwo|TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi)$'
           set +e
-          go test -json -count=1 -run "$tests" ./internal/... ./cmd/... > "$evidence/events.jsonl"
+          go test -json -count=1 -run "$tests" ./internal/... ./cmd/... > "$events" 2> "$stderr"
           test_status=$?
           set -e
           TARGET_SHA="$TARGET_SHA" REQUIRED_TESTS="$tests" node <<'NODE'
           const fs = require("node:fs");
-          const path = `evidence/${process.env.TARGET_SHA}/events.jsonl`;
+           const path = process.env.RUNNER_TEMP + `/controller-${process.env.TARGET_SHA}-events.jsonl`;
           const required = process.env.REQUIRED_TESTS.slice(2, -2).split("|");
           const terminal = new Map();
           for (const line of fs.readFileSync(path, "utf8").split("\n")) {
@@ -126,12 +128,50 @@ jobs:
           NODE
           test "$test_status" -eq 0
 
-      - name: Upload controller evidence
+      - name: Finalize controller evidence
+        id: finalize-controller
         if: always() && matrix.arch == 'amd64'
+        env:
+          RECORD_OUTCOME: ${{ steps.record-controller.outcome }}
+          TARGET_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          safe="$RUNNER_TEMP/controller-safe-${TARGET_SHA}"
+          mkdir -p "$safe/trace"
+          trap 'rc=$?; rm -f "$RUNNER_TEMP/controller-${TARGET_SHA}-events.jsonl" "$RUNNER_TEMP/controller-${TARGET_SHA}-stderr.log"; exit "$rc"' EXIT
+          TARGET_SHA="$TARGET_SHA" RECORD_OUTCOME="$RECORD_OUTCOME" node - "$safe" "$RUNNER_TEMP/controller-${TARGET_SHA}-events.jsonl" <<'NODE'
+          const fs = require("node:fs");
+          const [safe, ...events] = process.argv.slice(2);
+          const required = new Set(["TestRegisterFoundationGraph","TestRegisterPreservesComputedUpstashOutputs","TestConfigAndHostCheckPreservePropertyClassesWithoutEffects","TestRunUsesFixedSSHArgvAndFramedStdin","TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry","TestStdioProcessExitsAfterOneFrameAndRejectsTwo","TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi"]);
+          const trace = [];
+          const recordOutcome = process.env.RECORD_OUTCOME;
+          if (recordOutcome === "success") {
+            for (const path of events) for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+              if (!line) continue;
+              const event = JSON.parse(line);
+              if (event.Test && required.has(event.Test)) trace.push({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed });
+            }
+            for (const name of required) if (!trace.some((event) => event.Test === name && event.Action === "pass")) throw new Error("required sanitized test missing or nonpass");
+          }
+          fs.writeFileSync(safe + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runUrl: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID, gate: "controller", recordOutcome }) + "\n");
+          fs.writeFileSync(safe + "/trace/README.txt", "Sanitized test events only.\n");
+          for (const name of ["controller.jsonl"]) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\n") + "\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0, Status: "record-unavailable" }) + "\n");
+          NODE
+          if test "$RECORD_OUTCOME" = success; then test ! -s "$RUNNER_TEMP/controller-${TARGET_SHA}-stderr.log"; fi
+          expected_files=$(printf '%s\n' "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/controller.jsonl")
+          actual_files=$(find "$safe" -type f -print | sort)
+          test "$actual_files" = "$expected_files"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:'
+          for evidence_file in "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/controller.jsonl"; do
+            if grep -qE "$forbidden" "$evidence_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled || test "$RECORD_OUTCOME" = skipped
+
+      - name: Upload controller evidence
+        if: always() && matrix.arch == 'amd64' && steps.finalize-controller.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: controller-evidence-${{ env.TARGET_SHA }}
-          path: evidence/${{ env.TARGET_SHA }}/
+          path: ${{ runner.temp }}/controller-safe-${{ env.TARGET_SHA }}
           if-no-files-found: error
 
       - name: Test Host controller
@@ -212,8 +252,11 @@ jobs:
         run: go mod verify
 
       - name: Record required engine-graph test evidence
+        id: record-engine-graph
         run: |
           evidence="evidence/${TARGET_SHA}"
+          events="$RUNNER_TEMP/engine-graph-${TARGET_SHA}-events.jsonl"
+          stderr="$RUNNER_TEMP/engine-graph-${TARGET_SHA}-stderr.log"
           mkdir -p "$evidence/trace"
           TARGET_SHA="$TARGET_SHA" GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" node <<'NODE'
           const fs = require("node:fs");
@@ -228,7 +271,7 @@ jobs:
           tests='^(TestEngineGraphFailureStopsPublication|TestEngineGraphReadyPublishesAfterOrderedHosts|TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication|TestEngineConfiguredServerCountZero|TestEngineConfiguredServerCountOneTwo|TestEngineAppPlacementOneReadyFailure|TestEngineManagedUpstashPreviewPreservesComputedSecretProjection|TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor|TestEngineManagedUpstashStateIsProtectedAndRetained)$'
           export ENGINE_GRAPH_TRACE_DIR="${GITHUB_WORKSPACE}/evidence/${TARGET_SHA}/trace"
           set +e
-          go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$evidence/events.jsonl"
+          go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$events" 2> "$stderr"
           test_status=$?
           set -e
           trace_files="$(find "$ENGINE_GRAPH_TRACE_DIR" -type f -name '*.jsonl' -print)"
@@ -238,7 +281,7 @@ jobs:
           done <<< "$trace_files"
           TARGET_SHA="$TARGET_SHA" REQUIRED_TESTS="$tests" node <<'NODE'
           const fs = require("node:fs");
-          const path = `evidence/${process.env.TARGET_SHA}/events.jsonl`;
+           const path = process.env.RUNNER_TEMP + `/engine-graph-${process.env.TARGET_SHA}-events.jsonl`;
           const required = process.env.REQUIRED_TESTS.slice(2, -2).split("|");
           const terminal = new Map();
           for (const line of fs.readFileSync(path, "utf8").split("\n")) {
@@ -256,12 +299,50 @@ jobs:
           NODE
           test "$test_status" -eq 0
 
-      - name: Upload engine-graph evidence
+      - name: Finalize engine-graph evidence
+        id: finalize-engine-graph
         if: always()
+        env:
+          RECORD_OUTCOME: ${{ steps.record-engine-graph.outcome }}
+          TARGET_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          safe="$RUNNER_TEMP/engine-graph-safe-${TARGET_SHA}"
+          mkdir -p "$safe/trace"
+          trap 'rc=$?; rm -f "$RUNNER_TEMP/engine-graph-${TARGET_SHA}-events.jsonl" "$RUNNER_TEMP/engine-graph-${TARGET_SHA}-stderr.log"; exit "$rc"' EXIT
+          TARGET_SHA="$TARGET_SHA" RECORD_OUTCOME="$RECORD_OUTCOME" node - "$safe" "$RUNNER_TEMP/engine-graph-${TARGET_SHA}-events.jsonl" <<'NODE'
+          const fs = require("node:fs");
+          const [safe, ...events] = process.argv.slice(2);
+          const required = new Set(["TestEngineGraphFailureStopsPublication","TestEngineGraphReadyPublishesAfterOrderedHosts","TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication","TestEngineConfiguredServerCountZero","TestEngineConfiguredServerCountOneTwo","TestEngineAppPlacementOneReadyFailure","TestEngineManagedUpstashPreviewPreservesComputedSecretProjection","TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor","TestEngineManagedUpstashStateIsProtectedAndRetained"]);
+          const trace = [];
+          const recordOutcome = process.env.RECORD_OUTCOME;
+          if (recordOutcome === "success") {
+            for (const path of events) for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+              if (!line) continue;
+              const event = JSON.parse(line);
+              if (event.Test && required.has(event.Test)) trace.push({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed });
+            }
+            for (const name of required) if (!trace.some((event) => event.Test === name && event.Action === "pass")) throw new Error("required sanitized test missing or nonpass");
+          }
+          fs.writeFileSync(safe + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runUrl: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID, gate: "engine-graph", recordOutcome }) + "\n");
+          fs.writeFileSync(safe + "/trace/README.txt", "Sanitized test events only.\n");
+          for (const name of ["engine-graph.jsonl"]) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\n") + "\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0, Status: "record-unavailable" }) + "\n");
+          NODE
+          if test "$RECORD_OUTCOME" = success; then test ! -s "$RUNNER_TEMP/engine-graph-${TARGET_SHA}-stderr.log"; fi
+          expected_files=$(printf '%s\n' "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/engine-graph.jsonl")
+          actual_files=$(find "$safe" -type f -print | sort)
+          test "$actual_files" = "$expected_files"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:'
+          for evidence_file in "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/engine-graph.jsonl"; do
+            if grep -qE "$forbidden" "$evidence_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled || test "$RECORD_OUTCOME" = skipped
+
+      - name: Upload engine-graph evidence
+        if: always() && steps.finalize-engine-graph.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: engine-graph-evidence-${{ env.TARGET_SHA }}
-          path: evidence/${{ env.TARGET_SHA }}/
+          path: ${{ runner.temp }}/engine-graph-safe-${{ env.TARGET_SHA }}
           if-no-files-found: error
 
   provider-ssh:
@@ -294,8 +375,11 @@ jobs:
           command -v sshd
 
       - name: Record required provider-ssh test evidence
+        id: record-provider-ssh
         run: |
           evidence="evidence/${TARGET_SHA}"
+          events="$RUNNER_TEMP/provider-ssh-${TARGET_SHA}-events.jsonl"
+          stderr="$RUNNER_TEMP/provider-ssh-${TARGET_SHA}-stderr.log"
           mkdir -p "$evidence/trace"
           TARGET_SHA="$TARGET_SHA" GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" node <<'NODE'
           const fs = require("node:fs");
@@ -309,12 +393,12 @@ jobs:
           NODE
           tests='^(TestProviderProcessUsesScriptedSSHTransport|TestProtocolFrameBoundaries|TestLoopbackStrictKnownHostAndOptionTerminator)$'
           set +e
-          go test -json -count=1 -run "$tests" ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh > "$evidence/events.jsonl"
+          go test -json -count=1 -run "$tests" ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh > "$events" 2> "$stderr"
           test_status=$?
           set -e
           TARGET_SHA="$TARGET_SHA" REQUIRED_TESTS="$tests" node <<'NODE'
           const fs = require("node:fs");
-          const path = `evidence/${process.env.TARGET_SHA}/events.jsonl`;
+           const path = process.env.RUNNER_TEMP + `/provider-ssh-${process.env.TARGET_SHA}-events.jsonl`;
           const required = process.env.REQUIRED_TESTS.slice(2, -2).split("|");
           const terminal = new Map();
           for (const line of fs.readFileSync(path, "utf8").split("\n")) {
@@ -332,12 +416,50 @@ jobs:
           NODE
           test "$test_status" -eq 0
 
-      - name: Upload provider-ssh evidence
+      - name: Finalize provider-ssh evidence
+        id: finalize-provider-ssh
         if: always()
+        env:
+          RECORD_OUTCOME: ${{ steps.record-provider-ssh.outcome }}
+          TARGET_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          safe="$RUNNER_TEMP/provider-ssh-safe-${TARGET_SHA}"
+          mkdir -p "$safe/trace"
+          trap 'rc=$?; rm -f "$RUNNER_TEMP/provider-ssh-${TARGET_SHA}-events.jsonl" "$RUNNER_TEMP/provider-ssh-${TARGET_SHA}-stderr.log"; exit "$rc"' EXIT
+          TARGET_SHA="$TARGET_SHA" RECORD_OUTCOME="$RECORD_OUTCOME" node - "$safe" "$RUNNER_TEMP/provider-ssh-${TARGET_SHA}-events.jsonl" <<'NODE'
+          const fs = require("node:fs");
+          const [safe, ...events] = process.argv.slice(2);
+          const required = new Set(["TestProviderProcessUsesScriptedSSHTransport","TestProtocolFrameBoundaries","TestLoopbackStrictKnownHostAndOptionTerminator"]);
+          const trace = [];
+          const recordOutcome = process.env.RECORD_OUTCOME;
+          if (recordOutcome === "success") {
+            for (const path of events) for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+              if (!line) continue;
+              const event = JSON.parse(line);
+              if (event.Test && required.has(event.Test)) trace.push({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed });
+            }
+            for (const name of required) if (!trace.some((event) => event.Test === name && event.Action === "pass")) throw new Error("required sanitized test missing or nonpass");
+          }
+          fs.writeFileSync(safe + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runUrl: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID, gate: "provider-ssh", recordOutcome }) + "\n");
+          fs.writeFileSync(safe + "/trace/README.txt", "Sanitized test events only.\n");
+          for (const name of ["provider-ssh.jsonl"]) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\n") + "\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0, Status: "record-unavailable" }) + "\n");
+          NODE
+          if test "$RECORD_OUTCOME" = success; then test ! -s "$RUNNER_TEMP/provider-ssh-${TARGET_SHA}-stderr.log"; fi
+          expected_files=$(printf '%s\n' "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/provider-ssh.jsonl")
+          actual_files=$(find "$safe" -type f -print | sort)
+          test "$actual_files" = "$expected_files"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:'
+          for evidence_file in "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/provider-ssh.jsonl"; do
+            if grep -qE "$forbidden" "$evidence_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled || test "$RECORD_OUTCOME" = skipped
+
+      - name: Upload provider-ssh evidence
+        if: always() && steps.finalize-provider-ssh.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: provider-ssh-evidence-${{ env.TARGET_SHA }}
-          path: evidence/${{ env.TARGET_SHA }}/
+          path: ${{ runner.temp }}/provider-ssh-safe-${{ env.TARGET_SHA }}
           if-no-files-found: error
 
   provider-runtime:
@@ -371,6 +493,7 @@ jobs:
           command -v sshd
 
       - name: Record required provider-runtime test evidence
+        id: record-provider-runtime
         run: |
           evidence="evidence/${TARGET_SHA}/provider-runtime"
           mkdir -p "$evidence/trace"
@@ -453,16 +576,17 @@ jobs:
           NODE_TRACE
           }
 
-          normal_events="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal-events.jsonl"
-          normal_stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal-stderr.log"
+          events="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal-events.jsonl"
+          normal_events="$events"
+          stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-stderr.log"
           race_events="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race-events.jsonl"
-          race_stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race-stderr.log"
           set +e
-          go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerruntime > "$normal_events" 2> "$normal_stderr"
+          go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerruntime > "$events" 2> "$stderr"
           normal_status=$?
           set -e
           set +e
-          go test -race -json -count=1 -timeout=15m -run "$tests" ./internal/integration/providerruntime > "$race_events" 2> "$race_stderr"
+          events="$race_events"
+          go test -race -json -count=1 -timeout=15m -run "$tests" ./internal/integration/providerruntime > "$events" 2>> "$stderr"
           race_status=$?
           set -e
           set +e
@@ -490,7 +614,6 @@ jobs:
           REQUIRED_TESTS="$tests" verify_race_required_tests "$race_events" "$race_status"
           race_parser_status=$?
           set -e
-          rm -f "$normal_events" "$normal_stderr" "$race_events" "$race_stderr"
           test "$normal_trace_status" -eq 0
           test "$race_trace_status" -eq 0
           test "$trace_validation_status" -eq 0
@@ -499,12 +622,50 @@ jobs:
           test "$race_parser_status" -eq 0
           test "$race_status" -eq 0
 
-      - name: Upload provider-runtime evidence
+      - name: Finalize provider-runtime evidence
+        id: finalize-provider-runtime
         if: always()
+        env:
+          RECORD_OUTCOME: ${{ steps.record-provider-runtime.outcome }}
+          TARGET_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          safe="$RUNNER_TEMP/provider-runtime-safe-${TARGET_SHA}"
+          mkdir -p "$safe/trace"
+          trap 'rc=$?; rm -f "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal-events.jsonl" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race-events.jsonl" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-stderr.log"; exit "$rc"' EXIT
+          TARGET_SHA="$TARGET_SHA" RECORD_OUTCOME="$RECORD_OUTCOME" node - "$safe" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal-events.jsonl" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race-events.jsonl" <<'NODE'
+          const fs = require("node:fs");
+          const [safe, ...events] = process.argv.slice(2);
+          const required = new Set(["TestProviderProcessReachesSharedTemporaryRuntimeServe","TestProviderLifecycleWithHostProcessTempRuntime"]);
+          const trace = [];
+          const recordOutcome = process.env.RECORD_OUTCOME;
+          if (recordOutcome === "success") {
+            for (const path of events) for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+              if (!line) continue;
+              const event = JSON.parse(line);
+              if (event.Test && required.has(event.Test)) trace.push({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed });
+            }
+            for (const name of required) if (!trace.some((event) => event.Test === name && event.Action === "pass")) throw new Error("required sanitized test missing or nonpass");
+          }
+          fs.writeFileSync(safe + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runUrl: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID, gate: "provider-runtime", recordOutcome }) + "\n");
+          fs.writeFileSync(safe + "/trace/README.txt", "Sanitized test events only.\n");
+          for (const name of ["normal.jsonl","race.jsonl"]) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\n") + "\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0, Status: "record-unavailable" }) + "\n");
+          NODE
+          if test "$RECORD_OUTCOME" = success; then test ! -s "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-stderr.log"; fi
+          expected_files=$(printf '%s\n' "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/normal.jsonl" "$safe/trace/race.jsonl")
+          actual_files=$(find "$safe" -type f -print | sort)
+          test "$actual_files" = "$expected_files"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:'
+          for evidence_file in "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/normal.jsonl" "$safe/trace/race.jsonl"; do
+            if grep -qE "$forbidden" "$evidence_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled || test "$RECORD_OUTCOME" = skipped
+
+      - name: Upload provider-runtime evidence
+        if: always() && steps.finalize-provider-runtime.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: provider-runtime-evidence-${{ env.TARGET_SHA }}
-          path: evidence/${{ env.TARGET_SHA }}/provider-runtime
+          path: ${{ runner.temp }}/provider-runtime-safe-${{ env.TARGET_SHA }}
           if-no-files-found: error
 
   provider-import:
@@ -538,6 +699,7 @@ jobs:
           command -v sshd
 
       - name: Record required provider-import test evidence
+        id: record-provider-import
         run: |
           evidence="evidence/${TARGET_SHA}/provider-import"
           mkdir -p "$evidence/trace"
@@ -601,7 +763,6 @@ jobs:
           PROVIDER_IMPORT_PARSE
           parser_status=$?
           set -e
-          rm -f "$events" "$stderr"
           set +e
           (
             expected_files=$(printf '%s\n' "$evidence/metadata.json" "$evidence/trace/README.txt" "$evidence/trace/test.jsonl")
@@ -622,10 +783,157 @@ jobs:
           test "$evidence_status" -eq 0
           test "$test_status" -eq 0
 
-      - name: Upload provider-import evidence
+      - name: Finalize provider-import evidence
+        id: finalize-provider-import
         if: always()
+        env:
+          RECORD_OUTCOME: ${{ steps.record-provider-import.outcome }}
+          TARGET_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          safe="$RUNNER_TEMP/provider-import-safe-${TARGET_SHA}"
+          mkdir -p "$safe/trace"
+          trap 'rc=$?; rm -f "$RUNNER_TEMP/provider-import-${TARGET_SHA}-events.jsonl" "$RUNNER_TEMP/provider-import-${TARGET_SHA}-stderr.log"; exit "$rc"' EXIT
+          TARGET_SHA="$TARGET_SHA" RECORD_OUTCOME="$RECORD_OUTCOME" node - "$safe" "$RUNNER_TEMP/provider-import-${TARGET_SHA}-events.jsonl" <<'NODE'
+          const fs = require("node:fs");
+          const [safe, ...events] = process.argv.slice(2);
+          const required = new Set(["TestEngineImportPreviewIsNoOpOrAcceptedDiff"]);
+          const trace = [];
+          const recordOutcome = process.env.RECORD_OUTCOME;
+          if (recordOutcome === "success") {
+            for (const path of events) for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+              if (!line) continue;
+              const event = JSON.parse(line);
+              if (event.Test && required.has(event.Test)) trace.push({ Action: event.Action, Test: event.Test, Elapsed: event.Elapsed });
+            }
+            for (const name of required) if (!trace.some((event) => event.Test === name && event.Action === "pass")) throw new Error("required sanitized test missing or nonpass");
+          }
+          fs.writeFileSync(safe + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runUrl: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID, gate: "provider-import", recordOutcome }) + "\n");
+          fs.writeFileSync(safe + "/trace/README.txt", "Sanitized test events only.\n");
+          for (const name of ["test.jsonl"]) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\n") + "\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0, Status: "record-unavailable" }) + "\n");
+          NODE
+          if test "$RECORD_OUTCOME" = success; then test ! -s "$RUNNER_TEMP/provider-import-${TARGET_SHA}-stderr.log"; fi
+          expected_files=$(printf '%s\n' "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/test.jsonl")
+          actual_files=$(find "$safe" -type f -print | sort)
+          test "$actual_files" = "$expected_files"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:'
+          for evidence_file in "$safe/metadata.json" "$safe/trace/README.txt" "$safe/trace/test.jsonl"; do
+            if grep -qE "$forbidden" "$evidence_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled || test "$RECORD_OUTCOME" = skipped
+
+      - name: Upload provider-import evidence
+        if: always() && steps.finalize-provider-import.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: provider-import-evidence-${{ env.TARGET_SHA }}
-          path: evidence/${{ env.TARGET_SHA }}/provider-import
+          path: ${{ runner.temp }}/provider-import-safe-${{ env.TARGET_SHA }}
+          if-no-files-found: error
+
+  target-release:
+    name: Target Release
+    needs: [verify, host-controller, engine-graph, provider-ssh, provider-runtime, provider-import]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build and verify target candidate
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/target-release-$TARGET_SHA"
+          components="$candidate_dir/components"
+          archive_name="sub2api-controller-$TARGET_SHA.tar.gz"
+          archive="$candidate_dir/$archive_name"
+          bundle="$candidate_dir/bundle"
+          mkdir -p "$components"
+          go build -trimpath -o "$components/sub2api-deploy" ./cmd/sub2api-deploy
+          scripts/build-pulumi-release.sh "$components/pulumi-program"
+          go build -trimpath -o "$components/pulumi-resource-sub2api-host" ./cmd/pulumi-resource-sub2api-host
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$components/sub2api-host-linux-amd64" ./cmd/sub2api-host
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o "$components/sub2api-host-linux-arm64" ./cmd/sub2api-host
+          bash scripts/release-bundle.sh assemble "$bundle" "$components" "$TARGET_SHA"
+          tar -C "$candidate_dir" -czf "$archive" bundle
+          bash scripts/release-bundle.sh verify "$archive"
+          (cd "$candidate_dir" && sha256sum "$archive_name" > "$archive_name.sha256")
+          (cd "$candidate_dir" && sha256sum -c "$archive_name.sha256")
+      - name: Consume isolated target candidate
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/target-release-$TARGET_SHA"
+          archive="$candidate_dir/sub2api-controller-$TARGET_SHA.tar.gz"
+          consumer="$RUNNER_TEMP/target-release-consumer-$TARGET_SHA"
+          rm -rf "$consumer"
+          mkdir -p "$consumer"
+          tar -xzf "$archive" -C "$consumer"
+          expected_files="$(printf '%s\n' "$consumer/bundle/Pulumi.production.example.yaml" "$consumer/bundle/Pulumi.yaml" "$consumer/bundle/README.md" "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-arm64" "$consumer/bundle/bin/go" "$consumer/bundle/bin/pulumi" "$consumer/bundle/bin/pulumi-program" "$consumer/bundle/bin/pulumi-resource-sub2api-host" "$consumer/bundle/bin/sub2api-deploy" "$consumer/bundle/go.mod" "$consumer/bundle/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" "$consumer/bundle/scripts/pulumi-plugins/upstash/pulumi-plugin.json" | sort)"
+          actual_files="$(find "$consumer" -type f -print | sort)"
+          test "$actual_files" = "$expected_files"
+          raw_output="$RUNNER_TEMP/target-release-$TARGET_SHA-provider-create.raw"
+          SUB2API_TEST_PROVIDER_BINARY="$consumer/bundle/bin/pulumi-resource-sub2api-host" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" GOMAXPROCS=2 go test -count=1 -p=1 -run '^TestProviderProcessReachesSharedTemporaryRuntimeServe$' ./internal/integration/providerruntime > "$raw_output" 2>&1
+          digest="$(sha256sum "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" | cut -d ' ' -f1)"
+          node - "$candidate_dir/consumer-trace.json" "$TARGET_SHA" "$digest" <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync(process.argv[2], JSON.stringify({ sha: process.argv[3], providerCreate: "pass", hostAMD64SHA256: process.argv[4] }) + "\n");
+          NODE
+          rm -f "$raw_output"
+          test "$(readelf -h "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" | grep 'Machine:.*Advanced Micro Devices')"
+          test "$(readelf -h "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-arm64" | grep 'Machine:.*AArch64')"
+          test -x "$consumer/bundle/bin/go"
+          test -x "$consumer/bundle/bin/pulumi"
+          test -x "$consumer/bundle/bin/pulumi-program"
+          test -x "$consumer/bundle/bin/pulumi-resource-sub2api-host"
+          node - "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$consumer/bundle/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" "$consumer/bundle/scripts/pulumi-plugins/upstash/pulumi-plugin.json" <<'NODE'
+          const fs = require("node:fs");
+          const [manifest, cloudflare, upstash] = process.argv.slice(2).map((path) => JSON.parse(fs.readFileSync(path, "utf8")));
+          if (manifest.schemaVersion !== 1 || cloudflare.name !== "cloudflare" || upstash.name !== "upstash") throw new Error("candidate consumer metadata mismatch");
+          NODE
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:'
+          for text_file in "$consumer/bundle/Pulumi.production.example.yaml" "$consumer/bundle/Pulumi.yaml" "$consumer/bundle/README.md" "$consumer/bundle/go.mod" "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$consumer/bundle/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" "$consumer/bundle/scripts/pulumi-plugins/upstash/pulumi-plugin.json" "$candidate_dir/consumer-trace.json"; do
+            if grep -qE "$forbidden" "$text_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+      - name: Write target candidate metadata
+        run: |
+          set -euo pipefail
+          candidate_dir="$RUNNER_TEMP/target-release-$TARGET_SHA"
+          archive="sub2api-controller-$TARGET_SHA.tar.gz"
+          sha256="$(sha256sum "$candidate_dir/$archive" | cut -d ' ' -f1)"
+          TARGET_SHA="$TARGET_SHA" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" ARCHIVE="$archive" SHA256="$sha256" node <<'NODE'
+          const fs = require("node:fs");
+          const gateSymbols = { verify: ["test/environment-program-target.test.ts::targets the environment program without an infra fallback"], "host-controller": ["TestRegisterFoundationGraph", "TestRegisterPreservesComputedUpstashOutputs", "TestConfigAndHostCheckPreservePropertyClassesWithoutEffects", "TestRunUsesFixedSSHArgvAndFramedStdin", "TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry", "TestStdioProcessExitsAfterOneFrameAndRejectsTwo", "TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi"], "engine-graph": ["TestEngineGraphFailureStopsPublication", "TestEngineGraphReadyPublishesAfterOrderedHosts", "TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication", "TestEngineConfiguredServerCountZero", "TestEngineConfiguredServerCountOneTwo", "TestEngineAppPlacementOneReadyFailure", "TestEngineManagedUpstashPreviewPreservesComputedSecretProjection", "TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor", "TestEngineManagedUpstashStateIsProtectedAndRetained"], "provider-ssh": ["TestProviderProcessUsesScriptedSSHTransport", "TestProtocolFrameBoundaries", "TestLoopbackStrictKnownHostAndOptionTerminator"], "provider-runtime": ["TestProviderProcessReachesSharedTemporaryRuntimeServe", "TestProviderLifecycleWithHostProcessTempRuntime"], "provider-import": ["TestEngineImportPreviewIsNoOpOrAcceptedDiff"] };
+          fs.writeFileSync(process.env.RUNNER_TEMP + "/target-release-" + process.env.TARGET_SHA + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runId: process.env.GITHUB_RUN_ID, runUrl: process.env.GITHUB_RUN_URL, gate: "target-release", archive: process.env.ARCHIVE, sha256: process.env.SHA256, requiredGateIds: ["verify", "host-controller", "engine-graph", "provider-ssh", "provider-runtime", "provider-import"], gateSymbols }) + "\n");
+          NODE
+          expected_artifact="$(printf '%s\n' "$candidate_dir/$archive" "$candidate_dir/$archive.sha256" "$candidate_dir/metadata.json" "$candidate_dir/consumer-trace.json" | sort)"
+          actual_artifact="$(find "$candidate_dir" -maxdepth 1 -type f -print | sort)"
+          test "$actual_artifact" = "$expected_artifact"
+          forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:'
+          for text_file in "$candidate_dir/metadata.json" "$candidate_dir/consumer-trace.json"; do
+            if grep -qE "$forbidden" "$text_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
+          done
+      - name: Upload target release candidate
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-release-${{ env.TARGET_SHA }}
+          path: |
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/sub2api-controller-${{ env.TARGET_SHA }}.tar.gz
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/sub2api-controller-${{ env.TARGET_SHA }}.tar.gz.sha256
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/metadata.json
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/consumer-trace.json
           if-no-files-found: error
