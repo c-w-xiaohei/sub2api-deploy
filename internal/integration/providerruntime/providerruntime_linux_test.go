@@ -325,7 +325,8 @@ func runLifecycleSubtest(t *testing.T) {
 // boundary oracle for Provider Create through the shared temporary Runtime.
 func TestProviderProcessReachesSharedTemporaryRuntimeServe(t *testing.T) {
 	h := startProvider(t)
-	inputs := createInputs()
+	release := runtimeRelease(t)
+	inputs := createInputsWithRelease(release)
 	writeTargetExpectation(t, h, inputs)
 	writeHostActionQueue(t, h, hostcontract.ActionInspect)
 	ctx, cancel := context.WithTimeout(t.Context(), prerequisiteCreateTimeout)
@@ -348,15 +349,15 @@ func TestProviderProcessReachesSharedTemporaryRuntimeServe(t *testing.T) {
 		t.Fatalf("Create ID = %q, want %q", response.Id, expectedStableID())
 	}
 	checkpoint := unmarshalProperties(t, response.Properties)
-	assertCreateCheckpoint(t, checkpoint, inputs)
-	if got, want := string(mustRead(t, filepath.Join(h.trace, "request.sha256"))), "operationDigest="+expectedRequestDigest(t)+"\naction=reconcile\n"; got != want {
+	assertCreateCheckpoint(t, checkpoint, inputs, release)
+	if got, want := string(mustRead(t, filepath.Join(h.trace, "request.sha256"))), "operationDigest="+expectedRequestDigest(t, release)+"\naction=reconcile\n"; got != want {
 		t.Fatalf("bootstrap request digest = %q, want %q", got, want)
 	}
 	assertSSHRecords(t, h.trace)
 	assertBootstrapMetadata(t, h.trace)
-	assertCandidateReleaseArtifact(t, h.trace)
+	assertCandidateReleaseArtifact(t, h.trace, release)
 	assertDockerTrace(t, h)
-	assertRuntimePersistence(t, h, checkpoint)
+	assertRuntimePersistence(t, h, checkpoint, release)
 	for _, name := range []string{"machine", "ownership", "appliedRevision", "observation"} {
 		value, _ := checkpoint.GetOk(name)
 		if strings.Contains(fmt.Sprint(value), ciSecret) {
@@ -429,6 +430,40 @@ func providerBinaryForPrerequisite(t *testing.T) string {
 		}
 	}
 	return provider
+}
+
+func runtimeRelease(t *testing.T) string {
+	t.Helper()
+	provider := os.Getenv("SUB2API_TEST_PROVIDER_BINARY")
+	releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT")
+	if provider == "" && releaseRoot == "" {
+		return ciRelease
+	}
+	if provider == "" || releaseRoot == "" {
+		t.Fatal("candidate Provider overrides must be set together")
+	}
+	manifestFile, err := os.Open(filepath.Join(releaseRoot, "artifacts", "sub2api-host", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Release string `json:"release"`
+	}
+	decoder := json.NewDecoder(manifestFile)
+	if err := decoder.Decode(&manifest); err != nil {
+		t.Fatal(err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		t.Fatalf("candidate manifest must contain one JSON value: %v", err)
+	}
+	if err := manifestFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Release == "" {
+		t.Fatal("candidate manifest release is empty")
+	}
+	return manifest.Release
 }
 
 func startProviderWithApproval(t *testing.T, providerBinary string, decision approvalDecision) *providerProcess {
@@ -559,7 +594,11 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 }
 
 func createInputs() property.Map {
-	target := hostcontract.Target{ReleaseArtifact: ciRelease, Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: "api.example", ReadinessPath: "/ready"}}}
+	return createInputsWithRelease(ciRelease)
+}
+
+func createInputsWithRelease(release string) property.Map {
+	target := hostcontract.Target{ReleaseArtifact: release, Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: "api.example", ReadinessPath: "/ready"}}}
 	secrets := hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"api": {JWTSecret: ciSecret}}}
 	return property.NewMap(map[string]property.Value{
 		"resource": jsonProperty(hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}),
@@ -569,7 +608,7 @@ func createInputs() property.Map {
 	})
 }
 
-func assertCreateCheckpoint(t *testing.T, checkpoint, inputs property.Map) {
+func assertCreateCheckpoint(t *testing.T, checkpoint, inputs property.Map, release string) {
 	t.Helper()
 	for _, name := range []string{"resource", "server", "target", "secrets"} {
 		got, ok := checkpoint.GetOk(name)
@@ -595,10 +634,10 @@ func assertCreateCheckpoint(t *testing.T, checkpoint, inputs property.Map) {
 	if machine.Value != "mid1:0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54" {
 		t.Fatalf("machine = %q", machine.Value)
 	}
-	if revision != expectedRevision(t) {
-		t.Fatalf("applied revision = %q, want %q", revision, expectedRevision(t))
+	if revision != expectedRevisionForRelease(t, release) {
+		t.Fatalf("applied revision = %q, want %q", revision, expectedRevisionForRelease(t, release))
 	}
-	if ownership.Value == "" || observation.Machine != machine || observation.Ownership != ownership || observation.AppliedRevision != revision || observation.HostRelease != ciRelease || !observation.Ready || observation.Drifted || len(observation.Apps) != 1 || observation.Apps[0] != (hostcontract.AppObservation{ID: "api", ActiveImage: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ready: true}) {
+	if ownership.Value == "" || observation.Machine != machine || observation.Ownership != ownership || observation.AppliedRevision != revision || observation.HostRelease != release || !observation.Ready || observation.Drifted || len(observation.Apps) != 1 || observation.Apps[0] != (hostcontract.AppObservation{ID: "api", ActiveImage: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ready: true}) {
 		t.Fatal("Create checkpoint observation is not exact")
 	}
 }
@@ -1071,6 +1110,10 @@ func fixtureToken(values ...string) string {
 	return hex.EncodeToString(h.Sum(nil)[:12])
 }
 func expectedRevision(t *testing.T) string { t.Helper(); return expectedRevisionNoTest() }
+func expectedRevisionForRelease(t *testing.T, release string) string {
+	t.Helper()
+	return frozenRevision(hostcontract.Target{ReleaseArtifact: release, Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: "api.example", ReadinessPath: "/ready"}}}, hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"api": {JWTSecret: ciSecret}}})
+}
 func expectedRevisionNoTest() string {
 	return frozenRevision(hostcontract.Target{ReleaseArtifact: ciRelease, Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: "api.example", ReadinessPath: "/ready"}}}, hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"api": {JWTSecret: ciSecret}}})
 }
@@ -1095,7 +1138,7 @@ func assertDockerTrace(t *testing.T, h *providerProcess) {
 	}
 }
 
-func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint property.Map) {
+func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint property.Map, release string) {
 	t.Helper()
 	machine, ownership, revision, observation, err := checkpointValues(checkpoint)
 	if err != nil {
@@ -1109,7 +1152,7 @@ func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint prope
 	if state.Version != 1 || state.Resource != (hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}) || state.Machine != machine || state.Ownership != ownership || state.AppliedRevision != revision || !reflect.DeepEqual(state.Observation, observation) || state.Journal == nil || state.Journal.Status != "complete" || state.Journal.Approval != nil || state.Journal.Result == nil || state.LastOperation != nil || state.Retirement != nil {
 		t.Fatal("state journal/checkpoint semantics differ")
 	}
-	if state.Journal.Key != (hostcontract.OperationKey{Resource: state.Resource, Action: hostcontract.ActionReconcile, TargetRevision: revision, PriorAppliedRevision: expectedPriorRevision(t)}) || *state.Journal.Result != (hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: revision}) {
+	if state.Journal.Key != (hostcontract.OperationKey{Resource: state.Resource, Action: hostcontract.ActionReconcile, TargetRevision: revision, PriorAppliedRevision: expectedPriorRevision(t, release)}) || *state.Journal.Result != (hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: revision}) {
 		t.Fatal("state journal key/result differ")
 	}
 	var trace dockerTrace
@@ -1168,9 +1211,9 @@ func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint prope
 	}
 }
 
-func expectedPriorRevision(t *testing.T) string {
+func expectedPriorRevision(t *testing.T, release string) string {
 	t.Helper()
-	return frozenRevision(hostcontract.Target{ReleaseArtifact: ciRelease}, hostcontract.Secrets{})
+	return frozenRevision(hostcontract.Target{ReleaseArtifact: release}, hostcontract.Secrets{})
 }
 
 func expectedStableID() string {
@@ -1297,13 +1340,13 @@ func writeExpectedSSHCommands(t *testing.T, trace string) {
 	}
 }
 
-func expectedRequestDigest(t *testing.T) string {
+func expectedRequestDigest(t *testing.T, release string) string {
 	t.Helper()
 	resource := hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}
-	target := hostcontract.Target{ReleaseArtifact: ciRelease, Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: "api.example", ReadinessPath: "/ready"}}}
+	target := hostcontract.Target{ReleaseArtifact: release, Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: "api.example", ReadinessPath: "/ready"}}}
 	secrets := hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"api": {JWTSecret: "PROVIDER_RUNTIME_SECRET_CANARY"}}}
 	revision := frozenRevision(target, secrets)
-	prior := frozenRevision(hostcontract.Target{ReleaseArtifact: ciRelease}, hostcontract.Secrets{})
+	prior := frozenRevision(hostcontract.Target{ReleaseArtifact: release}, hostcontract.Secrets{})
 	frame, err := hostprotocol.EncodeRequest(hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: resource, TargetRevision: revision, PriorAppliedRevision: prior, Target: &target, Secrets: &secrets})
 	if err != nil {
 		t.Fatal(err)
@@ -1356,7 +1399,7 @@ func assertBootstrapMetadata(t *testing.T, trace string) {
 	}
 }
 
-func assertCandidateReleaseArtifact(t *testing.T, trace string) {
+func assertCandidateReleaseArtifact(t *testing.T, trace, release string) {
 	t.Helper()
 	releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT")
 	if releaseRoot == "" {
@@ -1367,6 +1410,7 @@ func assertCandidateReleaseArtifact(t *testing.T, trace string) {
 		t.Fatal(err)
 	}
 	var manifest struct {
+		Release string `json:"release"`
 		LinuxAMD64 struct {
 			Path   string `json:"path"`
 			SHA256 string `json:"sha256"`
@@ -1375,6 +1419,9 @@ func assertCandidateReleaseArtifact(t *testing.T, trace string) {
 	}
 	if err := json.Unmarshal(mustRead(t, filepath.Join(releaseRoot, "artifacts", "sub2api-host", "manifest.json")), &manifest); err != nil {
 		t.Fatal(err)
+	}
+	if manifest.Release != release {
+		t.Fatalf("candidate manifest release = %q, want %q", manifest.Release, release)
 	}
 	sum := sha256.Sum256(artifact)
 	if manifest.LinuxAMD64.Path != "sub2api-host-linux-amd64" || manifest.LinuxAMD64.Size != len(artifact) || manifest.LinuxAMD64.SHA256 != hex.EncodeToString(sum[:]) {

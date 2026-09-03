@@ -54,7 +54,7 @@ jobs:
           const fs = require("node:fs");
           const [path, sha] = process.argv.slice(2);
           const runs = JSON.parse(fs.readFileSync(path, "utf8")).flatMap((page) => page.workflow_runs);
-          const selected = runs.filter((run) => run.head_sha === sha && run.event === "push" && run.status === "completed" && run.conclusion === "success" && run.path === ".github/workflows/ci.yml" && run.name === "Pull-Request CI" && /^agent\x2f/.test(run.head_branch || "") && !run.head_branch.startsWith("refs/tags/")).sort((a, b) => b.run_attempt - a.run_attempt || b.id - a.id)[0];
+          const selected = runs.filter((run) => run.head_sha === sha && run.event === "push" && run.status === "completed" && run.conclusion === "success" && run.path === ".github/workflows/ci.yml" && run.name === "Pull-Request CI" && /^agent\\x2f/.test(run.head_branch || "") && !run.head_branch.startsWith("refs/tags/")).sort((a, b) => b.run_attempt - a.run_attempt || b.id - a.id)[0];
           if (!selected) throw new Error("missing successful ci.yml run");
           process.stdout.write(String(selected.id));
           NODE
@@ -147,6 +147,30 @@ jobs:
           [[ "$TAG_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TAG_NAME" =~ ^v[0-9A-Za-z._-]+$ ]]
           test "$(git rev-parse "refs/tags/\${TAG_NAME}^{commit}")" = "$TAG_SHA"
+          tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME")"
+          TAG_REF="$tag_ref" TAG_NAME="$TAG_NAME" node <<'NODE' > "$RUNNER_TEMP/tag-object.txt"
+          const ref = JSON.parse(process.env.TAG_REF);
+          if (ref.ref !== "refs/tags/" + process.env.TAG_NAME || !ref.object || !/^(commit|tag)$/.test(ref.object.type) || !/^[0-9a-f]{40}$/.test(ref.object.sha)) throw new Error("invalid remote tag ref");
+          process.stdout.write(ref.object.type + " " + ref.object.sha + "\\n");
+          NODE
+          read -r tag_type tag_sha < "$RUNNER_TEMP/tag-object.txt"
+          seen_tag_shas=" $tag_sha "
+          for _ in 1 2 3 4 5; do
+            if test "$tag_type" = commit; then break; fi
+            tag_object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha")"
+            TAG_OBJECT="$tag_object" node <<'NODE' > "$RUNNER_TEMP/tag-object.txt"
+            const tag = JSON.parse(process.env.TAG_OBJECT);
+            if (!tag.object || !/^(commit|tag)$/.test(tag.object.type) || !/^[0-9a-f]{40}$/.test(tag.object.sha)) throw new Error("invalid annotated tag object");
+            process.stdout.write(tag.object.type + " " + tag.object.sha + "\\n");
+            NODE
+            read -r next_type next_sha < "$RUNNER_TEMP/tag-object.txt"
+            case "$seen_tag_shas" in *" $next_sha "*) exit 1 ;; esac
+            seen_tag_shas+="$next_sha "
+            tag_type="$next_type"
+            tag_sha="$next_sha"
+          done
+          test "$tag_type" = commit
+          test "$tag_sha" = "$TAG_SHA"
           gh release create "$TAG_NAME" "$private/sub2api-controller-$TAG_SHA.tar.gz" "$private/sub2api-controller-$TAG_SHA.tar.gz.sha256" "$private/metadata.json" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$TAG_NAME"
 `;
 

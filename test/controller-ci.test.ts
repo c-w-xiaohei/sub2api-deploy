@@ -171,7 +171,7 @@ function expectedFinalization(gate: string, recordID: string, eventNames: string
           }
           fs.writeFileSync(safe + "/metadata.json", JSON.stringify({ sha: process.env.TARGET_SHA, runUrl: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID, gate: "${gate}", recordOutcome }) + "\\n");
           fs.writeFileSync(safe + "/trace/README.txt", "Sanitized test events only.\\n");
-          for (const name of ${JSON.stringify(traces)}) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\\n") + "\\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0 }) + "\\n");
+          for (const name of ${JSON.stringify(traces)}) fs.writeFileSync(safe + "/trace/" + name, recordOutcome === "success" ? trace.map((event) => JSON.stringify(event)).join("\\n") + "\\n" : JSON.stringify({ Action: "error", Test: "record", Elapsed: 0, Status: "record-unavailable" }) + "\\n");
           NODE
           if test "$RECORD_OUTCOME" = success; then${stderrNames.map((name) => ` test ! -s "$RUNNER_TEMP/${gate}-\${TARGET_SHA}-${name}";`).join("")} fi
           expected_files=$(printf '%s\\n' "$safe/metadata.json" "$safe/trace/README.txt"${traces.map((trace) => ` "$safe/trace/${trace}"`).join("")})
@@ -181,7 +181,7 @@ function expectedFinalization(gate: string, recordID: string, eventNames: string
           for evidence_file in "$safe/metadata.json" "$safe/trace/README.txt"${traces.map((trace) => ` "$safe/trace/${trace}"`).join("")}; do
             if grep -qE "$forbidden" "$evidence_file"; then exit 1; else s=$?; test "$s" -eq 1 || exit 1; fi
           done
-          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled`;
+          test "$RECORD_OUTCOME" = success || test "$RECORD_OUTCOME" = failure || test "$RECORD_OUTCOME" = cancelled || test "$RECORD_OUTCOME" = skipped`;
 }
 
 describe("Task10 CI release candidate contracts", () => {
@@ -211,6 +211,7 @@ describe("Task10 CI release candidate contracts", () => {
       expect(job).toContain(`id: ${recordID}`);
       const record = jobSteps(job ?? "").find((step) => step.source.includes(`id: ${recordID}`));
       expect(record, `${id} record step`).toBeDefined();
+      if (id === "host-controller") expect(record?.source).toContain('mkdir -p "evidence/${TARGET_SHA}/trace"');
       for (const rawName of [...eventNames, ...stderrNames]) {
         const raw = `$RUNNER_TEMP/${gate}-\${TARGET_SHA}-${rawName}`;
         expect(record?.source).toContain(raw);
