@@ -3,6 +3,31 @@
 # private mount namespace. No path below /usr/local or /var/lib is touched on
 # the runner mount namespace.
 set -eu
+docker_failure_reason() {
+  log=${1:?}
+  fallback=${2:?}
+  if [ ! -s "$log" ]; then
+    printf '%s' "$fallback"
+  elif grep -Eqi 'permission denied|operation not permitted' "$log"; then
+    printf '%s' permission
+  elif grep -Eqi 'no space left|cannot allocate memory|out of memory|resource temporarily unavailable|too many open files' "$log"; then
+    printf '%s' resource
+  elif grep -Eqi 'already running|address already in use|resource busy|pid file' "$log"; then
+    printf '%s' conflict
+  elif grep -Eqi 'network controller|iptables|ip6tables|bridge driver' "$log"; then
+    printf '%s' network
+  elif grep -Eqi 'storage driver|overlay|volume store|filesystem' "$log"; then
+    printf '%s' storage
+  elif grep -Eqi 'containerd' "$log"; then
+    printf '%s' containerd
+  else
+    printf '%s' "$fallback"
+  fi
+}
+if [ "${1:-}" = --classify-docker-log ]; then
+  docker_failure_reason "${2:?}" "${3:?}"
+  exit 0
+fi
 name=${1:?}
 root=${LIVE_ROOT:?}
 host=${LIVE_HOST_BINARY:?}
@@ -43,8 +68,15 @@ setsid dockerd --data-root "$root/$name/docker" --exec-root "$root/$name/run" --
 dockerd=$!
 i=0
 until docker info >/dev/null 2>&1; do
+  if ! kill -0 "$dockerd" 2>/dev/null; then
+    stage="docker-$(docker_failure_reason "$log" unknown)"
+    exit 1
+  fi
   i=$((i + 1))
-  [ "$i" -lt 45 ] || exit 1
+  if [ "$i" -ge 45 ]; then
+    stage="docker-$(docker_failure_reason "$log" timeout)"
+    exit 1
+  fi
   sleep 1
 done
 stage=image-load

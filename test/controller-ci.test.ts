@@ -119,6 +119,8 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("- name: Upload exact-SHA intermediate candidate\n        if: success()");
     expect(workflow).toContain("invalid live evidence");
     expect(workflow).toContain("const allowedLiveStages = new Set([");
+    expect(workflow).toContain("'app-docker-network'");
+    expect(workflow).toContain("'data-docker-timeout'");
     expect(workflow).toContain("event.Test === test && typeof event.Output === 'string'");
     expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
     expect(workflow).toContain("console.log(`${test} stage: ${stage}`)");

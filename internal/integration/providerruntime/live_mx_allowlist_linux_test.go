@@ -920,10 +920,26 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"sandbox-start":           true,
 		"data-mount-setup":        true,
 		"data-docker-start":       true,
+		"data-docker-network":     true,
+		"data-docker-storage":     true,
+		"data-docker-containerd":  true,
+		"data-docker-conflict":    true,
+		"data-docker-resource":    true,
+		"data-docker-permission":  true,
+		"data-docker-timeout":     true,
+		"data-docker-unknown":     true,
 		"data-image-load":         true,
 		"data-sshd-start":         true,
 		"app-mount-setup":         true,
 		"app-docker-start":        true,
+		"app-docker-network":      true,
+		"app-docker-storage":      true,
+		"app-docker-containerd":   true,
+		"app-docker-conflict":     true,
+		"app-docker-resource":     true,
+		"app-docker-permission":   true,
+		"app-docker-timeout":      true,
+		"app-docker-unknown":      true,
 		"app-image-load":          true,
 		"app-sshd-start":          true,
 		"sandboxes-ready":         true,
@@ -966,6 +982,8 @@ func TestLiveFailureCategoryReportsOnlyKnownLastStage(t *testing.T) {
 		{name: "empty", want: "exit"},
 		{name: "unknown marker", output: "SUB2API_LIVE_STAGE=credential-canary\n", want: "isolated-fixture-exit"},
 		{name: "known marker", output: "SUB2API_LIVE_STAGE=data-create\n", want: "data-create"},
+		{name: "known Docker reason", output: "SUB2API_LIVE_STAGE=app-docker-network\n", want: "app-docker-network"},
+		{name: "unknown Docker reason", output: "SUB2API_LIVE_STAGE=app-docker-sensitive-detail\n", want: "isolated-fixture-exit"},
 		{name: "last known marker", output: "SUB2API_LIVE_STAGE=network-setup\nSUB2API_LIVE_STAGE=app-ready-check\n", want: "app-ready-check"},
 	}
 	for _, test := range tests {
@@ -980,5 +998,41 @@ func TestLiveFailureCategoryReportsOnlyKnownLastStage(t *testing.T) {
 	cancel()
 	if got := liveFailureCategory(canceled, []byte("SUB2API_LIVE_STAGE=data-create\n")); got != "timeout" {
 		t.Fatalf("liveFailureCategory(canceled) = %q, want timeout", got)
+	}
+}
+
+func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *testing.T) {
+	script := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "live-host-sandbox.sh")
+	tests := []struct {
+		name     string
+		log      string
+		fallback string
+		want     string
+	}{
+		{name: "empty early exit", fallback: "unknown", want: "unknown"},
+		{name: "empty readiness timeout", fallback: "timeout", want: "timeout"},
+		{name: "permission before storage", log: "overlay operation not permitted", fallback: "unknown", want: "permission"},
+		{name: "resource before containerd", log: "containerd: no space left", fallback: "unknown", want: "resource"},
+		{name: "conflict before network", log: "network controller address already in use", fallback: "unknown", want: "conflict"},
+		{name: "network", log: "failed to create network controller", fallback: "unknown", want: "network"},
+		{name: "storage", log: "failed to initialize storage driver overlay", fallback: "unknown", want: "storage"},
+		{name: "containerd", log: "failed to connect to containerd", fallback: "unknown", want: "containerd"},
+		{name: "unrecognized timeout", log: "daemon still starting", fallback: "timeout", want: "timeout"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "dockerd.log")
+			if err := os.WriteFile(log, []byte(test.log), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", script, "--classify-docker-log", log, test.fallback)
+			output, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("classify Docker failure: %v", err)
+			}
+			if got := string(output); got != test.want {
+				t.Fatalf("Docker failure reason = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
