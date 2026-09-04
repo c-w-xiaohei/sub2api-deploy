@@ -64,7 +64,7 @@ mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
 mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
 printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
 stage=docker-start
-setsid dockerd --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
+setsid dockerd --storage-driver vfs --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
 dockerd=$!
 i=0
 until docker info >/dev/null 2>&1; do

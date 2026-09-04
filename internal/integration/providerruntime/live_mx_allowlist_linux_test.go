@@ -51,7 +51,7 @@ func TestProviderRuntimeCrossHostDataAdmissionLive(t *testing.T) {
 	t.Cleanup(func() { fixture.cleanupOuter(t) })
 
 	script := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "live-runtime.sh")
-	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 7*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "unshare", "--mount", "--net", "--propagation", "private", script, os.Args[0], "-test.run", "^TestProviderRuntimeCrossHostDataAdmissionLive$", "-test.count=1")
 	cmd.Env = append(os.Environ(), fixture.environment()...)

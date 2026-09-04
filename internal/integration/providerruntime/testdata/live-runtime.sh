@@ -85,7 +85,7 @@ until [ -f "$root/data.ready" ] && [ -f "$root/app.ready" ]; do
   kill -0 "$data_pid" 2>/dev/null || exit 1
   kill -0 "$app_pid" 2>/dev/null || exit 1
   i=$((i + 1))
-  [ "$i" -lt 60 ] || exit 1
+  [ "$i" -lt 180 ] || exit 1
   sleep 1
 done
 

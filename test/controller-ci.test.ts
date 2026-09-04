@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const liveHostSandbox = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-host-sandbox.sh", import.meta.url), "utf8");
 const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
 const gateSymbols = {
   verify: ["test/environment-program-target.test.ts::targets the environment program without an infra fallback"],
@@ -114,6 +115,8 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("for _ in $(seq 1 45)");
     expect(workflow).toContain("provider-runtime-dockerd-${TARGET_SHA}.pid");
     expect(workflow).toContain("provider-runtime-dockerd-${TARGET_SHA}.log");
+    expect(liveHostSandbox).toContain('dockerd --storage-driver vfs --data-root "$root/$name/docker"');
+    expect(liveHostSandbox).not.toContain("--storage-driver overlay");
     expect(workflow).toContain("Finalize Provider Runtime private files");
     expect(workflow).toContain("if: always()\n        uses: actions/upload-artifact@v4");
     expect(workflow).toContain("- name: Upload exact-SHA intermediate candidate\n        if: success()");
