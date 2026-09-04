@@ -259,7 +259,7 @@ jobs:
           provider="$consumer/bundle/bin/pulumi-resource-sub2api-host"; provider_sha="$(sha256sum "$provider" | cut -d ' ' -f1)"
           go_bin="$(command -v go)"
           set +e
-          sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOMODCACHE,GOPATH,GOENV env SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=8m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"
+          sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOMODCACHE,GOPATH,GOENV env SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"
           status=$?
           set -e
           printf '%s\n' "TestProviderRuntimeCrossHostDataAdmissionLive: go-test-exit-$status"

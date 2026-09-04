@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -51,10 +52,13 @@ func TestProviderRuntimeCrossHostDataAdmissionLive(t *testing.T) {
 	t.Cleanup(func() { fixture.cleanupOuter(t) })
 
 	script := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "live-runtime.sh")
-	ctx, cancel := context.WithTimeout(t.Context(), 7*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 9*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "unshare", "--mount", "--net", "--propagation", "private", script, os.Args[0], "-test.run", "^TestProviderRuntimeCrossHostDataAdmissionLive$", "-test.count=1")
 	cmd.Env = append(os.Environ(), fixture.environment()...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	cmd.WaitDelay = 45 * time.Second
 	var output boundedBuffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	if err := cmd.Run(); err != nil {

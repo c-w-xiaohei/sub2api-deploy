@@ -29,6 +29,19 @@ stop_group() {
   fi
   wait "$pid" 2>/dev/null || true
 }
+wait_ready() {
+  name=$1
+  pid=$2
+  peer_pid=${3:-}
+  i=0
+  until [ -f "$root/$name.ready" ]; do
+    kill -0 "$pid" 2>/dev/null || exit 1
+    [ -z "$peer_pid" ] || kill -0 "$peer_pid" 2>/dev/null || exit 1
+    i=$((i + 1))
+    [ "$i" -lt 120 ] || exit 1
+    sleep 1
+  done
+}
 cleanup() {
   status=$?
   stop_group "$data_pid"
@@ -78,16 +91,12 @@ ip -n "$LIVE_UNAUTHORIZED_NS" link set "$LIVE_BAD_VETH_IN" up
 printf '%s\n' 'SUB2API_LIVE_STAGE=sandbox-start' >&2
 setsid ip netns exec "$LIVE_DATA_NS" unshare --mount --propagation private "$root/host-sandbox.sh" data &
 data_pid=$!
+wait_ready data "$data_pid"
 setsid ip netns exec "$LIVE_APP_NS" unshare --mount --propagation private "$root/host-sandbox.sh" app &
 app_pid=$!
-i=0
-until [ -f "$root/data.ready" ] && [ -f "$root/app.ready" ]; do
-  kill -0 "$data_pid" 2>/dev/null || exit 1
-  kill -0 "$app_pid" 2>/dev/null || exit 1
-  i=$((i + 1))
-  [ "$i" -lt 180 ] || exit 1
-  sleep 1
-done
+wait_ready app "$app_pid" "$data_pid"
+kill -0 "$data_pid" 2>/dev/null
+kill -0 "$app_pid" 2>/dev/null
 
 printf '%s\n' 'SUB2API_LIVE_STAGE=sandboxes-ready' >&2
 "$test_binary" "$@"

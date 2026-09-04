@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const liveHostSandbox = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-host-sandbox.sh", import.meta.url), "utf8");
+const liveRuntime = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-runtime.sh", import.meta.url), "utf8");
+const liveRuntimeTest = readFileSync(new URL("../internal/integration/providerruntime/live_mx_allowlist_linux_test.go", import.meta.url), "utf8");
 const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
 const gateSymbols = {
   verify: ["test/environment-program-target.test.ts::targets the environment program without an infra fallback"],
@@ -117,6 +119,20 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("provider-runtime-dockerd-${TARGET_SHA}.log");
     expect(liveHostSandbox).toContain('dockerd --storage-driver vfs --data-root "$root/$name/docker"');
     expect(liveHostSandbox).not.toContain("--storage-driver overlay");
+    const dataWait = 'wait_ready data "$data_pid"';
+    const appStart = '"$root/host-sandbox.sh" app &';
+    const appWait = 'wait_ready app "$app_pid" "$data_pid"';
+    for (const command of [dataWait, appStart, appWait]) expect(liveRuntime).toContain(command);
+    expect(liveRuntime.indexOf(dataWait)).toBeLessThan(liveRuntime.indexOf(appStart));
+    expect(liveRuntime.indexOf(appStart)).toBeLessThan(liveRuntime.indexOf(appWait));
+    expect(liveRuntime).toContain('[ -z "$peer_pid" ] || kill -0 "$peer_pid"');
+    expect(liveRuntime).toContain('[ "$i" -lt 120 ] || exit 1');
+    const bothHostsLive = 'kill -0 "$data_pid" 2>/dev/null\nkill -0 "$app_pid" 2>/dev/null';
+    const testInvocation = '"$test_binary" "$@"';
+    for (const command of [bothHostsLive, testInvocation]) expect(liveRuntime).toContain(command);
+    expect(liveRuntime.indexOf(bothHostsLive)).toBeLessThan(liveRuntime.indexOf(testInvocation));
+    expect(liveRuntimeTest).toContain("cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}");
+    expect(liveRuntimeTest).toContain("syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)");
     expect(workflow).toContain("Finalize Provider Runtime private files");
     expect(workflow).toContain("if: always()\n        uses: actions/upload-artifact@v4");
     expect(workflow).toContain("- name: Upload exact-SHA intermediate candidate\n        if: success()");
@@ -130,6 +146,7 @@ describe("Task4 CI contracts", () => {
     expect(workflow).not.toContain("console.log(event.Output)");
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).not.toContain("-race -json -count=1 -timeout=15m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$");
+    expect(workflow).toContain("test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$'");
   });
 
   it("hands the tested candidate to Target Release without rebuilding it", () => {
