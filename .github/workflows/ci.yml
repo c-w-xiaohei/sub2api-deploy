@@ -62,11 +62,15 @@ jobs:
           raw="$RUNNER_TEMP/host-controller-${TARGET_SHA}-${{ matrix.arch }}.jsonl"; stderr="$RUNNER_TEMP/host-controller-${TARGET_SHA}-${{ matrix.arch }}.stderr"; safe="$RUNNER_TEMP/host-controller-safe-${TARGET_SHA}-${{ matrix.arch }}"
           trap 'rm -f "$raw" "$stderr"' EXIT
           tests='^(TestRegisterFoundationGraph|TestRegisterPreservesComputedUpstashOutputs|TestConfigAndHostCheckPreservePropertyClassesWithoutEffects|TestRunUsesFixedSSHArgvAndFramedStdin|TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry|TestStdioProcessExitsAfterOneFrameAndRejectsTwo|TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi)$'
+          set +e
           go test -json -count=1 -run "$tests" ./internal/... ./cmd/... > "$raw" 2> "$stderr"
-          test ! -s "$stderr"
+          status=$?
+          set -e
           REQUIRED_TESTS="$tests" node - "$raw" "$safe" <<'NODE'
-          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required)if(terminal.get(test)!=='pass')throw Error(`required test did not pass: ${test}`);fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/host-controller.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required){const action=terminal.get(test)??'absent';console.log(`${test}: ${action}`);if(action!=='pass')throw Error(`required test did not pass: ${test}`)}fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/host-controller.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
           NODE
+          test ! -s "$stderr"
+          test "$status" -eq 0
           go test -count=1 ./internal/... ./cmd/...
       - name: Vet Host controller
         run: go vet ./internal/... ./cmd/...
@@ -116,18 +120,22 @@ jobs:
           trap 'rm -f "$raw" "$stderr"' EXIT
           tests='^(TestEngineGraphFailureStopsPublication|TestEngineGraphReadyPublishesAfterOrderedHosts|TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication|TestEngineConfiguredServerCountZero|TestEngineConfiguredServerCountOneTwo|TestEngineAppPlacementOneReadyFailure|TestEngineManagedUpstashPreviewPreservesComputedSecretProjection|TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor|TestEngineManagedUpstashStateIsProtectedAndRetained|TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop|TestEngineGraphCrossHostDataRemovalIsReverseStaged|TestEngineGraphTraceArtifactIsSanitizedJSONL)$'
           trace="$RUNNER_TEMP/engine-graph-trace-${TARGET_SHA}"; mkdir -m 0700 "$trace"; mkdir -m 0700 "$safe"
+          set +e
           ENGINE_GRAPH_TRACE_DIR="$trace" go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$raw" 2> "$stderr"
-          test ! -s "$stderr"
+          status=$?
+          set -e
           REQUIRED_TESTS="$tests" node - "$raw" "$trace" "$safe" <<'NODE'
           const crypto=require('node:crypto'),fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe]=process.argv.slice(2); const required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'); const terminal=new Map(); const out=[];
           for(const line of fs.readFileSync(raw,'utf8').split('\n')) { if(!line) continue; const e=JSON.parse(line); if(required.includes(e.Test) && ['pass','fail','skip'].includes(e.Action)) { terminal.set(e.Test,e.Action); out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed}); } }
-          for(const t of required) if(terminal.get(t)!=='pass') throw Error(`required test did not pass: ${t}`);
+          for(const t of required) { const action=terminal.get(t)??'absent'; console.log(`${t}: ${action}`); if(action!=='pass') throw Error(`required test did not pass: ${t}`); }
           // The artifact test owns a separate t.TempDir trace via t.Setenv; all other harness instances write here.
           const traceTests=['TestEngineGraphFailureStopsPublication','TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor','TestEngineManagedUpstashStateIsProtectedAndRetained','TestEngineManagedUpstashPreviewPreservesComputedSecretProjection','TestEngineGraphReadyPublishesAfterOrderedHosts','TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication','TestEngineConfiguredServerCountOneTwo','TestEngineConfiguredServerCountZero','TestEngineAppPlacementOneReadyFailure_alpha_failure_blocks_publication','TestEngineAppPlacementOneReadyFailure_alpha_ready_publishes_once','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop_admission_then_App_then_publication','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop_data_failure_stops_App_and_publication','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop_App_failure_stops_publication','TestEngineGraphCrossHostDataRemovalIsReverseStaged'];
           const fileName=t=>{let stem=t.replace(/[^A-Za-z0-9_.-]/g,'_').replace(/^[._]+|[._]+$/g,'').slice(0,96)||'engine-graph'; return `${stem}-${crypto.createHash('sha256').update(t).digest('hex')}.jsonl`}; const expected=traceTests.map(fileName).sort(),traceStat=fs.lstatSync(trace),files=fs.readdirSync(trace).sort(); if(!traceStat.isDirectory()||traceStat.isSymbolicLink()||(traceStat.mode&0o777)!==0o700) throw Error('invalid persisted trace directory mode'); if(JSON.stringify(files)!==JSON.stringify(expected)) throw Error('unexpected persisted trace inventory');
           for(const f of files) { const p=path.join(trace,f),stat=fs.lstatSync(p); if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600) throw Error('invalid persisted trace mode'); const text=fs.readFileSync(p,'utf8'),lines=text.split('\n').filter(Boolean); if(lines.length===0) throw Error('persisted trace must contain at least one event'); for(const line of lines) { const e=JSON.parse(line),keys=Object.keys(e).sort(),event=['lifecycle_event','publication_event','summary'].filter(k=>typeof e[k]==='string'&&e[k]!==''),allowed=event[0]==='summary'?['summary','test_name']:['test_name',event[0]]; if(!e.test_name||event.length!==1||JSON.stringify(keys)!==JSON.stringify(allowed.sort())) throw Error('invalid persisted trace schema'); } if(/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:|CrossHost.*(?:Password|Secret)/i.test(text)) throw Error('persisted trace is not sanitized'); }
           fs.writeFileSync(path.join(safe,'engine-graph.jsonl'),out.map(JSON.stringify).join('\n')+'\n');
           NODE
+          test ! -s "$stderr"
+          test "$status" -eq 0
           test "$(find "$safe" -type f | wc -l)" -eq 1
       - uses: actions/upload-artifact@v4
         with:
@@ -154,11 +162,15 @@ jobs:
           trap 'rm -f "$raw" "$stderr"' EXIT
           tests='^(TestProviderProcessUsesScriptedSSHTransport|TestProtocolFrameBoundaries|TestLoopbackStrictKnownHostAndOptionTerminator)$'
           sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+          set +e
           go test -json -count=1 -run "$tests" ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh > "$raw" 2> "$stderr"
-          test ! -s "$stderr"
+          status=$?
+          set -e
           REQUIRED_TESTS="$tests" node - "$raw" "$safe" <<'NODE'
-          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required)if(terminal.get(test)!=='pass')throw Error(`required test did not pass: ${test}`);fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/provider-ssh.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required){const action=terminal.get(test)??'absent';console.log(`${test}: ${action}`);if(action!=='pass')throw Error(`required test did not pass: ${test}`)}fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/provider-ssh.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
           NODE
+          test ! -s "$stderr"
+          test "$status" -eq 0
           go test -count=1 ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh
       - name: Vet Provider SSH
         run: go vet ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh
@@ -194,13 +206,21 @@ jobs:
         run: |
           set -euo pipefail
           tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime)$'
+          record_required() {
+            MODE="$1" REQUIRED_TESTS="$tests" node - "$2" "$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA" <<'NODE'
+          const fs=require('node:fs'),[raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const t of required){const action=terminal.get(t)??'absent';console.log(`${t}: ${action}`);if(action!=='pass')throw Error(`required test did not pass: ${t}`)}fs.writeFileSync(`${safe}/${process.env.MODE}.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600})
+          NODE
+          }
+          trap 'rm -f "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal.jsonl" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal.stderr" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race.jsonl" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race.stderr"' EXIT
           for mode in normal race; do
             raw="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.stderr"
+            set +e
             if test "$mode" = race; then go test -race -json -count=1 -timeout=15m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; else go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; fi
+            status=$?
+            set -e
+            record_required "$mode" "$raw"
             test ! -s "$stderr"
-            MODE="$mode" REQUIRED_TESTS="$tests" node - "$raw" "$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA" <<'NODE'
-            const fs=require('node:fs'),[raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const t of required)if(terminal.get(t)!=='pass')throw Error(`required test did not pass: ${t}`);fs.writeFileSync(`${safe}/${process.env.MODE}.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600})
-            NODE
+            test "$status" -eq 0
             rm -f "$raw" "$stderr"
           done
       - name: Vet Provider Runtime
@@ -237,11 +257,18 @@ jobs:
           candidate="$RUNNER_TEMP/provider-runtime-candidate-$TARGET_SHA"; consumer="$RUNNER_TEMP/provider-runtime-consumer-$TARGET_SHA"; raw="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.stderr"; image="$RUNNER_TEMP/provider-runtime-images-$TARGET_SHA.tar"; trace="$RUNNER_TEMP/provider-runtime-live-trace-$TARGET_SHA"; safe="$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA"
           mkdir -p "$consumer"; mkdir -m 0700 "$trace"; sudo chown root:root "$trace"; chmod a+rX "$candidate" "$candidate/sub2api-controller-$TARGET_SHA.tar.gz"; tar -xzf "$candidate/sub2api-controller-$TARGET_SHA.tar.gz" -C "$consumer"; chmod -R a+rX "$consumer"
           provider="$consumer/bundle/bin/pulumi-resource-sub2api-host"; provider_sha="$(sha256sum "$provider" | cut -d ' ' -f1)"
-          go_bin="$(command -v go)"; sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOMODCACHE,GOPATH,GOENV env SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=8m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"
-          test ! -s "$stderr"
+          go_bin="$(command -v go)"
+          set +e
+          sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOMODCACHE,GOPATH,GOENV env SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=8m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"
+          status=$?
+          set -e
+          printf '%s\n' "TestProviderRuntimeCrossHostDataAdmissionLive: go-test-exit-$status"
+          node -e 'const fs=require("node:fs"),test="TestProviderRuntimeCrossHostDataAdmissionLive";let terminal;for(const line of fs.readFileSync(process.argv[1],"utf8").split("\n")){if(!line)continue;const event=JSON.parse(line);if(event.Test===test&&["pass","fail","skip"].includes(event.Action))terminal=event.Action}console.log(test+": "+(terminal??"absent"))' "$raw"
           sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<'NODE'
           const fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe,consumerTrace]=process.argv.slice(2), test='TestProviderRuntimeCrossHostDataAdmissionLive'; let terminal; for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(e.Test===test&&['pass','fail','skip'].includes(e.Action))terminal=e.Action} if(terminal!=='pass')throw Error('live test did not pass'); const files=fs.readdirSync(trace); if(JSON.stringify(files)!==JSON.stringify(['mx-allowlist-live.json']))throw Error('unexpected live evidence inventory'); const p=path.join(trace,files[0]),stat=fs.lstatSync(p),e=JSON.parse(fs.readFileSync(p,'utf8')); const keys=['appDataEnvironmentAuthenticated','appHostPass','appReadyAfterData','dataHostPass','foreignTableSHA256','foreignTableUnchanged','hostAMD64SHA256','postgresCatalog','postgresDrop','postgresPass','postgresWrongPasswordDenied','providerSHA256','redisACL','redisDefaultDenied','redisDrop','redisPass','redisWrongPasswordDenied','releasedBoundary','test']; if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600||JSON.stringify(Object.keys(e).sort())!==JSON.stringify(keys.sort())||e.test!==test||e.releasedBoundary!==process.env.TARGET_SHA||e.providerSHA256!==process.env.PROVIDER_SHA||!Object.values(e).every(v=>typeof v!=='boolean'||v)||!['providerSHA256','hostAMD64SHA256','foreignTableSHA256'].every(k=>/^[0-9a-f]{64}$/.test(e[k]))||/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |CrossHost.*(?:Password|Secret)|(?:\d{1,3}\.){3}\d{1,3}/i.test(JSON.stringify(e)))throw Error('invalid live evidence'); fs.rmSync(path.join(safe,'metadata.json')); fs.copyFileSync(p,path.join(safe,files[0])); fs.chmodSync(path.join(safe,files[0]),0o600); fs.writeFileSync(path.join(safe,'live.jsonl'),JSON.stringify({Action:'pass',Test:test})+'\n',{mode:0o600}); fs.writeFileSync(consumerTrace,JSON.stringify({sha:process.env.TARGET_SHA,providerRuntimeCrossHostAppLive:'data-then-app-pass',providerSHA256:e.providerSHA256,hostAMD64SHA256:e.hostAMD64SHA256})+'\n',{mode:0o600});
           NODE
+          test ! -s "$stderr"
+          test "$status" -eq 0
           test "$(find "$safe" -type f | wc -l)" -eq 4
       - name: Finalize Provider Runtime private files
         if: always()
@@ -291,11 +318,15 @@ jobs:
           trap 'rm -f "$raw" "$stderr"' EXIT
           tests='^(TestEngineImportPreviewIsNoOpOrAcceptedDiff)$'
           sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+          set +e
           go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerimport > "$raw" 2> "$stderr"
-          test ! -s "$stderr"
+          status=$?
+          set -e
           REQUIRED_TESTS="$tests" node - "$raw" "$safe" <<'NODE'
-          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required)if(terminal.get(test)!=='pass')throw Error(`required test did not pass: ${test}`);fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/provider-import.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required){const action=terminal.get(test)??'absent';console.log(`${test}: ${action}`);if(action!=='pass')throw Error(`required test did not pass: ${test}`)}fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/provider-import.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
           NODE
+          test ! -s "$stderr"
+          test "$status" -eq 0
           go test -count=1 -timeout=8m ./internal/integration/providerimport
       - name: Vet Provider Import
         run: go vet ./internal/integration/providerimport

@@ -39,6 +39,7 @@ describe("release promotion contract", () => {
   });
 
   it("allows documented example addresses in the bundle while keeping generated evidence IP-clean", () => {
+    const credentialScan = workflow.slice(workflow.indexOf("forbidden="), workflow.indexOf("generated_ip="));
     const bundleScan = workflow.slice(workflow.indexOf("for artifact_file"), workflow.indexOf("generated_ip="));
     const evidenceScan = workflow.slice(workflow.indexOf("generated_ip="), workflow.indexOf("- name: Publish validated candidate"));
     expect(bundleScan).toContain('"$consumer/bundle/README.md"');
@@ -47,6 +48,6 @@ describe("release promotion contract", () => {
     expect(evidenceScan).toContain('"$private/artifact/metadata.json"');
     expect(evidenceScan).toContain('"$private/artifact/consumer-trace.json"');
     expect(evidenceScan).toContain("[0-9]{1,3}");
-    expect(bundleScan).toContain("AKIA|-----BEGIN [A-Z ]*PRIVATE KEY");
+    expect(credentialScan).toContain("AKIA|-----BEGIN [A-Z ]*PRIVATE KEY");
   });
 });

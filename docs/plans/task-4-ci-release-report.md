@@ -11,8 +11,10 @@ or privileged command was run for this wiring.
   requires all seven Program/Controller symbols, Provider SSH requires all
   three transport/protocol symbols, Provider Import requires its preview
   symbol, and Provider Runtime retains both normal and race evidence for its
-  two existing symbols. Every selector uses Go JSON terminal-pass enforcement,
-  rejects skips/absence, rejects stderr, and uploads only sanitized evidence.
+  two existing symbols. Every selector captures its Go exit status before Go
+  JSON terminal-pass enforcement reports each fixed test name and status,
+  rejects skips/absence and stderr, then asserts the recorded status. It uploads
+  only sanitized evidence.
   Host Controller retains its full package test and vet coverage and excludes
   Provider Runtime from its historical broad race pass; Provider Runtime owns
   that dedicated race pass. The other existing full package and vet checks are

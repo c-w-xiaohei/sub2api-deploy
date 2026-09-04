@@ -12,8 +12,11 @@ const gateSymbols = {
 };
 
 function selectorFor(job: string): string[] {
-  const start = workflow.indexOf(`  ${job}:`);
-  const next = workflow.indexOf("\n  ", start + 1);
+  const jobs = [...workflow.matchAll(/^  ([a-z-]+):$/gm)];
+  const index = jobs.findIndex((match) => match[1] === job);
+  const start = jobs[index]?.index;
+  const next = jobs[index + 1]?.index;
+  if (start === undefined) return [];
   const section = workflow.slice(start, next < 0 ? undefined : next);
   const match = section.match(/tests='\^\(([^']+)\)\$'/);
   return match?.[1].split("|") ?? [];
@@ -59,10 +62,12 @@ describe("Task4 CI contracts", () => {
   });
 
   it("keeps scoped JSON no-skip evidence and baseline full checks for every required Go gate", () => {
-    for (const gate of ["host-controller", "provider-ssh", "provider-runtime", "provider-import"]) {
-      expect(workflow).toContain(`${gate}-safe-$TARGET_SHA`);
-      expect(workflow).toContain(`required test did not pass`);
-    }
+    expect(workflow).toContain("host-controller-${TARGET_SHA}-${{ matrix.arch }}.jsonl");
+    expect(workflow).toContain("host-controller-safe-${TARGET_SHA}-${{ matrix.arch }}");
+    for (const gate of ["provider-ssh", "provider-runtime", "provider-import"]) expect(workflow).toContain(`${gate}-safe-$TARGET_SHA`);
+    expect(workflow).toContain("console.log(`${test}: ${action}`)");
+    expect(workflow).toContain("console.log(`${t}: ${action}`)");
+    expect(workflow).toContain('test "$status" -eq 0');
     expect(workflow).toContain("go vet ./internal/... ./cmd/...");
     expect(workflow).toContain("go test -race -count=1 $(go list ./internal/... ./cmd/... | grep -v '/internal/integration/providerruntime$')");
     expect(workflow).toContain("go test -race -json -count=1 -timeout=15m");

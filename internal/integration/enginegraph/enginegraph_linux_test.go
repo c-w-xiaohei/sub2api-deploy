@@ -943,7 +943,7 @@ func (h *engineGraphHarness) updateTargets(t *testing.T, configName, secretsName
 				Stderr:           io.Discard,
 				SuppressProgress: true,
 			},
-			Engine: engineOptions(hostFactory, targets),
+			Engine: engineOptions(hostFactory, targets...),
 		},
 		SecretsManager:  h.secretsManager,
 		SecretsProvider: stack.Base64SecretsProvider{},

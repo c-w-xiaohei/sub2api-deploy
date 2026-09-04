@@ -3,8 +3,8 @@
 package providerimport_test
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -191,12 +191,12 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	return &harness{
-		backend:  b,
-		stack:    st,
-		project:  project,
-		root:     t.TempDir(),
-		manager:  manager,
-		key:      key,
+		backend: b,
+		stack:   st,
+		project: project,
+		root:    t.TempDir(),
+		manager: manager,
+		key:     key,
 	}
 }
 
@@ -235,7 +235,9 @@ func (h *harness) preview(t *testing.T) (*deploy.Snapshot, error) {
 
 func importStackConfig(key string, importTarget bool) config.Map {
 	values := config.Map{config.MustMakeKey("sub2api-host", "revisionKey"): config.NewSecureValue(key)}
-	if importTarget { values[config.MustMakeKey("sub2api-environment", "hostImportTarget")] = config.NewValue("edge") }
+	if importTarget {
+		values[config.MustMakeKey("sub2api-environment", "hostImportTarget")] = config.NewValue("edge")
+	}
 	return values
 }
 
@@ -322,7 +324,7 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (*deploy.Snapsho
 
 type languageRuntime struct {
 	pkgplugin.LanguageRuntime
-	harness *harness
+	harness      *harness
 	importTarget bool
 }
 
@@ -343,7 +345,9 @@ func (r *languageRuntime) Run(ctx context.Context, info pkgplugin.RunInfo) (stri
 	}
 	defer closeProxy()
 	programConfig := map[string]string{}
-	for key, value := range info.Config { programConfig[key.String()] = value }
+	for key, value := range info.Config {
+		programConfig[key.String()] = value
+	}
 	programContext, err := pulumi.NewContext(ctx, pulumi.RunInfo{Project: info.Project, Stack: info.Stack, Parallel: info.Parallel, DryRun: info.DryRun, MonitorAddr: address, Config: programConfig})
 	if err != nil {
 		return "", false, err
@@ -442,13 +446,17 @@ func (p *monitorProxy) SignalAndWaitForShutdown(c context.Context, r *emptypb.Em
 func (h *harness) adapter() pkgplugin.Provider {
 	return &deploytest.Provider{
 		ConfigureF: func(ctx context.Context, req pkgplugin.ConfigureRequest) (pkgplugin.ConfigureResponse, error) {
-			if h.isCapturing() { return pkgplugin.ConfigureResponse{}, nil }
+			if h.isCapturing() {
+				return pkgplugin.ConfigureResponse{}, nil
+			}
 			h.record("Configure")
 			_, err := h.provider.client.Configure(ctx, &pulumirpc.ConfigureRequest{Args: marshalProperties(nil, req.Inputs)})
 			return pkgplugin.ConfigureResponse{}, err
 		},
 		CheckF: func(ctx context.Context, req pkgplugin.CheckRequest) (pkgplugin.CheckResponse, error) {
-			if h.isCapturing() { return pkgplugin.CheckResponse{Properties: req.News}, nil }
+			if h.isCapturing() {
+				return pkgplugin.CheckResponse{Properties: req.News}, nil
+			}
 			h.record("Check")
 			response, err := h.provider.client.Check(ctx, &pulumirpc.CheckRequest{Urn: string(req.URN), Olds: marshalProperties(nil, req.Olds), News: marshalProperties(nil, req.News)})
 			if err != nil {
@@ -457,7 +465,9 @@ func (h *harness) adapter() pkgplugin.Provider {
 			return pkgplugin.CheckResponse{Properties: unmarshalProperties(response.Inputs)}, nil
 		},
 		DiffF: func(ctx context.Context, req pkgplugin.DiffRequest) (pkgplugin.DiffResult, error) {
-			if h.isCapturing() { return pkgplugin.DiffResult{Changes: pkgplugin.DiffNone}, nil }
+			if h.isCapturing() {
+				return pkgplugin.DiffResult{Changes: pkgplugin.DiffNone}, nil
+			}
 			h.record("Diff")
 			response, err := h.provider.client.Diff(ctx, &pulumirpc.DiffRequest{Id: string(req.ID), Urn: string(req.URN), Olds: marshalProperties(nil, req.OldOutputs), OldInputs: marshalProperties(nil, req.OldInputs), News: marshalProperties(nil, req.NewInputs)})
 			if err != nil {
@@ -472,7 +482,9 @@ func (h *harness) adapter() pkgplugin.Provider {
 			return pkgplugin.DiffResult{Changes: pkgplugin.DiffSome}, nil
 		},
 		ReadF: func(ctx context.Context, req pkgplugin.ReadRequest) (pkgplugin.ReadResponse, error) {
-			if h.isCapturing() { return pkgplugin.ReadResponse{}, errors.New("capture preview unexpectedly read Host") }
+			if h.isCapturing() {
+				return pkgplugin.ReadResponse{}, errors.New("capture preview unexpectedly read Host")
+			}
 			h.record("Read")
 			response, err := h.provider.client.Read(ctx, &pulumirpc.ReadRequest{Id: string(req.ID), Urn: string(req.URN), Name: req.Name, Type: string(req.Type), Inputs: marshalProperties(nil, req.Inputs), Properties: marshalProperties(nil, req.State)})
 			if err != nil {
@@ -499,6 +511,7 @@ func (h *harness) record(call string) {
 	defer h.mu.Unlock()
 	h.calls = append(h.calls, call)
 }
+
 // Import tokens encode Go structs, where empty collections are omitted. The
 // normal program registration retains its empty Pulumi containers. This is the
 // sole accepted representation-only import difference; every other provider
@@ -526,7 +539,9 @@ func importOmittedEmptyCollections(req pkgplugin.DiffRequest, response *pulumirp
 
 func containsDiff(diffs []string, want string) bool {
 	for _, diff := range diffs {
-		if diff == want { return true }
+		if diff == want {
+			return true
+		}
 	}
 	return false
 }
@@ -569,6 +584,7 @@ type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
+
 func (b *lockedBuffer) Write(value []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -579,6 +595,7 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
 type processIdentity struct {
 	pid   int
 	start string
@@ -604,10 +621,11 @@ type dockerContainer struct {
 }
 
 type fixtureInventory struct {
-	Version   int                            `json:"version"`
-	Resource  hostcontract.ResourceIdentity  `json:"resource"`
-	Ownership hostcontract.OwnershipIdentity `json:"ownership"`
-	Objects   []fixtureManagedObject         `json:"objects"`
+	Version         int                            `json:"version"`
+	Resource        hostcontract.ResourceIdentity  `json:"resource"`
+	Ownership       hostcontract.OwnershipIdentity `json:"ownership"`
+	AppliedRevision string                         `json:"appliedRevision"`
+	Objects         []fixtureManagedObject         `json:"objects"`
 }
 
 // fixtureManagedObject mirrors only hostruntime's private JSON inventory schema.
@@ -646,15 +664,23 @@ type fixtureRouteHTTP struct {
 	Services map[string]fixtureService `json:"services"`
 }
 type fixtureRouter struct {
-	Rule        string   `json:"rule"`
-	EntryPoints []string `json:"entryPoints"`
-	Service     string   `json:"service"`
+	Rule        string      `json:"rule"`
+	EntryPoints []string    `json:"entryPoints"`
+	Service     string      `json:"service"`
 	TLS         *fixtureTLS `json:"tls,omitempty"`
 }
-type fixtureTLS struct { CertResolver string `json:"certResolver"` }
-type fixtureService struct { LoadBalancer fixtureLoadBalancer `json:"loadBalancer"` }
-type fixtureLoadBalancer struct { Servers []fixtureServer `json:"servers"` }
-type fixtureServer struct { URL string `json:"url"` }
+type fixtureTLS struct {
+	CertResolver string `json:"certResolver"`
+}
+type fixtureService struct {
+	LoadBalancer fixtureLoadBalancer `json:"loadBalancer"`
+}
+type fixtureLoadBalancer struct {
+	Servers []fixtureServer `json:"servers"`
+}
+type fixtureServer struct {
+	URL string `json:"url"`
+}
 
 func writePreseed(t *testing.T, inputs resource.PropertyMap) preseedFixture {
 	t.Helper()
@@ -663,10 +689,14 @@ func writePreseed(t *testing.T, inputs resource.PropertyMap) preseedFixture {
 	trace := filepath.Join(caseDir, "trace")
 	machinePath := filepath.Join(caseDir, "machine-id")
 	for _, path := range []string{root, trace, filepath.Join(root, "runtime", "managed"), filepath.Join(root, "runtime", "dynamic"), filepath.Join(root, "runtime", "data")} {
-		if err := os.MkdirAll(path, 0o700); err != nil { t.Fatal(err) }
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	bin := filepath.Join(caseDir, "bin")
-	if err := os.MkdirAll(bin, 0o700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	writeFixture(t, filepath.Join(bin, "docker"), dockerShim(), 0o700)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PROVIDER_IMPORT_TRACE", trace)
@@ -677,6 +707,7 @@ func writePreseed(t *testing.T, inputs resource.PropertyMap) preseedFixture {
 	machine := fixtureMachineIdentity()
 	ownership := hostcontract.OwnershipIdentity{Value: "oid1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 	revision := fixtureRevision(t, resourceValue, target, secretValues)
+	writeFixture(t, filepath.Join(bin, "nft"), nftShim(fixtureNftTableName(resourceValue, ownership)), 0o700)
 	appToken := fixtureToken("app", "app")
 	appName := fixtureObjectName(resourceValue, ownership, "app", appToken, "green")
 	proxyName := fixtureObjectName(resourceValue, ownership, "proxy", "proxy", "live")
@@ -685,7 +716,7 @@ func writePreseed(t *testing.T, inputs resource.PropertyMap) preseedFixture {
 	proxyEnv := "env-" + proxyToken + fixtureToken(revision)
 	proxyConfig := "config-" + fixtureToken("proxy", revision)
 	app := target.Apps[0]
-	inventory := fixtureInventory{Version: 2, Resource: resourceValue, Ownership: ownership, Objects: []fixtureManagedObject{
+	inventory := fixtureInventory{Version: 3, Resource: resourceValue, Ownership: ownership, AppliedRevision: revision, Objects: []fixtureManagedObject{
 		{Role: "app", AppToken: appToken, Name: appName, Image: app.Image, Data: fixtureLinks(app.DataLinks), Revision: revision, Active: "green", Env: appEnv, Hostname: app.Hostname, ReadinessPath: app.ReadinessPath, DrainSeconds: 30},
 		{Role: "proxy", Name: proxyName, Image: target.ReverseProxy.Image, Revision: revision, Env: proxyEnv, Config: proxyConfig},
 	}}
@@ -694,14 +725,16 @@ func writePreseed(t *testing.T, inputs resource.PropertyMap) preseedFixture {
 	writeFixture(t, filepath.Join(root, "runtime", "managed", proxyEnv), []byte("CF_DNS_API_TOKEN="+secretValues.ReverseProxy.DNSChallengeToken+"\n"), 0o600)
 	writeFixture(t, filepath.Join(root, "runtime", "managed", proxyConfig), fixtureProxyConfig(target.ReverseProxy.ACMEEmail), 0o600)
 	dataDir := filepath.Join(root, "runtime", "data", fixtureToken("app-data", appToken))
-	if err := os.MkdirAll(dataDir, 0o700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	writeFixture(t, filepath.Join(dataDir, "sentinel"), []byte("persistent-data-sentinel\n"), 0o600)
 	writeFixture(t, filepath.Join(root, "runtime", "dynamic", "route-"+appToken+".json"), fixtureRoute(resourceValue, ownership, appToken, appName, revision, app.Hostname), 0o600)
 	observation := hostcontract.StableObservation{Machine: machine, Ownership: ownership, HostRelease: target.ReleaseArtifact, AppliedRevision: revision, Ready: true, Apps: []hostcontract.AppObservation{{ID: app.ID, ActiveImage: app.Image, Ready: true}}}
 	state := hostruntime.State{Version: 1, Resource: resourceValue, Machine: machine, Ownership: ownership, AppliedRevision: revision, Observation: observation}
 	writeJSONFixture(t, filepath.Join(root, "state.json"), state, 0o600)
 	model := dockerReadModel{NetworkName: fixtureNetworkName(resourceValue, ownership), NetworkOwner: fixtureOwnershipLabel(resourceValue, ownership, "network", "", ""), NetworkLabel: fixtureNetworkLabel(resourceValue, ownership), Containers: map[string]dockerContainer{
-		appName: {Owner: fixtureOwnershipLabel(resourceValue, ownership, "app", appToken, "green"), Target: fixtureTargetLabel("app", appToken, "green", revision, app.Image), ReadinessPath: app.ReadinessPath},
+		appName:   {Owner: fixtureOwnershipLabel(resourceValue, ownership, "app", appToken, "green"), Target: fixtureTargetLabel("app", appToken, "green", revision, app.Image), ReadinessPath: app.ReadinessPath},
 		proxyName: {Owner: fixtureOwnershipLabel(resourceValue, ownership, "proxy", "", ""), Target: fixtureTargetLabel("proxy", "", "", revision, target.ReverseProxy.Image), ReadinessPath: ""},
 	}}
 	writeJSONFixture(t, filepath.Join(trace, "docker-model.json"), model, 0o600)
@@ -713,12 +746,24 @@ func validatePreseed(t *testing.T, fixture preseedFixture) {
 	t.Helper()
 	request := hostprotocol.Request{Action: hostcontract.ActionInspect, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Resource: hostcontract.ResourceIdentity{Environment: "canary", ServerKey: "edge"}, TargetRevision: readFixtureRevision(t, fixture.root)}
 	frame, err := hostprotocol.EncodeRequest(request)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	var response bytes.Buffer
 	digest := filepath.Join(fixture.trace, "preseed.digest")
-	if err := testonly.ServeWithRequestDigest(&response, bytes.NewReader(frame), fixture.root, fixture.machine, digest); err != nil { t.Fatalf("direct preseed inspect: %v", err) }
+	if err := testonly.ServeWithRequestDigest(&response, bytes.NewReader(frame), fixture.root, fixture.machine, digest); err != nil {
+		t.Fatalf("direct preseed inspect: %v", err)
+	}
 	decoded, err := hostprotocol.DecodeResponse(response.Bytes())
-	if err != nil || decoded.Result == nil || decoded.Result.Observation == nil || !decoded.Result.Observation.Ready || decoded.Result.Observation.Drifted { t.Fatalf("direct preseed inspect did not return a ready observation: decode=%v result=%+v observation=%+v reads=%q forbidden=%q", err, decoded.Result, decoded.Result.Observation, readTraceFile(fixture.trace, "docker-reads"), readTraceFile(fixture.trace, "forbidden")) }
+	if err != nil || decoded.Result == nil || decoded.Result.Observation == nil || !decoded.Result.Observation.Ready || decoded.Result.Observation.Drifted {
+		var errorCategory hostprotocol.ErrorCategory
+		var errorCode hostprotocol.ErrorCode
+		if decoded.Error != nil {
+			errorCategory = decoded.Error.Category
+			errorCode = decoded.Error.Code
+		}
+		t.Fatalf("direct preseed inspect did not return a ready observation: category=preseed-inspect error-category=%q error-code=%q", errorCategory, errorCode)
+	}
 }
 
 func readTraceFile(trace, name string) string {
@@ -731,9 +776,21 @@ func decodeFixtureInputs(t *testing.T, inputs resource.PropertyMap) (hostcontrac
 	var resourceValue hostcontract.ResourceIdentity
 	var target hostcontract.Target
 	var secretValues hostcontract.Secrets
-	decode := func(name string, into any) { b, err := json.Marshal(unwrapFixtureValue(inputs[resource.PropertyKey(name)]).Mappable()); if err != nil { t.Fatal(err) }; if err = json.Unmarshal(b, into); err != nil { t.Fatal(err) } }
-	decode("resource", &resourceValue); decode("target", &target); decode("secrets", &secretValues)
-	if resourceValue != (hostcontract.ResourceIdentity{Environment: "canary", ServerKey: "edge"}) || len(target.Apps) != 1 || target.ReverseProxy == nil { t.Fatal("unexpected import fixture shape") }
+	decode := func(name string, into any) {
+		b, err := json.Marshal(unwrapFixtureValue(inputs[resource.PropertyKey(name)]).Mappable())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = json.Unmarshal(b, into); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decode("resource", &resourceValue)
+	decode("target", &target)
+	decode("secrets", &secretValues)
+	if resourceValue != (hostcontract.ResourceIdentity{Environment: "canary", ServerKey: "edge"}) || len(target.Apps) != 1 || target.ReverseProxy == nil {
+		t.Fatal("unexpected import fixture shape")
+	}
 	return resourceValue, target, secretValues
 }
 
@@ -744,17 +801,61 @@ func unwrapFixtureValue(value resource.PropertyValue) resource.PropertyValue {
 	return value
 }
 
-func fixtureMachineIdentity() hostcontract.MachineIdentity { return hostcontract.MachineIdentity{Value: "mid1:0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54"} }
-func fixtureRevision(t *testing.T, resourceValue hostcontract.ResourceIdentity, target hostcontract.Target, secretValues hostcontract.Secrets) string { t.Helper(); key, err := base64.StdEncoding.DecodeString(revisionKey); if err != nil { t.Fatal(err) }; revision, err := hostcontract.TargetRevision(hostcontract.RevisionKey(key), resourceValue, target, secretValues); if err != nil { t.Fatalf("fixture target revision: %v (validation=%v)", err, hostcontract.ValidateTarget(target, secretValues)) }; return revision }
-func fixtureLinks(links []hostcontract.DataLink) []fixtureManagedLink { out := make([]fixtureManagedLink, len(links)); for i, link := range links { out[i] = fixtureManagedLink{Name: link.Name, Identity: link.Identity} }; return out }
-func fixtureToken(values ...string) string { h := sha256.New(); for _, value := range values { _, _ = h.Write([]byte(value)); _, _ = h.Write([]byte{0}) }; return hex.EncodeToString(h.Sum(nil)[:12]) }
-func fixtureObjectName(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity, role, app, slot string) string { return "s2h-" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value, role, app, slot) }
-func fixtureOwnershipLabel(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity, role, app, slot string) string { return "s2h1:" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value, role, app, slot) }
-func fixtureTargetLabel(role, app, active, revision, image string) string { return "s2ht1:" + fixtureToken(role, app, active, revision, image, "", "0", "false") }
-func fixtureNetworkName(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity) string { return "s2h-net-" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value) }
-func fixtureNetworkLabel(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity) string { return "s2hnet1:" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value) }
-func fixtureAppEnv(secrets hostcontract.Secrets) []byte { app := secrets.Apps["app"]; return []byte("ADMIN_EMAIL=admin@example.test\nFEATURE_FLAG=enabled\nINITIAL_ADMIN_PASSWORD=" + app.InitialAdminPassword + "\nJWT_SECRET=" + app.JWTSecret + "\nTOTP_ENCRYPTION_KEY=" + app.TOTPEncryptionKey + "\nPOSTGRES_USERNAME=" + app.Postgres.Username + "\nPOSTGRES_PASSWORD=" + app.Postgres.Password + "\nREDIS_USERNAME=" + app.Redis.Username + "\nREDIS_PASSWORD=" + app.Redis.Password + "\n") }
-func fixtureProxyConfig(email string) []byte { return []byte("entryPoints:\n  web:\n    address: \":80\"\n  websecure:\n    address: \":443\"\n  probe:\n    address: \":8081\"\nproviders:\n  file:\n    directory: /etc/traefik/dynamic\n    watch: true\ncertificatesResolvers:\n  cloudflare:\n    acme:\n      email: " + strconv.Quote(email) + "\n      storage: /etc/traefik/acme.json\n      dnsChallenge:\n        provider: cloudflare\n") }
+func fixtureMachineIdentity() hostcontract.MachineIdentity {
+	return hostcontract.MachineIdentity{Value: "mid1:0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54"}
+}
+func fixtureRevision(t *testing.T, resourceValue hostcontract.ResourceIdentity, target hostcontract.Target, secretValues hostcontract.Secrets) string {
+	t.Helper()
+	key, err := base64.StdEncoding.DecodeString(revisionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := hostcontract.TargetRevision(hostcontract.RevisionKey(key), resourceValue, target, secretValues)
+	if err != nil {
+		t.Fatalf("fixture target revision: %v (validation=%v)", err, hostcontract.ValidateTarget(target, secretValues))
+	}
+	return revision
+}
+func fixtureLinks(links []hostcontract.DataLink) []fixtureManagedLink {
+	out := make([]fixtureManagedLink, len(links))
+	for i, link := range links {
+		out[i] = fixtureManagedLink{Name: link.Name, Identity: link.Identity}
+	}
+	return out
+}
+func fixtureToken(values ...string) string {
+	h := sha256.New()
+	for _, value := range values {
+		_, _ = h.Write([]byte(value))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:12])
+}
+func fixtureObjectName(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity, role, app, slot string) string {
+	return "s2h-" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value, role, app, slot)
+}
+func fixtureOwnershipLabel(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity, role, app, slot string) string {
+	return "s2h1:" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value, role, app, slot)
+}
+func fixtureTargetLabel(role, app, active, revision, image string) string {
+	return "s2ht1:" + fixtureToken(role, app, active, revision, image, "", "0", "false")
+}
+func fixtureNetworkName(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity) string {
+	return "s2h-net-" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value)
+}
+func fixtureNftTableName(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity) string {
+	return "s2h_" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value)
+}
+func fixtureNetworkLabel(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity) string {
+	return "s2hnet1:" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value)
+}
+func fixtureAppEnv(secrets hostcontract.Secrets) []byte {
+	app := secrets.Apps["app"]
+	return []byte("ADMIN_EMAIL=admin@example.test\nFEATURE_FLAG=enabled\nINITIAL_ADMIN_PASSWORD=" + app.InitialAdminPassword + "\nJWT_SECRET=" + app.JWTSecret + "\nTOTP_ENCRYPTION_KEY=" + app.TOTPEncryptionKey + "\nPOSTGRES_USERNAME=" + app.Postgres.Username + "\nPOSTGRES_PASSWORD=" + app.Postgres.Password + "\nREDIS_USERNAME=" + app.Redis.Username + "\nREDIS_PASSWORD=" + app.Redis.Password + "\n")
+}
+func fixtureProxyConfig(email string) []byte {
+	return []byte("entryPoints:\n  web:\n    address: \":80\"\n  websecure:\n    address: \":443\"\n  probe:\n    address: \":8081\"\nproviders:\n  file:\n    directory: /etc/traefik/dynamic\n    watch: true\ncertificatesResolvers:\n  cloudflare:\n    acme:\n      email: " + strconv.Quote(email) + "\n      storage: /etc/traefik/acme.json\n      dnsChallenge:\n        provider: cloudflare\n")
+}
 func fixtureRoute(resourceValue hostcontract.ResourceIdentity, ownership hostcontract.OwnershipIdentity, token, name, revision, hostname string) []byte {
 	key := fixtureToken("route", resourceValue.Environment, resourceValue.ServerKey, ownership.Value, token, revision, "green", name)
 	service := fixtureToken("service", key)
@@ -768,38 +869,99 @@ func fixtureRoute(resourceValue hostcontract.ResourceIdentity, ownership hostcon
 	b, _ := json.Marshal(route)
 	return b
 }
-func readFixtureRevision(t *testing.T, root string) string { t.Helper(); var state hostruntime.State; b, err := os.ReadFile(filepath.Join(root, "state.json")); if err != nil { t.Fatal(err) }; if err = json.Unmarshal(b, &state); err != nil { t.Fatal(err) }; return state.AppliedRevision }
-func writeJSONFixture(t *testing.T, path string, value any, mode os.FileMode) { t.Helper(); b, err := json.Marshal(value); if err != nil { t.Fatal(err) }; writeFixture(t, path, b, mode) }
+func readFixtureRevision(t *testing.T, root string) string {
+	t.Helper()
+	var state hostruntime.State
+	b, err := os.ReadFile(filepath.Join(root, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(b, &state); err != nil {
+		t.Fatal(err)
+	}
+	return state.AppliedRevision
+}
+func writeJSONFixture(t *testing.T, path string, value any, mode os.FileMode) {
+	t.Helper()
+	b, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, path, b, mode)
+}
 
-func dockerShim() []byte { return []byte("#!/bin/sh\nexec env SUB2API_PROVIDER_IMPORT_DOCKER=1 \"$PROVIDER_IMPORT_TEST_BINARY\" -test.run '^TestProviderImportDockerHelper$' -- \"$@\"\n") }
+func dockerShim() []byte {
+	return []byte("#!/bin/sh\nexec env SUB2API_PROVIDER_IMPORT_DOCKER=1 \"$PROVIDER_IMPORT_TEST_BINARY\" -test.run '^TestProviderImportDockerHelper$' -- \"$@\"\n")
+}
+
+func nftShim(table string) []byte {
+	return []byte("#!/bin/sh\nif [ \"$#\" -eq 5 ] && [ \"$1\" = \"-j\" ] && [ \"$2\" = \"list\" ] && [ \"$3\" = \"table\" ] && [ \"$4\" = \"inet\" ] && [ \"$5\" = \"" + table + "\" ]; then\n  printf '%s\\n' 'Error: No such file or directory' >&2\n  exit 1\nfi\nprintf '%s\\n' 'unsupported nft invocation' >&2\nexit 64\n")
+}
 
 func runDockerReadHelper(argv []string) error {
 	separator := -1
-	for i, value := range argv { if value == "--" { separator = i; break } }
-	if separator < 0 || separator == len(argv)-1 { return errors.New("missing docker arguments") }
+	for i, value := range argv {
+		if value == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 || separator == len(argv)-1 {
+		return errors.New("missing docker arguments")
+	}
 	var model dockerReadModel
 	b, err := os.ReadFile(os.Getenv("PROVIDER_IMPORT_DOCKER_MODEL"))
-	if err != nil || json.Unmarshal(b, &model) != nil { return errors.New("invalid docker model") }
+	if err != nil || json.Unmarshal(b, &model) != nil {
+		return errors.New("invalid docker model")
+	}
 	args := argv[separator+1:]
 	network := []string{"network", "ls", "--filter", "name=^" + model.NetworkName + "$", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.network\"}}"}
-	if reflect.DeepEqual(args, network) { _, err = fmt.Fprintf(os.Stdout, "%s\t%s\t%s\n", model.NetworkName, model.NetworkOwner, model.NetworkLabel); if err == nil { writeDockerRecord("read network-ls") }; return err }
+	if reflect.DeepEqual(args, network) {
+		_, err = fmt.Fprintf(os.Stdout, "%s\t%s\t%s\n", model.NetworkName, model.NetworkOwner, model.NetworkLabel)
+		if err == nil {
+			writeDockerRecord("read network-ls")
+		}
+		return err
+	}
 	if len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.target\"}}" {
 		name := strings.TrimSuffix(strings.TrimPrefix(args[4], "name=^/"), "$")
 		container, ok := model.Containers[name]
-		if !ok { return errors.New("unknown inspect container") }
+		if !ok {
+			return errors.New("unknown inspect container")
+		}
 		_, err = fmt.Fprintf(os.Stdout, "%s\t%s\t%s\n", name, container.Owner, container.Target)
-		if err == nil { writeDockerRecord("read container-ls") }
+		if err == nil {
+			writeDockerRecord("read container-ls")
+		}
 		return err
 	}
-	if len(args) == 7 && args[0] == "exec" && args[2] == "wget" && args[3] == "-q" && args[4] == "-O" && args[5] == "/dev/null" { container, ok := model.Containers[args[1]]; if !ok || args[6] != "http://localhost:8080"+container.ReadinessPath { return errors.New("invalid app readiness") }; writeDockerRecord("read app-readiness"); return nil }
-	if len(args) == 4 && args[0] == "exec" && args[2] == "traefik" && args[3] == "version" { container, ok := model.Containers[args[1]]; if !ok || container.ReadinessPath != "" { return errors.New("invalid proxy readiness") }; writeDockerRecord("read proxy-readiness"); return nil }
+	if len(args) == 7 && args[0] == "exec" && args[2] == "wget" && args[3] == "-q" && args[4] == "-O" && args[5] == "/dev/null" {
+		container, ok := model.Containers[args[1]]
+		if !ok || args[6] != "http://localhost:8080"+container.ReadinessPath {
+			return errors.New("invalid app readiness")
+		}
+		writeDockerRecord("read app-readiness")
+		return nil
+	}
+	if len(args) == 4 && args[0] == "exec" && args[2] == "traefik" && args[3] == "version" {
+		container, ok := model.Containers[args[1]]
+		if !ok || container.ReadinessPath != "" {
+			return errors.New("invalid proxy readiness")
+		}
+		writeDockerRecord("read proxy-readiness")
+		return nil
+	}
 	return errors.New("forbidden docker mutation or unsupported read")
 }
 
 func writeDockerRecord(record string) {
 	trace := os.Getenv("PROVIDER_IMPORT_TRACE")
-	file, err := os.OpenFile(filepath.Join(trace, "current", "docker-reads"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); if err != nil { return }
-	defer file.Close(); _, _ = file.WriteString(record + "\n")
+	file, err := os.OpenFile(filepath.Join(trace, "current", "docker-reads"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.WriteString(record + "\n")
 }
 
 func writeForbiddenDockerRecord(record string) {
@@ -808,15 +970,23 @@ func writeForbiddenDockerRecord(record string) {
 	_ = os.WriteFile(path, []byte(record+"\n"), 0o600)
 }
 
-func sanitizeDockerError(err error) string { return strings.NewReplacer("\n", " ", "\r", " ", "\x00", " ").Replace(err.Error()) }
+func sanitizeDockerError(err error) string {
+	return strings.NewReplacer("\n", " ", "\r", " ", "\x00", " ").Replace(err.Error())
+}
 
 func newTraceGeneration(t *testing.T, trace string) {
 	t.Helper()
 	name := fmt.Sprintf("%d-%s", time.Now().UnixNano(), fixtureToken(t.Name()))
-	if err := os.MkdirAll(filepath.Join(trace, "generations", name), 0o700); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(filepath.Join(trace, "generations", name), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	temporary := filepath.Join(trace, ".current-"+name)
-	if err := os.Symlink(filepath.Join("generations", name), temporary); err != nil { t.Fatal(err) }
-	if err := os.Rename(temporary, filepath.Join(trace, "current")); err != nil { t.Fatal(err) }
+	if err := os.Symlink(filepath.Join("generations", name), temporary); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temporary, filepath.Join(trace, "current")); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func startProvider(t *testing.T, fixture preseedFixture) *providerProcess {
@@ -923,7 +1093,9 @@ func (h *harness) assertImportResult(t *testing.T, snapshot *deploy.Snapshot) {
 	if string(state.URN) != hostURN() {
 		t.Fatalf("Host URN = %q, want %q", state.URN, hostURN())
 	}
-	if !strings.HasPrefix(token, "hit1:") || state.ID != resource.ID(h.stableID()) || state.ImportID != resource.ID(token) { t.Fatalf("Host state did not preserve real encrypted import token") }
+	if !strings.HasPrefix(token, "hit1:") || state.ID != resource.ID(h.stableID()) || state.ImportID != resource.ID(token) {
+		t.Fatalf("Host state did not preserve real encrypted import token")
+	}
 	assertCanonicalHostInputs(t, state.Inputs, h.productionHostInputs)
 	assertImportedCheckpoint(t, state, preseeded)
 	if !secretOnlyProperty(state.Outputs, secretCanary, false) {
@@ -936,7 +1108,9 @@ func (h *harness) assertLatestHostRegistration(t *testing.T, phase string, impor
 	defer h.mu.Unlock()
 	for index := len(h.registrations) - 1; index >= 0; index-- {
 		registration := h.registrations[index]
-		if registration.phase != phase { continue }
+		if registration.phase != phase {
+			continue
+		}
 		if imported && !strings.HasPrefix(registration.importID, "hit1:") {
 			t.Fatalf("%s Host registration ImportId = %q, want hit1 token", phase, registration.importID)
 		}
@@ -953,7 +1127,10 @@ func assertImportedCheckpoint(t *testing.T, state *pkgresource.State, expected h
 	var ownership hostcontract.OwnershipIdentity
 	var revision string
 	var observation hostcontract.StableObservation
-	for _, item := range []struct { name string; into any }{{"machine", &machine}, {"ownership", &ownership}, {"appliedRevision", &revision}, {"observation", &observation}} {
+	for _, item := range []struct {
+		name string
+		into any
+	}{{"machine", &machine}, {"ownership", &ownership}, {"appliedRevision", &revision}, {"observation", &observation}} {
 		value, ok := state.Outputs[resource.PropertyKey(item.name)]
 		if !ok || value.ContainsSecrets() || value.IsComputed() || !decodePropertyJSON(value, item.into) {
 			t.Fatalf("import checkpoint output %s is missing, secret, unknown, or invalid", item.name)
@@ -980,12 +1157,16 @@ func secretOnlyValue(value resource.PropertyValue, canary string, secret bool) b
 	}
 	if value.IsArray() {
 		for _, child := range value.ArrayValue() {
-			if !secretOnlyValue(child, canary, secret) { return false }
+			if !secretOnlyValue(child, canary, secret) {
+				return false
+			}
 		}
 	}
 	if value.IsObject() {
 		for _, child := range value.ObjectValue() {
-			if !secretOnlyValue(child, canary, secret) { return false }
+			if !secretOnlyValue(child, canary, secret) {
+				return false
+			}
 		}
 	}
 	return true
@@ -1003,7 +1184,9 @@ func assertCanonicalHostInputs(t *testing.T, imported, programInputs resource.Pr
 		}
 	}
 	for _, key := range []resource.PropertyKey{"resource", "server"} {
-		if !reflect.DeepEqual(imported[key], programInputs[key]) { t.Fatalf("import checkpoint %s differs from the registered Host input", key) }
+		if !reflect.DeepEqual(imported[key], programInputs[key]) {
+			t.Fatalf("import checkpoint %s differs from the registered Host input", key)
+		}
 	}
 	var importedTarget, programTarget hostcontract.Target
 	var importedSecrets, programSecrets hostcontract.Secrets
@@ -1096,14 +1279,22 @@ func (h *harness) assertNoEffects(t *testing.T) {
 func (h *harness) assertDockerReads(t *testing.T, want ...string) {
 	b, err := os.ReadFile(filepath.Join(h.provider.trace, "current", "docker-reads"))
 	if len(want) == 0 {
-		if err == nil && strings.TrimSpace(string(b)) != "" { t.Fatalf("unexpected Docker reads: %q", b) }
+		if err == nil && strings.TrimSpace(string(b)) != "" {
+			t.Fatalf("unexpected Docker reads: %q", b)
+		}
 		return
 	}
-	if err != nil { t.Fatalf("read Docker trace: %v", err) }
+	if err != nil {
+		t.Fatalf("read Docker trace: %v", err)
+	}
 	got := strings.Fields(strings.TrimSpace(string(b)))
 	var actions []string
-	for i := 0; i+1 < len(got); i += 2 { actions = append(actions, got[i]+" "+got[i+1]) }
-	if !reflect.DeepEqual(actions, want) { t.Fatalf("Docker inspect reads = %v, want %v", actions, want) }
+	for i := 0; i+1 < len(got); i += 2 {
+		actions = append(actions, got[i]+" "+got[i+1])
+	}
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatalf("Docker inspect reads = %v, want %v", actions, want)
+	}
 }
 func (h *harness) assertUnchangedRoot(t *testing.T, before map[string]string) {
 	if after := treeManifest(t, h.provider.root); !reflect.DeepEqual(before, after) {
@@ -1115,9 +1306,12 @@ func (h *harness) assertNoCanaryLeak(t *testing.T) {
 		t.Fatal("secret canary leaked to provider diagnostics")
 	}
 	for _, root := range []string{h.provider.trace, h.provider.root} {
-		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
+		if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
 				return err
+			}
+			if info.IsDir() {
+				return nil
 			}
 			b, readErr := os.ReadFile(path)
 			if readErr != nil {
@@ -1128,7 +1322,9 @@ func (h *harness) assertNoCanaryLeak(t *testing.T) {
 				t.Fatalf("secret canary leaked to %s", path)
 			}
 			return nil
-		})
+		}); err != nil {
+			t.Fatal("secret canary scan failed")
+		}
 	}
 }
 func treeManifest(t *testing.T, root string) map[string]string {
@@ -1139,20 +1335,28 @@ func treeManifest(t *testing.T, root string) map[string]string {
 			return err
 		}
 		relative, err := filepath.Rel(root, path)
-		if err != nil { return err }
-		if relative == "." { relative = "" }
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			relative = ""
+		}
 		mode := info.Mode()
 		switch {
 		case mode.IsDir():
 			out[relative] = fmt.Sprintf("dir:%o", mode.Perm())
 		case mode.IsRegular():
 			b, readErr := os.ReadFile(path)
-			if readErr != nil { return readErr }
+			if readErr != nil {
+				return readErr
+			}
 			sum := sha256.Sum256(b)
 			out[relative] = fmt.Sprintf("file:%o:%x", mode.Perm(), sum)
 		case mode&os.ModeSymlink != 0:
 			target, readErr := os.Readlink(path)
-			if readErr != nil { return readErr }
+			if readErr != nil {
+				return readErr
+			}
 			out[relative] = fmt.Sprintf("symlink:%o:%s", mode.Perm(), target)
 		default:
 			return fmt.Errorf("unsupported fixture file type at %s: %s", relative, mode.Type())
