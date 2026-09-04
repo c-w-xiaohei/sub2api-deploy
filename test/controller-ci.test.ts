@@ -47,6 +47,14 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("ENGINE_GRAPH_TRACE_DIR");
     expect(workflow).toContain("unexpected persisted trace inventory");
     expect(workflow).toContain("const traceTests=[");
+    for (const traceTest of [
+      "TestEngineAppPlacementOneReadyFailure/alpha_failure_blocks_publication",
+      "TestEngineAppPlacementOneReadyFailure/alpha_ready_publishes_once",
+      "TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop/admission_then_App_then_publication",
+      "TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop/data_failure_stops_App_and_publication",
+      "TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop/App_failure_stops_publication",
+    ]) expect(workflow).toContain(`'${traceTest}'`);
+    expect(workflow).not.toContain("'TestEngineAppPlacementOneReadyFailure_alpha_failure_blocks_publication'");
     expect(workflow).toContain("crypto.createHash('sha256').update(t).digest('hex')");
     expect(workflow).toContain("invalid persisted trace mode");
     expect(workflow).toContain("invalid persisted trace directory mode");
@@ -85,7 +93,8 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("TestProviderRuntimeCrossHostDataAdmissionLive");
     expect(workflow).toContain("SUB2API_PROVIDER_RUNTIME_LIVE=1");
     expect(workflow).toContain("sudo unshare --mount --net --propagation private true");
-    expect(workflow).toContain("openssh-server docker.io nftables iproute2 util-linux postgresql-client redis-tools sudo openssl");
+    expect(workflow).toContain("openssh-server nftables iproute2 util-linux postgresql-client redis-tools sudo openssl");
+    expect(workflow).not.toMatch(/apt-get install[^\n]*docker\.io/);
     expect(workflow).toContain("unshare nsenter psql redis-cli openssl");
     expect(workflow).toContain('command -v "$tool"');
     expect(workflow).toContain("sudo docker pull postgres:18-alpine");
