@@ -4,11 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"gopkg.in/yaml.v3"
 )
@@ -107,7 +106,7 @@ func TestResolveHostConfigDecodesOnlyStructuredObjects(t *testing.T) {
 	}
 }
 
-func TestProductionExampleUsesStructuredPublicConfig(t *testing.T) {
+func TestProductionExampleUsesEnvironmentControllerConfig(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", "Pulumi.production.example.yaml"))
 	if err != nil {
 		t.Fatalf("read production example: %v", err)
@@ -120,13 +119,12 @@ func TestProductionExampleUsesStructuredPublicConfig(t *testing.T) {
 		t.Fatalf("decode production example YAML: %v", err)
 	}
 
-	const prefix = "sub2api-vps-deploy:"
 	expectedKeys := map[string]bool{
-		prefix + "edge":  true,
-		prefix + "sites": true,
+		"sub2api-environment:environmentConfig":  true,
+		"sub2api-environment:environmentSecrets": true,
 	}
 	if len(document.Config) != len(expectedKeys) {
-		t.Fatalf("project configuration keys = %v, want only edge and sites", configKeys(document.Config))
+		t.Fatalf("project configuration keys = %v, want only environmentConfig and environmentSecrets", configKeys(document.Config))
 	}
 	for key := range document.Config {
 		if !expectedKeys[key] {
@@ -134,70 +132,52 @@ func TestProductionExampleUsesStructuredPublicConfig(t *testing.T) {
 		}
 	}
 
-	var edge EdgeSpec
-	decodeYAMLObject(t, document.Config[prefix+"edge"], &edge)
-	var sites map[string]SiteSpec
-	decodeYAMLObject(t, document.Config[prefix+"sites"], &sites)
-
-	siteSecrets := make(map[string]SiteSecrets, len(sites))
-	for siteID, site := range sites {
-		siteSecrets[siteID] = fakeExampleSiteSecrets(siteID, site)
+	configNode := document.Config["sub2api-environment:environmentConfig"]
+	if configNode.Kind != yaml.ScalarNode {
+		t.Fatalf("environmentConfig node kind = %v, want scalar", configNode.Kind)
 	}
-	host, layouts, err := resolveHostConfig(edge, sites, EdgeSecrets{CloudflareAPIToken: "example-cloudflare-token"}, siteSecrets)
+	config, err := environment.ParseConfig([]byte(configNode.Value))
 	if err != nil {
-		t.Fatalf("resolveHostConfig() from production example: %v", err)
+		t.Fatalf("parse environmentConfig: %v", err)
 	}
 
-	if !reflect.DeepEqual(sortedSiteIDs(sites), []string{"code2", "code3"}) {
-		t.Fatalf("sites = %v, want code2 and code3", sortedSiteIDs(sites))
+	app, ok := config.Apps["api"]
+	if !ok || len(config.Apps) != 1 {
+		t.Fatalf("apps = %#v, want only api", config.Apps)
 	}
-	wantLayouts := []SiteLayout{
-		DeriveSiteLayout("code2", defaultString(sites["code2"].ResourcePrefix, "code2")),
-		DeriveSiteLayout("code3", defaultString(sites["code3"].ResourcePrefix, "code3")),
+	if postgres := config.Postgres["app"]; len(config.Postgres) != 1 || postgres.Type != "docker" || postgres.Server != "data-one" {
+		t.Fatalf("postgres app = %#v, want Docker on data-one", postgres)
 	}
-	if !reflect.DeepEqual(layouts, wantLayouts) {
-		t.Fatalf("resolved layouts = %#v, want %#v", layouts, wantLayouts)
+	if redis := config.Redis["app"]; len(config.Redis) != 1 || redis.Type != "docker" || redis.Server != "data-one" {
+		t.Fatalf("redis app = %#v, want Docker on data-one", redis)
 	}
-	for siteID, site := range sites {
-		resolvedSite := host.Sites[siteID]
-		if resolvedSite.Database.Mode != defaultString(site.Database.Mode, "docker") {
-			t.Fatalf("%s database mode = %q, want %q", siteID, resolvedSite.Database.Mode, site.Database.Mode)
-		}
-		if resolvedSite.Redis.Mode != defaultString(site.Redis.Mode, "docker") {
-			t.Fatalf("%s redis mode = %q, want %q", siteID, resolvedSite.Redis.Mode, site.Redis.Mode)
-		}
+	if strings.Join(app.Servers, ",") != "api-one,api-two" || strings.Join(app.PublicAccess.Servers, ",") != "api-one,api-two" {
+		t.Fatalf("app servers = %v, public servers = %v, want api-one and api-two", app.Servers, app.PublicAccess.Servers)
+	}
+	if app.ReadinessPath != "/healthz" {
+		t.Fatalf("readinessPath = %q, want /healthz", app.ReadinessPath)
+	}
+	if strings.Contains(configNode.Value, "/api/ready") {
+		t.Fatal("environmentConfig still recommends deprecated /api/ready")
 	}
 }
 
-func TestProductionExampleUsesRootProbeAndDoesNotMentionDeprecatedProbe(t *testing.T) {
+func TestProductionExampleUsesProtectedEnvironmentSecrets(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", "Pulumi.production.example.yaml"))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read production example: %v", err)
 	}
-	if strings.Contains(string(contents), "/api/ready") {
-		t.Fatal("production example still recommends /api/ready")
-	}
-	if strings.Count(string(contents), "appProbePath: /") != 2 {
-		t.Fatalf("production example must use / for both Sites")
-	}
-}
 
-func decodeYAMLObject(t *testing.T, node yaml.Node, target interface{}) {
-	t.Helper()
-	encoded, err := yaml.Marshal(&node)
-	if err != nil {
-		t.Fatalf("marshal YAML object: %v", err)
+	var document struct {
+		Config map[string]yaml.Node `yaml:"config"`
 	}
-	var object map[string]interface{}
-	if err := yaml.Unmarshal(encoded, &object); err != nil {
-		t.Fatalf("decode YAML object: %v", err)
+	if err := yaml.Unmarshal(contents, &document); err != nil {
+		t.Fatalf("decode production example YAML: %v", err)
 	}
-	jsonValue, err := json.Marshal(object)
-	if err != nil {
-		t.Fatalf("marshal decoded YAML object: %v", err)
-	}
-	if err := json.Unmarshal(jsonValue, target); err != nil {
-		t.Fatalf("decode object into %T: %v", target, err)
+
+	secrets := document.Config["sub2api-environment:environmentSecrets"]
+	if secrets.Kind != yaml.MappingNode || len(secrets.Content) != 2 || secrets.Content[0].Value != "secure" || secrets.Content[1].Value == "" {
+		t.Fatalf("environmentSecrets = %#v, want nonempty protected secure value", secrets)
 	}
 }
 
@@ -207,44 +187,6 @@ func configKeys(config map[string]yaml.Node) []string {
 		keys = append(keys, key)
 	}
 	return keys
-}
-
-func sortedSiteIDs(sites map[string]SiteSpec) []string {
-	ids := make([]string, 0, len(sites))
-	for siteID := range sites {
-		ids = append(ids, siteID)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func fakeExampleSiteSecrets(siteID string, site SiteSpec) SiteSecrets {
-	secrets := SiteSecrets{
-		AdminPassword:     siteID + "-admin-password",
-		JWTSecret:         siteID + "-jwt-secret",
-		TOTPEncryptionKey: siteID + "-totp-key",
-	}
-
-	databaseMode := defaultString(site.Database.Mode, "docker")
-	databaseResourceMode := defaultString(site.Database.ResourceMode, "existing")
-	if databaseMode == "docker" {
-		secrets.Database.Password = siteID + "-database-password"
-	} else if databaseResourceMode == "create" {
-		secrets.Database.APIToken = siteID + "-neon-api-token"
-	} else {
-		secrets.Database.DSN = "postgresql://sub2api:secret@" + siteID + ".neon.tech/sub2api?sslmode=require"
-	}
-
-	redisMode := defaultString(site.Redis.Mode, "docker")
-	redisResourceMode := defaultString(site.Redis.ResourceMode, "existing")
-	if redisMode == "docker" {
-		secrets.Redis.Password = siteID + "-redis-password"
-	} else if redisResourceMode == "create" {
-		secrets.Redis.APIKey = siteID + "-upstash-api-key"
-	} else {
-		secrets.Redis.Password = siteID + "-upstash-password"
-	}
-	return secrets
 }
 
 func TestWrapHostSecretsKeepsStructuredSecretsIndependentAndTainted(t *testing.T) {

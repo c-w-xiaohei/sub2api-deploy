@@ -219,6 +219,49 @@ func TestLifecycleCreateBootstrapsThenInspectsAndCheckpoints(t *testing.T) {
 	assertCheckpoint(t, got.Properties, inputs, observation(desired), desired)
 }
 
+func TestLifecycleCreateNormalizesLegacyOmittedDataLinkTLSModesForHostRequest(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	targetValue := valueAt(t, inputs, "target").AsMap()
+	apps, _ := targetValue.GetOk("apps")
+	app := apps.AsArray().AsSlice()[0].AsMap()
+	links, _ := app.GetOk("dataLinks")
+	link := links.AsArray().AsSlice()[0].AsMap()
+	identity, _ := link.GetOk("identity")
+	link = link.Set("identity", property.New(identity.AsMap().Delete("tlsMode")))
+	redisLink := object("name", property.New("cache"), "identity", object("kind", property.New("redis"), "providerId", property.New("cache-1"), "endpoint", property.New("cache.example"), "port", property.New(6379.0), "database", property.New("0")))
+	app = app.Set("dataLinks", property.New(property.NewArray([]property.Value{property.New(link), redisLink})))
+	inputs = inputs.Set("target", property.New(targetValue.Set("apps", property.New(property.NewArray([]property.Value{property.New(app)})))))
+	bundle, binary := lifecycleBundle(t, release(t, inputs))
+	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
+	desired, prior := revision(t, h, inputs), baselineRevision(t, h, inputs)
+	normalizedTarget, normalizedSecrets := hostcontract.NormalizeTargetSecrets(decodeTarget(t, inputs), decodeSecrets(t, inputs))
+	r.outcomes = []lifecycleOutcome{response(applied(desired)), response(inspected(observationFor(normalizedTarget, desired)))}
+
+	got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
+	if err != nil {
+		t.Fatal("Create returned an error")
+	}
+	request := decodeBootstrapRequest(t, r.calls[1].stdin, binary)
+	modes := map[string]string{}
+	if request.Target != nil {
+		for _, link := range request.Target.Apps[0].DataLinks {
+			modes[link.Name] = link.Identity.TLSMode
+		}
+	}
+	if request.Target == nil || modes["main"] != "require" || modes["cache"] != "disable" || !reflect.DeepEqual(*request.Target, normalizedTarget) || request.Secrets == nil || !reflect.DeepEqual(*request.Secrets, normalizedSecrets) {
+		t.Fatal("legacy data-link TLS modes were not canonicalized for the Host request")
+	}
+	if valueAt(t, got.Properties, "target").Equals(encodeValue(t, normalizedTarget)) {
+		t.Fatal("checkpoint replaced the legacy input target")
+	}
+	assertCheckpoint(t, got.Properties, inputs, observationFor(normalizedTarget, desired), desired)
+	if request.TargetRevision != desired || request.PriorAppliedRevision != prior {
+		t.Fatal("canonical request did not retain the normalized revision contract")
+	}
+}
+
 func TestLifecycleCreateRejectsBadPostBootstrapInstalledDigest(t *testing.T) {
 	inputs := lifecycleInputs("edge")
 	bundle, binary := lifecycleBundle(t, release(t, inputs))
@@ -620,8 +663,8 @@ func TestLifecycleUpdateDangerousMismatchedPendingEvidenceFailsClosed(t *testing
 func TestLifecycleUpdateRequestsApprovalForRenamedExactSingleDataLink(t *testing.T) {
 	old, next := lifecycleInputs("edge"), lifecycleInputs("edge")
 	oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next)
-	oldIdentity := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-db", Endpoint: "old-db.example", Port: 5432, Database: "app", TLSServerName: "old-db.example"}
-	newIdentity := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-db", Endpoint: "new-db.example", Port: 5432, Database: "app", TLSServerName: "new-db.example"}
+	oldIdentity := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-db", Endpoint: "old-db.example", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: "old-db.example"}
+	newIdentity := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-db", Endpoint: "new-db.example", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: "new-db.example"}
 	oldTarget.Apps[0].DataLinks[0] = hostcontract.DataLink{Name: "old-main", Identity: oldIdentity}
 	nextTarget.Apps[0].DataLinks[0] = hostcontract.DataLink{Name: "new-main", Identity: newIdentity}
 	old, next = old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget))
@@ -1505,7 +1548,7 @@ func configureProvider(t *testing.T, provider p.Provider) {
 	}
 }
 func lifecycleInputs(alias string) property.Map {
-	return property.NewMap(map[string]property.Value{"resource": object("environment", property.New("prod"), "serverKey", property.New("edge")), "server": object("sshAlias", property.New(alias)), "target": object("releaseArtifact", property.New("release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "apps", property.New(property.NewArray([]property.Value{object("id", property.New("api"), "image", property.New("api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "hostname", property.New("api.example"), "readinessPath", property.New("/ready"), "initialAdminEmail", property.New("admin@example.test"), "dataLinks", property.New(property.NewArray([]property.Value{object("name", property.New("main"), "identity", object("kind", property.New("postgres"), "providerId", property.New("db-1"), "endpoint", property.New("db.example"), "port", property.New(5432.0), "database", property.New("app"), "tlsServerName", property.New("db.example")))})))}))), "secrets": property.New(property.NewMap(map[string]property.Value{"apps": object("api", object("jwtSecret", property.New(lifecycleCanary)))})).WithSecret(true)})
+	return property.NewMap(map[string]property.Value{"resource": object("environment", property.New("prod"), "serverKey", property.New("edge")), "server": object("sshAlias", property.New(alias)), "target": object("releaseArtifact", property.New("release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "apps", property.New(property.NewArray([]property.Value{object("id", property.New("api"), "image", property.New("api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "hostname", property.New("api.example"), "readinessPath", property.New("/ready"), "initialAdminEmail", property.New("admin@example.test"), "dataLinks", property.New(property.NewArray([]property.Value{object("name", property.New("main"), "identity", object("kind", property.New("postgres"), "providerId", property.New("db-1"), "endpoint", property.New("db.example"), "port", property.New(5432.0), "database", property.New("app"), "tlsMode", property.New("require"), "tlsServerName", property.New("db.example")))})))}))), "secrets": property.New(property.NewMap(map[string]property.Value{"apps": object("api", object("jwtSecret", property.New(lifecycleCanary)))})).WithSecret(true)})
 }
 func drainedLifecycleInputs(t *testing.T, alias string) property.Map {
 	t.Helper()
@@ -1697,8 +1740,8 @@ func dangerousApprovalFixture(t *testing.T, old, next property.Map, revision str
 func twoDangerousChanges(t *testing.T) (property.Map, property.Map) {
 	old, next := lifecycleInputs("edge"), lifecycleInputs("edge")
 	oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next)
-	secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSServerName: "old-two.example"}
-	secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSServerName: "new-two.example"}
+	secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSMode: "require", TLSServerName: "old-two.example"}
+	secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSMode: "require", TLSServerName: "new-two.example"}
 	oldTarget.Apps[0].DataLinks = append(oldTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondOld})
 	nextTarget.Apps[0].DataLinks = append(nextTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondNew})
 	oldTarget.Apps[0].DataLinks[0].Identity.Endpoint = "old-one.example"
@@ -1706,14 +1749,15 @@ func twoDangerousChanges(t *testing.T) (property.Map, property.Map) {
 	return old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget))
 }
 func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity {
-	database, tls := "sub2api", ""
+	database, tlsMode, tlsServerName := "sub2api", "disable", ""
 	managed := "owner-scoped-" + service.Type + "-" + service.ID + "-managed"
 	if service.Type == "redis" {
 		database = "0"
 	} else {
-		tls = managed
+		tlsMode = "require"
+		tlsServerName = managed
 	}
-	return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSServerName: tls}
+	return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSMode: tlsMode, TLSServerName: tlsServerName}
 }
 func lifecycleBundle(t *testing.T, release string) (artifactBundle, []byte) {
 	t.Helper()

@@ -157,7 +157,8 @@ func TestInstallAttestProcessUsesOnlyFD3(t *testing.T) {
 
 func TestBootstrapStdioServesOneReconcileFrameAndReturnsAppliedResult(t *testing.T) {
 	root := t.TempDir()
-	fakeDocker := filepath.Join(t.TempDir(), "docker")
+	binDir := t.TempDir()
+	fakeDocker := filepath.Join(binDir, "docker")
 	if err := os.WriteFile(fakeDocker, []byte(`#!/bin/sh
 tab=$(printf '\t')
 if [ "$1" = container ] && [ "$2" = ls ] && [ "$3" = --all ] && [ "$4" = --filter ] && [ "$5" = label=sub2api.host ] && [ "$6" = --format ] && [ "$7" = "{{.Names}}${tab}{{index .Labels \"sub2api.host\"}}" ] && [ "$#" = 7 ]; then exit 0; fi
@@ -165,10 +166,28 @@ if [ "$1" = network ] && [ "$2" = ls ] && [ "$3" = --filter ] && [ "$4" = label=
 if [ "$1" = network ] && [ "$2" = ls ] && [ "$3" = --filter ] && [ "$4" != label=sub2api.host ] && [ "$5" = --format ] && [ "$6" = "{{.Name}}${tab}{{index .Labels \"sub2api.host\"}}${tab}{{index .Labels \"sub2api.host.network\"}}" ] && [ "$#" = 6 ]; then exit 0; fi
 if [ "$1" = network ] && [ "$2" = create ] && [ "$3" = --label ] && [ "$4" != '' ] && [ "$5" = --label ] && [ "$6" != '' ] && [ "$7" != '' ] && [ "$#" = 7 ]; then exit 0; fi
 exit 1
+	`), 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeNft := filepath.Join(binDir, "nft")
+	if err := os.WriteFile(fakeNft, []byte(`#!/bin/sh
+if [ "$#" != 5 ] || [ "$1" != -j ] || [ "$2" != list ] || [ "$3" != table ] || [ "$4" != inet ]; then
+  exit 1
+fi
+case "$5" in
+  s2h_????????????????????????) ;;
+  *) exit 1 ;;
+esac
+suffix=${5#s2h_}
+case "$suffix" in
+  *[!0123456789abcdef]*) exit 1 ;;
+esac
+printf '%s\n' 'No such file or directory' >&2
+exit 1
 `), 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", filepath.Dir(fakeDocker)+":"+os.Getenv("PATH"))
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 	machine := filepath.Join(root, "machine-id")
 	if err := os.WriteFile(machine, []byte("0123456789abcdef0123456789abcdef\n"), 0600); err != nil {
 		t.Fatal(err)

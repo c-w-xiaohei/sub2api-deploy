@@ -217,6 +217,7 @@ func TestPublicCLIDeniedDangerousUpdateLeavesRemoteAndStateUntouched(t *testing.
 	cli := exec.Command(filepath.Join(bin, "sub2api-deploy"), "pulumi", "production", "up")
 	cli.Dir = root
 	cli.Env = append(os.Environ(),
+		"TERM=dumb",
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"SUB2API_TASK2_TEST_BINARY="+os.Args[0],
 		"SUB2API_TASK2_EVIDENCE="+evidence,
@@ -392,7 +393,7 @@ func task2StableID() string {
 }
 
 func task2ApprovalSubject(revision string) hostcontract.ApprovalSubject {
-	return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: "production", Resource: hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}, AppID: "api", DataKind: "postgres", OldData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "db-1", Endpoint: "old-db.example", Port: 5432, Database: "app", TLSServerName: "old-db.example"}, NewData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "db-1", Endpoint: "db.example", Port: 5432, Database: "app", TLSServerName: "db.example"}, TargetRevision: revision}
+	return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: "production", Resource: hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}, AppID: "api", DataKind: "postgres", OldData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "db-1", Endpoint: "old-db.example", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: "old-db.example"}, NewData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "db-1", Endpoint: "db.example", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: "db.example"}, TargetRevision: revision}
 }
 
 func task2Checkpoint(inputs property.Map, revision string) property.Map {

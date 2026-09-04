@@ -437,11 +437,17 @@ func TestCheckRejectsRuntimeAdminEmailOverrides(t *testing.T) {
 		},
 		"secrets": func(inputs property.Map) property.Map {
 			secrets, _ := inputs.GetOk("secrets")
-			apps, _ := secrets.AsMap().GetOk("apps")
-			appValue, _ := apps.AsMap().GetOk("app")
-			app := appValue.AsMap().Set("runtimeEnvironment", property.New(property.NewMap(map[string]property.Value{"ADMIN_EMAIL": property.New("attacker@example.test")})))
+			apps := property.NewMap(nil)
+			if appsValue, ok := secrets.AsMap().GetOk("apps"); ok {
+				apps = appsValue.AsMap()
+			}
+			app := property.NewMap(nil)
+			if appValue, ok := apps.GetOk("app"); ok {
+				app = appValue.AsMap()
+			}
+			app = app.Set("runtimeEnvironment", property.New(property.NewMap(map[string]property.Value{"ADMIN_EMAIL": property.New("attacker@example.test")})))
 			localDataServices, _ := secrets.AsMap().GetOk("localDataServices")
-			return inputs.Set("secrets", property.New(property.NewMap(map[string]property.Value{"apps": property.New(property.NewMap(map[string]property.Value{"app": property.New(app)})), "localDataServices": localDataServices})).WithSecret(true))
+			return inputs.Set("secrets", property.New(property.NewMap(map[string]property.Value{"apps": property.New(apps.Set("app", property.New(app))), "localDataServices": localDataServices})).WithSecret(true))
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

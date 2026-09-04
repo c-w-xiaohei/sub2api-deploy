@@ -65,6 +65,14 @@ func TestProviderRuntimeCIHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	}
+	if os.Getenv(ciHelperMode) == "nft" {
+		if err := nftFixture(os.Args); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(64)
+		}
+		_, _ = fmt.Fprintln(os.Stderr, "No such file or directory")
+		os.Exit(1)
+	}
 	serve := testonly.Serve
 	if os.Getenv(ciHelperMode) == "bootstrap" {
 		if err := testonly.ServeBootstrapWithRequestDigest(os.Stdout, os.Stdin, os.Getenv(ciHelperRoot), os.Getenv(ciHelperMID), os.Getenv("PROVIDER_RUNTIME_REQUEST_DIGEST")); err != nil {
@@ -335,13 +343,13 @@ func TestProviderProcessReachesSharedTemporaryRuntimeServe(t *testing.T) {
 		Urn:        "urn:pulumi:test::runtime::sub2api-host:index:Host::edge",
 		Properties: rpcProperties(t, inputs),
 	})
-	assertHostActionQueueEmpty(t, h)
 	if err != nil {
 		if detail, readErr := os.ReadFile(filepath.Join(h.trace, "docker.error")); readErr == nil {
 			t.Fatalf("Provider Create through shared temporary Runtime: %v; Docker fixture: %s", err, detail)
 		}
 		t.Fatalf("Provider Create through shared temporary Runtime: %v", err)
 	}
+	assertHostActionQueueEmpty(t, h)
 	if response.Id == "" || response.Properties == nil {
 		t.Fatal("Provider Create returned no checkpoint")
 	}
@@ -518,6 +526,7 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 	}
 	writeSSHFixture(t, filepath.Join(binDir, "ssh"))
 	writeDockerFixture(t, filepath.Join(binDir, "docker"))
+	writeNFTFixture(t, filepath.Join(binDir, "nft"))
 	writeExpectedSSHCommands(t, trace)
 	clientLogDir := filepath.Join(caseDir, "ssh-client-logs")
 	if err := os.MkdirAll(clientLogDir, 0700); err != nil {
@@ -765,6 +774,42 @@ func writeDockerFixture(t *testing.T, destination string) {
 	}
 }
 
+func writeNFTFixture(t *testing.T, destination string) {
+	t.Helper()
+	const shim = "#!/bin/sh\nexec env SUB2API_PROVIDER_RUNTIME_CI_HELPER=1 SUB2API_PROVIDER_RUNTIME_MODE=nft \"$PROVIDER_RUNTIME_TEST_BINARY\" -test.run '^TestProviderRuntimeCIHelper$' -- \"$@\"\n"
+	if err := os.WriteFile(destination, []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// nftFixture permits only inspection of a missing, owned nft table. Privileged
+// nft application is covered by the separate live gate, not this process fixture.
+func nftFixture(argv []string) error {
+	separator := -1
+	for i, arg := range argv {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 || separator+6 != len(argv) {
+		return errors.New("unsupported nft argv")
+	}
+	args := argv[separator+1:]
+	if args[0] != "-j" || args[1] != "list" || args[2] != "table" || args[3] != "inet" {
+		return fmt.Errorf("unsupported nft argv: %q", args)
+	}
+	table := args[4]
+	if len(table) != len("s2h_")+24 || !strings.HasPrefix(table, "s2h_") || strings.Trim(table[4:], "0123456789abcdef") != "" {
+		return fmt.Errorf("unsupported nft argv: %q", args)
+	}
+	var state hostruntime.State
+	if json.Unmarshal(mustReadFixture(filepath.Join(os.Getenv("PROVIDER_RUNTIME_ROOT"), "state.json")), &state) != nil || !validOwnership(state.Ownership.Value) || table != "s2h_"+fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value) {
+		return fmt.Errorf("unexpected nft table: %q", table)
+	}
+	return nil
+}
+
 type dockerTrace struct {
 	Ownership      string                     `json:"ownership"`
 	OwnershipLabel string                     `json:"ownershipLabel"`
@@ -906,8 +951,8 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		s.effect("network-create", name, "", "", owner, label)
 		return nil
 	}
-	if len(args) == 17 && args[0] == "run" && args[1] == "-d" && args[2] == "--restart" && args[3] == "unless-stopped" && args[4] == "--label" && strings.HasPrefix(args[5], "sub2api.host=") && args[6] == "--label" && strings.HasPrefix(args[7], "sub2api.host.target=") && args[8] == "--name" && args[10] == "--network" && args[11] == s.Network && args[12] == "--env-file" && args[14] == "-v" {
-		name, owner, target, image := args[9], strings.TrimPrefix(args[5], "sub2api.host="), strings.TrimPrefix(args[7], "sub2api.host.target="), args[16]
+	if len(args) == 19 && args[0] == "run" && args[1] == "-d" && args[2] == "--restart" && args[3] == "unless-stopped" && args[4] == "--label" && strings.HasPrefix(args[5], "sub2api.host=") && args[6] == "--label" && strings.HasPrefix(args[7], "sub2api.host.target=") && args[8] == "--name" && args[10] == "--network" && args[11] == s.Network && args[12] == "--network-alias" && args[14] == "--env-file" && args[16] == "-v" {
+		name, owner, target, image := args[9], strings.TrimPrefix(args[5], "sub2api.host="), strings.TrimPrefix(args[7], "sub2api.host.target="), args[18]
 		var runtimeState hostruntime.State
 		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || runtimeState.Journal == nil || runtimeState.Journal.Key.TargetRevision == "" {
 			return errors.New("invalid container run")
@@ -936,7 +981,7 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		wantTarget := "s2ht1:" + fixtureToken("app", appToken, slot, revision, app.Image, "", "0", "false")
 		wantEnv := filepath.Join(root, "runtime", "managed", "env-"+appToken+fixtureToken(revision))
 		wantData := filepath.Join(root, "runtime", "data", fixtureToken("app-data", appToken)) + ":/app/data"
-		if s.Ownership == "" || name != wantName || owner != wantOwner || target != wantTarget || image != app.Image || args[13] != wantEnv || args[15] != wantData || s.Containers[name].Owner != "" {
+		if s.Ownership == "" || name != wantName || owner != wantOwner || target != wantTarget || image != app.Image || args[13] != app.ID || args[15] != wantEnv || args[17] != wantData || s.Containers[name].Owner != "" {
 			return errors.New("invalid container run")
 		}
 		s.Containers[name] = dockerContainer{Owner: owner, Target: target, Image: image, Slot: slot, AppToken: appToken}
@@ -1164,7 +1209,7 @@ func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint prope
 	}
 	appToken := fixtureToken("app", "api")
 	appName := "s2h-" + fixtureToken("test", "edge", ownership.Value, "app", appToken, "green")
-	wantInventory := map[string]any{"version": float64(2), "resource": map[string]any{"environment": "test", "serverKey": "edge"}, "ownership": map[string]any{"value": ownership.Value}, "objects": []any{map[string]any{"role": "app", "appToken": appToken, "name": appName, "image": "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "revision": revision, "active": "green", "env": "env-" + appToken + fixtureToken(revision), "dataIdentity": map[string]any{"kind": ""}, "hostname": "api.example", "readinessPath": "/ready", "drainSeconds": float64(30)}}}
+	wantInventory := map[string]any{"version": float64(3), "resource": map[string]any{"environment": "test", "serverKey": "edge"}, "ownership": map[string]any{"value": ownership.Value}, "appliedRevision": revision, "objects": []any{map[string]any{"role": "app", "appToken": appToken, "name": appName, "image": "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "revision": revision, "active": "green", "env": "env-" + appToken + fixtureToken(revision), "dataIdentity": map[string]any{"kind": "", "tlsMode": ""}, "hostname": "api.example", "readinessPath": "/ready", "drainSeconds": float64(30)}}}
 	inventoryPath := filepath.Join(h.root, "runtime", "managed", "inventory.json")
 	info, statErr := os.Stat(inventoryPath)
 	if statErr != nil {
@@ -1189,7 +1234,7 @@ func assertRuntimePersistence(t *testing.T, h *providerProcess, checkpoint prope
 		t.Fatalf("inventory content is not exact\ngot: %s\nwant: %s", gotJSON, wantJSON)
 	}
 	envPath := filepath.Join(h.root, "runtime", "managed", "env-"+appToken+fixtureToken(revision))
-	if got := string(mustRead(t, envPath)); got != "JWT_SECRET="+ciSecret+"\n" {
+	if got := string(mustRead(t, envPath)); got != "ADMIN_EMAIL=admin@example.test\nJWT_SECRET="+ciSecret+"\n" {
 		t.Fatalf("app env content = %q", got)
 	}
 	if err := filepath.Walk(h.root, func(path string, info os.FileInfo, walkErr error) error {
@@ -1764,8 +1809,14 @@ func createProviderResource(t *testing.T, h *providerProcess, inputs property.Ma
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	response, err := h.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:test::runtime::sub2api-host:index:Host::edge", Properties: rpcProperties(t, inputs)})
+	if err != nil {
+		if detail, readErr := os.ReadFile(filepath.Join(h.trace, "docker.error")); readErr == nil {
+			t.Fatalf("Create: %#v, %v; Docker fixture: %s", response, err, detail)
+		}
+		t.Fatalf("Create: %#v, %v", response, err)
+	}
 	assertHostActionQueueEmpty(t, h)
-	if err != nil || response == nil || response.Id == "" {
+	if response == nil || response.Id == "" {
 		t.Fatalf("Create: %#v, %v", response, err)
 	}
 	return response
@@ -1949,8 +2000,17 @@ func createInputsWithTarget(target hostcontract.Target) property.Map {
 	inputs := createInputs()
 	secrets := hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{}}
 	for _, app := range target.Apps {
+		secret := hostcontract.AppSecrets{}
 		if app.ID == "api" {
-			secrets.Apps[app.ID] = hostcontract.AppSecrets{JWTSecret: ciSecret}
+			secret.JWTSecret = ciSecret
+		}
+		for _, link := range app.DataLinks {
+			if link.Identity.Kind == "postgres" {
+				secret.Postgres = &hostcontract.DataCredentials{Username: "app", Password: "data-password"}
+			}
+		}
+		if secret.JWTSecret != "" || secret.Postgres != nil {
+			secrets.Apps[app.ID] = secret
 		}
 	}
 	return inputs.Set("target", jsonProperty(target)).Set("secrets", jsonProperty(secrets).WithSecret(true))
@@ -1965,7 +2025,7 @@ func createInputsWithImage(image string) property.Map {
 func createInputsWithDataLinks(changes int, generation string) property.Map {
 	apps := []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: "api.example", ReadinessPath: "/ready", InitialAdminEmail: "admin@example.test"}}
 	for i := 0; i < changes; i++ {
-		apps = append(apps, hostcontract.AppTarget{ID: fmt.Sprintf("data-%d", i), Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: fmt.Sprintf("data-%d.example", i), ReadinessPath: "/ready", InitialAdminEmail: "admin@example.test", DataLinks: []hostcontract.DataLink{{Name: "main", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: generation + strconv.Itoa(i), Endpoint: generation + ".db", Port: 5432, Database: "app", TLSServerName: generation + ".db"}}}})
+		apps = append(apps, hostcontract.AppTarget{ID: fmt.Sprintf("data-%d", i), Image: "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Hostname: fmt.Sprintf("data-%d.example", i), ReadinessPath: "/ready", InitialAdminEmail: "admin@example.test", DataLinks: []hostcontract.DataLink{{Name: "main", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: generation + strconv.Itoa(i), Endpoint: generation + ".db", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: generation + ".db"}}}})
 	}
 	return createInputsWithTarget(hostcontract.Target{ReleaseArtifact: ciRelease, Apps: apps})
 }
@@ -2019,6 +2079,16 @@ func frozenNormalize(target hostcontract.Target, secrets hostcontract.Secrets) (
 	for i := range target.Apps {
 		target.Apps[i].RuntimeSettings = frozenCopyStrings(target.Apps[i].RuntimeSettings)
 		target.Apps[i].DataLinks = append([]hostcontract.DataLink(nil), target.Apps[i].DataLinks...)
+		for j := range target.Apps[i].DataLinks {
+			identity := &target.Apps[i].DataLinks[j].Identity
+			if identity.TLSMode == "" {
+				if identity.Kind == "postgres" {
+					identity.TLSMode = "require"
+				} else {
+					identity.TLSMode = "disable"
+				}
+			}
+		}
 		sort.Slice(target.Apps[i].DataLinks, func(a, b int) bool { return target.Apps[i].DataLinks[a].Name < target.Apps[i].DataLinks[b].Name })
 	}
 	if target.MicroSocks != nil {
@@ -2124,7 +2194,7 @@ func assertFrozenNormalizationOracle(t *testing.T) {
 	t.Helper()
 	inputTarget := hostcontract.Target{ReleaseArtifact: ciRelease, Apps: []hostcontract.AppTarget{{ID: "z", InitialAdminEmail: "z@example.test", RuntimeSettings: map[string]string{"Z": "z", "A": "a"}, DataLinks: []hostcontract.DataLink{{Name: "z", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "z"}}, {Name: "a", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "a"}}}}, {ID: "a", InitialAdminEmail: "a@example.test", RuntimeSettings: map[string]string{}}}, DataServices: []hostcontract.LocalDataServiceTarget{{ID: "z"}, {ID: "a"}}, Connectors: []hostcontract.TunnelConnectorTarget{{ID: "z", AppIDs: []string{"z", "a"}}, {ID: "a", AppIDs: []string{}}}, MicroSocks: &hostcontract.MicroSocksTarget{Server: true, Clients: []hostcontract.MicroSocksClientTarget{{ID: "z"}, {ID: "a"}}}}
 	inputSecrets := hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"z": {RuntimeEnvironment: map[string]string{"Z": "z", "A": "a"}, JWTSecret: "z"}, "a": {RuntimeEnvironment: map[string]string{}}}, LocalDataServices: map[string]hostcontract.LocalDataServiceSecrets{"z": {AdminPassword: "z"}, "a": {}}, Connectors: map[string]hostcontract.TunnelConnectorSecrets{"z": {Token: "z"}, "a": {}}, MicroSocks: &hostcontract.MicroSocksSecrets{ClientCredentials: map[string]hostcontract.DataCredentials{"z": {Username: "z"}, "a": {}}}}
-	wantTarget := hostcontract.Target{ReleaseArtifact: ciRelease, Apps: []hostcontract.AppTarget{{ID: "a", InitialAdminEmail: "a@example.test"}, {ID: "z", InitialAdminEmail: "z@example.test", RuntimeSettings: map[string]string{"A": "a", "Z": "z"}, DataLinks: []hostcontract.DataLink{{Name: "a", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "a"}}, {Name: "z", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "z"}}}}}, DataServices: []hostcontract.LocalDataServiceTarget{{ID: "a"}, {ID: "z"}}, Connectors: []hostcontract.TunnelConnectorTarget{{ID: "a", AppIDs: nil}, {ID: "z", AppIDs: []string{"a", "z"}}}, MicroSocks: &hostcontract.MicroSocksTarget{Server: true, Clients: []hostcontract.MicroSocksClientTarget{{ID: "a"}, {ID: "z"}}}}
+	wantTarget := hostcontract.Target{ReleaseArtifact: ciRelease, Apps: []hostcontract.AppTarget{{ID: "a", InitialAdminEmail: "a@example.test"}, {ID: "z", InitialAdminEmail: "z@example.test", RuntimeSettings: map[string]string{"A": "a", "Z": "z"}, DataLinks: []hostcontract.DataLink{{Name: "a", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "a", TLSMode: "require"}}, {Name: "z", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "z", TLSMode: "require"}}}}}, DataServices: []hostcontract.LocalDataServiceTarget{{ID: "a"}, {ID: "z"}}, Connectors: []hostcontract.TunnelConnectorTarget{{ID: "a", AppIDs: nil}, {ID: "z", AppIDs: []string{"a", "z"}}}, MicroSocks: &hostcontract.MicroSocksTarget{Server: true, Clients: []hostcontract.MicroSocksClientTarget{{ID: "a"}, {ID: "z"}}}}
 	wantSecrets := hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{"a": {}, "z": {RuntimeEnvironment: map[string]string{"A": "a", "Z": "z"}, JWTSecret: "z"}}, LocalDataServices: map[string]hostcontract.LocalDataServiceSecrets{"a": {}, "z": {AdminPassword: "z"}}, Connectors: map[string]hostcontract.TunnelConnectorSecrets{"a": {}, "z": {Token: "z"}}, MicroSocks: &hostcontract.MicroSocksSecrets{ClientCredentials: map[string]hostcontract.DataCredentials{"a": {}, "z": {Username: "z"}}}}
 	gotTarget, gotSecrets := frozenNormalize(inputTarget, inputSecrets)
 	if !reflect.DeepEqual(gotTarget, wantTarget) || !reflect.DeepEqual(gotSecrets, wantSecrets) {
@@ -2174,16 +2244,16 @@ func mustJSON(t *testing.T, value property.Value) []byte {
 
 func assertDataLinkApprovalSubject(t *testing.T, subject hostcontract.ApprovalSubject, oldGeneration, newGeneration, revision string) {
 	t.Helper()
-	old := hostcontract.DataIdentity{Kind: "postgres", ProviderID: oldGeneration + "0", Endpoint: oldGeneration + ".db", Port: 5432, Database: "app", TLSServerName: oldGeneration + ".db"}
-	new := hostcontract.DataIdentity{Kind: "postgres", ProviderID: newGeneration + "0", Endpoint: newGeneration + ".db", Port: 5432, Database: "app", TLSServerName: newGeneration + ".db"}
+	old := hostcontract.DataIdentity{Kind: "postgres", ProviderID: oldGeneration + "0", Endpoint: oldGeneration + ".db", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: oldGeneration + ".db"}
+	new := hostcontract.DataIdentity{Kind: "postgres", ProviderID: newGeneration + "0", Endpoint: newGeneration + ".db", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: newGeneration + ".db"}
 	want := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: "test", Resource: hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}, AppID: "data-0", DataKind: "postgres", OldData: old, NewData: new, TargetRevision: revision}
 	if subject != want {
 		t.Fatalf("approval subject = %#v, want %#v", subject, want)
 	}
 }
 func dataLinkApprovalSubject(oldGeneration, newGeneration, revision string) hostcontract.ApprovalSubject {
-	old := hostcontract.DataIdentity{Kind: "postgres", ProviderID: oldGeneration + "0", Endpoint: oldGeneration + ".db", Port: 5432, Database: "app", TLSServerName: oldGeneration + ".db"}
-	new := hostcontract.DataIdentity{Kind: "postgres", ProviderID: newGeneration + "0", Endpoint: newGeneration + ".db", Port: 5432, Database: "app", TLSServerName: newGeneration + ".db"}
+	old := hostcontract.DataIdentity{Kind: "postgres", ProviderID: oldGeneration + "0", Endpoint: oldGeneration + ".db", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: oldGeneration + ".db"}
+	new := hostcontract.DataIdentity{Kind: "postgres", ProviderID: newGeneration + "0", Endpoint: newGeneration + ".db", Port: 5432, Database: "app", TLSMode: "require", TLSServerName: newGeneration + ".db"}
 	return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: "test", Resource: hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}, AppID: "data-0", DataKind: "postgres", OldData: old, NewData: new, TargetRevision: revision}
 }
 func retireApprovalSubject(t *testing.T, checkpoint, inputs property.Map) hostcontract.ApprovalSubject {
@@ -2508,7 +2578,7 @@ func assertRetiredPreservingData(t *testing.T, h *providerProcess, before []dock
 		Version int               `json:"version"`
 		Objects []json.RawMessage `json:"objects"`
 	}
-	if err := json.Unmarshal(mustRead(t, filepath.Join(h.root, "runtime", "managed", "inventory.json")), &inventory); err != nil || inventory.Version != 2 || len(inventory.Objects) != 0 {
+	if err := json.Unmarshal(mustRead(t, filepath.Join(h.root, "runtime", "managed", "inventory.json")), &inventory); err != nil || inventory.Version != 3 || len(inventory.Objects) != 0 {
 		t.Fatalf("retire inventory evidence = %#v, %v; want empty managed-object inventory", inventory, err)
 	}
 	if info, err := os.Stat(filepath.Join(h.root, "runtime", "managed")); err != nil || !info.IsDir() {

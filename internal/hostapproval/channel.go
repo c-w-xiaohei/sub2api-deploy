@@ -365,8 +365,8 @@ func validResourceJSON(raw json.RawMessage) bool {
 }
 
 func validDataJSON(raw json.RawMessage) bool {
-	fields, ok := object(raw, []string{"kind", "providerId", "endpoint", "port", "database", "tlsServerName"})
-	if !ok || !requiredFields(fields, "kind") || !validString(fields["kind"]) {
+	fields, ok := object(raw, []string{"kind", "providerId", "endpoint", "port", "database", "tlsMode", "tlsServerName"})
+	if !ok || !requiredFields(fields, "kind", "tlsMode") || !validString(fields["kind"]) || !validString(fields["tlsMode"]) {
 		return false
 	}
 	return optionalString(fields, "providerId") && optionalString(fields, "endpoint") && optionalNumber(fields, "port") && optionalString(fields, "database") && optionalString(fields, "tlsServerName")

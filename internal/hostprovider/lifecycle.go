@@ -97,6 +97,7 @@ func (h *host) parseInputs(values property.Map) (lifecycleInput, error) {
 		decode(valueAtMap(values, "secrets"), &in.secrets) != nil {
 		return lifecycleInput{}, fmt.Errorf("lifecycle inputs are invalid")
 	}
+	in.target, in.secrets = hostcontract.NormalizeTargetSecrets(in.target, in.secrets)
 	if err := sshcheck.ValidateAlias(in.server.SSHAlias); err != nil {
 		return lifecycleInput{}, fmt.Errorf("ssh alias is invalid")
 	}

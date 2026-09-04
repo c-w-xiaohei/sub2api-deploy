@@ -135,6 +135,9 @@ Cloudflare DNS `A`/`AAAA` records named `dns-<app>-<server>-A|AAAA` and Host
 resources named `host-<server-key>`. Do not use `--target` as a substitute for
 the full final checkpoint. These stages are not atomic cross-Host transactions;
 inspect the checkpoint and retry the same normal command after a failure.
+Do not replace the targeted stages with a direct full `up` from the
+pre-removal checkpoint: that can revoke the data allowlist before its consumer
+Host has been detached.
 
 To retire a server, keep it configured while detaching its publication and
 removing its Apps by the sequence above. Only after its target is drained,

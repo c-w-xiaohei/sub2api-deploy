@@ -398,6 +398,65 @@ func TestRegisterMaintenanceKeepsManagedAndLocalData(t *testing.T) {
 	}
 }
 
+func TestRegisterMaintenanceRetainsDockerOwnerDependencyWithoutAppRuntime(t *testing.T) {
+	mocks := &recordingMocks{}
+	if err := runRegister(t, mocks, pinnedRelease, dockerMaintenanceConfig(), dockerSecrets()); err != nil {
+		t.Fatal(err)
+	}
+	hosts := resourcesOfType(mocks.resources, hostresource.HostToken)
+	alpha, bravo := hostForServer(t, hosts, "alpha"), hostForServer(t, hosts, "bravo")
+	assertNoApps(t, alpha)
+	assertNoApps(t, bravo)
+	assertHostDependsOn(t, bravo, alpha)
+	target, _ := decodeKnownHost(t, alpha)
+	for _, service := range target.DataServices {
+		for _, binding := range service.Bindings {
+			if contains(binding.AllowedSources, "198.51.100.12") {
+				t.Fatalf("maintenance data allowlist retained bravo source: %#v", target.DataServices)
+			}
+		}
+	}
+}
+
+func TestDockerDataOwnerDependenciesDropRemovedOwnershipAndRejectCycles(t *testing.T) {
+	config, err := environment.ParseConfig([]byte(dockerMaintenanceConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependencies := dockerDataOwnerDependencies(config)
+	if !dependencies["bravo"]["alpha"] {
+		t.Fatalf("maintenance dependencies = %#v, want bravo to retain alpha", dependencies)
+	}
+
+	config.Apps = map[string]environment.App{}
+	if dependencies := dockerDataOwnerDependencies(config); len(dependencies) != 0 {
+		t.Fatalf("removed App ownership dependencies = %#v, want none", dependencies)
+	}
+
+	config, err = environment.ParseConfig([]byte(dockerMaintenanceConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	postgres := config.Postgres["app-postgres"]
+	postgres.Type = "external"
+	config.Postgres["app-postgres"] = postgres
+	redis := config.Redis["app-redis"]
+	redis.Type = "external"
+	config.Redis["app-redis"] = redis
+	if dependencies := dockerDataOwnerDependencies(config); len(dependencies) != 0 {
+		t.Fatalf("removed Docker data ownership dependencies = %#v, want none", dependencies)
+	}
+
+	cycleConfig := strings.Replace(dockerMaintenanceConfig(), "server: alpha\n    port: 6379", "server: bravo\n    port: 6379", 1)
+	mocks := &recordingMocks{}
+	if err := runRegister(t, mocks, pinnedRelease, cycleConfig, dockerSecrets()); err == nil {
+		t.Fatal("retained Docker ownership cycle was accepted")
+	}
+	if len(mocks.resources) != 0 {
+		t.Fatalf("retained Docker ownership cycle registered resources: %v", mocks.resources)
+	}
+}
+
 func TestRegisterPreservesComputedUpstashOutputs(t *testing.T) {
 	config, err := environment.ParseConfig([]byte(managedConfig()))
 	if err != nil {

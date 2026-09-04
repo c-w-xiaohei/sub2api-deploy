@@ -1006,7 +1006,7 @@ func TestRuntimeDirectorySymlinkAndUnsafeACMEAreRejectedWithoutDocker(t *testing
 }
 
 func TestInventoryRejectsIrrelevantFieldsAndMalformedLocalTokens(t *testing.T) {
-	base := inventory{Version: inventoryVersion, Resource: resource(), Ownership: ownership()}
+	base := inventory{Version: inventoryVersion, Resource: resource(), Ownership: ownership(), AppliedRevision: revision()}
 	for name, object := range map[string]managedObject{
 		"app data identity":   {Role: "app", AppToken: appToken("one"), Name: "app", Image: "image", Revision: revision(), Active: "blue", Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30, DataIdentity: dataIdentity("x")},
 		"metadata live field": {Role: "local-data-meta", AppToken: localDataToken("one"), Type: "redis", DataToken: token("data", localDataToken("one")), PathToken: token("path", localDataToken("one")), DataIdentity: hostcontract.DataIdentity{Kind: "redis", ProviderID: "x", Endpoint: "x", Port: 1, Database: "0"}, Env: "env-0123456789abcdef0123456789abcdef0123456789abcdef01234567"},
@@ -1369,7 +1369,7 @@ func TestPostgresPasswordRotationChangesCredentialBeforeShellReplacementWithoutL
 	}
 	state, _ = rt.readState()
 	old := findLocalData(mustInventory(t, rt), localDataToken("primary"))
-	runner.calls = nil
+	runner.calls, runner.stdin = nil, nil
 	runner.stdinDigests = nil
 	second := requestFor(state, revisionC())
 	second.Target.DataServices = first.Target.DataServices
@@ -1481,6 +1481,11 @@ func TestPendingStableNameRejectsWrongExactTargetBeforeRetry(t *testing.T) {
 			}
 			second := requestFor(state, revisionC())
 			configure(&second)
+			if name == "local" {
+				second.Target.DataServices[0].Port = 6381
+			} else {
+				second.Target.ReverseProxy.Image = "traefik:v3.1"
+			}
 			if _, err := rt.Reconcile(context.Background(), second); err == nil || runner.mutations("run") != 1 {
 				t.Fatalf("first = %v calls=%#v", err, runner.calls)
 			}
@@ -1520,8 +1525,12 @@ func TestOrdinaryMissingOwnedShellsAreRepairedForEveryRole(t *testing.T) {
 	if _, err := rt.Reconcile(context.Background(), second); err != nil || runner.mutations("run") != 4 {
 		t.Fatalf("repair = %v calls=%#v", err, runner.calls)
 	}
-	for _, object := range mustInventory(t, rt).Objects {
-		if object.Role != "app-data" && object.Role != "local-data-meta" && object.Revision != revisionC() {
+	inv := mustInventory(t, rt)
+	if inv.AppliedRevision != revisionC() {
+		t.Fatalf("host revision=%q", inv.AppliedRevision)
+	}
+	for _, object := range inv.Objects {
+		if object.Role != "app-data" && object.Role != "local-data" && object.Role != "local-data-meta" && object.Revision != revisionC() {
 			t.Fatalf("unrepaired object=%#v", object)
 		}
 	}
@@ -1655,7 +1664,12 @@ func TestUnsafeACMEAndPersistedDataTokensFailBeforeDockerMutation(t *testing.T) 
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
 	rt.runner = runner
-	bad := []byte(`{"version":2,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"local-data","appToken":"` + localDataToken("cache") + `","name":"x","image":"redis:8-alpine","revision":"` + revision() + `","type":"redis","port":6380,"dataToken":"../bad","pathToken":"` + token("path", localDataToken("cache")) + `","dataIdentity":{"kind":"redis","providerID":"x","endpoint":"x","port":6380,"database":"0"},"env":"` + envName(localDataToken("cache"), revision()) + `","config":"` + artifactConfigPrefix + token(localDataToken("cache"), revision()) + `"}]}`)
+	unsafe := localObject(state, hostcontract.LocalDataServiceTarget{ID: "cache", Type: "redis", Port: 6380}, revision())
+	unsafe.DataToken, unsafe.PathToken = "../bad", token("path", unsafe.AppToken)
+	bad, err := json.Marshal(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, AppliedRevision: revision(), Objects: []managedObject{unsafe}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := rt.writeArtifact(artifactInventory, bad, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1666,9 +1680,16 @@ func TestUnsafeACMEAndPersistedDataTokensFailBeforeDockerMutation(t *testing.T) 
 
 func TestInventoryRejectsMalformedAndDuplicateManagedObjects(t *testing.T) {
 	rt, state := initialized(t)
+	first := appObject(state, app("one", "old"), revision(), "blue")
+	second := appObject(state, app("two", "old"), revision(), "green")
+	second.Name = first.Name
+	duplicate, err := json.Marshal(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, AppliedRevision: revision(), Objects: []managedObject{first, second}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, value := range map[string][]byte{
-		"unknown role":   []byte(`{"version":2,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"future","name":"x"}]}`),
-		"duplicate name": []byte(`{"version":2,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"objects":[{"role":"app","appToken":"0123456789abcdef01234567","name":"same","image":"old","revision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active":"blue"},{"role":"app","appToken":"fedcba9876543210fedcba98","name":"same","image":"old","revision":"tr1:0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active":"green"}]}`),
+		"unknown role":   []byte(`{"version":3,"resource":{"environment":"production","serverKey":"edge"},"ownership":{"value":"owner1"},"appliedRevision":"` + revision() + `","objects":[{"role":"future","name":"x"}]}`),
+		"duplicate name": duplicate,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := rt.writeArtifact(artifactInventory, value, 0600); err != nil {
@@ -1679,7 +1700,6 @@ func TestInventoryRejectsMalformedAndDuplicateManagedObjects(t *testing.T) {
 			}
 		})
 	}
-	_ = state
 }
 
 func TestReconcileManagedInspectFailureAndCandidateUnownedFailBeforeMutation(t *testing.T) {
@@ -1693,7 +1713,7 @@ func TestReconcileManagedInspectFailureAndCandidateUnownedFailBeforeMutation(t *
 		return nil
 	}
 	oldName := objectName(state, "app", appToken("one"), "blue")
-	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: oldName, Image: "old", Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30}}}); err != nil {
+	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, AppliedRevision: state.AppliedRevision, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: oldName, Image: "old", Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.writeArtifact(routeName(appToken("one")), mustRoute(t, rt, state, "one"), 0600); err != nil {
@@ -1986,7 +2006,7 @@ func TestReconcileRenamedMultipleDataLinksWithSameIdentitiesNeedsNoApproval(t *t
 	runner := &recordingRunner{}
 	rt.runner = runner
 	a := dataIdentity("a")
-	b := dataIdentity("b")
+	b := redisDataIdentity("b")
 	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), appWithLinks("one", "old", "old-a", a, "old-b", b))); err != nil {
 		t.Fatal(err)
 	}
@@ -2001,7 +2021,7 @@ func TestReconcileRenamedMultipleDataLinksRequiresExactSingleChangeApproval(t *t
 	runner := &recordingRunner{}
 	rt.runner = runner
 	a := dataIdentity("a")
-	b := dataIdentity("b")
+	b := redisDataIdentity("b")
 	c := dataIdentity("c")
 	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), appWithLinks("one", "old", "old-a", a, "old-b", b))); err != nil {
 		t.Fatal(err)
@@ -2022,9 +2042,9 @@ func TestReconcileRenamedMultipleDataLinksRejectsOneApprovalForTwoChanges(t *tes
 	runner := &recordingRunner{}
 	rt.runner = runner
 	a := dataIdentity("a")
-	b := dataIdentity("b")
+	b := redisDataIdentity("b")
 	c := dataIdentity("c")
-	d := dataIdentity("d")
+	d := redisDataIdentity("d")
 	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), appWithLinks("one", "old", "old-a", a, "old-b", b))); err != nil {
 		t.Fatal(err)
 	}
@@ -2168,7 +2188,9 @@ func TestEnvArtifactContainsAllSecretsAndNoCommandCanary(t *testing.T) {
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
 	rt.runner = runner
-	a := app("one", "one")
+	postgres := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "pg", Endpoint: "10.0.0.8", Port: 5432, Database: "sub2api", TLSMode: "require"}
+	redis := hostcontract.DataIdentity{Kind: "redis", ProviderID: "redis", Endpoint: "cache", Port: 6380, Database: "2", TLSMode: "require"}
+	a := appWithLinks("one", "one", "postgres", postgres, "redis", redis)
 	a.RuntimeSettings = map[string]string{"SETTING_B": "two", "SETTING_A": "one"}
 	secrets := hostcontract.AppSecrets{RuntimeEnvironment: map[string]string{"RUNTIME_B": "four", "RUNTIME_A": "three"}, InitialAdminPassword: "admin", JWTSecret: "jwt", TOTPEncryptionKey: "totp", AdminAPIKey: "api", Postgres: &hostcontract.DataCredentials{Username: "pguser", Password: "pgpass"}, Redis: &hostcontract.DataCredentials{Username: "redisuser", Password: "redispass"}}
 	req := requestFor(state, revisionB(), a)
@@ -2178,8 +2200,8 @@ func TestEnvArtifactContainsAllSecretsAndNoCommandCanary(t *testing.T) {
 	}
 	inv := mustInventory(t, rt)
 	got := string(mustArtifact(t, rt, findApp(inv, appToken("one")).Env))
-	want := "RUNTIME_A=three\nRUNTIME_B=four\nSETTING_A=one\nSETTING_B=two\nINITIAL_ADMIN_PASSWORD=admin\nJWT_SECRET=jwt\nTOTP_ENCRYPTION_KEY=totp\nADMIN_API_KEY=api\n"
-	if got != want || runner.hasSecret("pgpass") || runner.hasSecret("CANARY") {
+	want := "RUNTIME_A=three\nRUNTIME_B=four\nSETTING_A=one\nSETTING_B=two\nADMIN_EMAIL=admin@example.test\nINITIAL_ADMIN_PASSWORD=admin\nJWT_SECRET=jwt\nTOTP_ENCRYPTION_KEY=totp\nADMIN_API_KEY=api\nDATABASE_HOST=10.0.0.8\nDATABASE_PORT=5432\nDATABASE_USER=pguser\nDATABASE_PASSWORD=pgpass\nDATABASE_DBNAME=sub2api\nDATABASE_SSLMODE=require\nREDIS_HOST=cache\nREDIS_PORT=6380\nREDIS_USERNAME=redisuser\nREDIS_PASSWORD=redispass\nREDIS_DB=2\nREDIS_ENABLE_TLS=true\n"
+	if got != want || runner.hasSecret("pgpass") || runner.hasSecret("redispass") || runner.hasSecret("CANARY") {
 		t.Fatalf("env=%q calls=%#v", got, runner.calls)
 	}
 }
@@ -2188,7 +2210,7 @@ func TestReconcileStaleInventoryOwnershipAndPreexistingNewRouteFailBeforeBegin(t
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
 	rt.runner = runner
-	inv := inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: hostcontract.OwnershipIdentity{Value: "other"}}
+	inv := inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: hostcontract.OwnershipIdentity{Value: "other"}, AppliedRevision: state.AppliedRevision}
 	if err := rt.writeInventory(inv); err != nil {
 		t.Fatal(err)
 	}
@@ -2268,7 +2290,7 @@ func TestReconcileDataApprovalAndUnownedAdmissionHaveNoJournalOrMutation(t *test
 	runner := &recordingRunner{}
 	rt.runner = runner
 	old := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old", Endpoint: "old.db", Port: 5432, Database: "app", TLSServerName: "old.db"}
-	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: objectName(state, "app", appToken("one"), "blue"), Image: "old", Data: []managedLink{{Name: "main", Identity: old}}, Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30}}}); err != nil {
+	if err := rt.writeInventory(inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, AppliedRevision: state.AppliedRevision, Objects: []managedObject{{Role: "app", AppToken: appToken("one"), Name: objectName(state, "app", appToken("one"), "blue"), Image: "old", Data: []managedLink{{Name: "main", Identity: old}}, Revision: state.AppliedRevision, Active: "blue", Env: envName(appToken("one"), state.AppliedRevision), Hostname: "one.example", ReadinessPath: "/health", DrainSeconds: 30}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.writeArtifact(routeName(appToken("one")), mustRoute(t, rt, state, "one"), 0600); err != nil {
@@ -2448,6 +2470,11 @@ func TestPendingStableNameRunUnknownResumesLocalAndProxyWithoutSecondRun(t *test
 			}
 			second := requestFor(state, revisionC())
 			configure(&second)
+			if name == "local" {
+				second.Target.DataServices[0].Port = 6381
+			} else {
+				second.Target.ReverseProxy.Image = "traefik:v3.1"
+			}
 			if _, err := rt.Reconcile(context.Background(), second); err == nil || runner.mutations("run") != 1 {
 				t.Fatalf("first=%v calls=%#v", err, runner.calls)
 			}
@@ -2541,7 +2568,7 @@ func TestPostgresAlterThenUnknownRemovalResumesWithoutSecondAlter(t *testing.T) 
 	}
 	state, _ = rt.readState()
 	old := findLocalData(mustInventory(t, rt), localDataToken("primary"))
-	runner.calls = nil
+	runner.calls, runner.stdin = nil, nil
 	runner.failAfter = true
 	runner.fail = func(argv []string) error {
 		if len(argv) > 2 && argv[0] == "rm" && argv[len(argv)-1] == old.Name {
@@ -2550,7 +2577,7 @@ func TestPostgresAlterThenUnknownRemovalResumesWithoutSecondAlter(t *testing.T) 
 		return nil
 	}
 	second := requestFor(state, revisionC())
-	second.Target.DataServices = first.Target.DataServices
+	second.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432, Persistence: true}}
 	second.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "new"}}
 	if _, err := rt.Reconcile(context.Background(), second); err == nil {
 		t.Fatal("first removal unexpectedly succeeded")
@@ -2559,11 +2586,8 @@ func TestPostgresAlterThenUnknownRemovalResumesWithoutSecondAlter(t *testing.T) 
 	if _, err := rt.Reconcile(context.Background(), second); err != nil {
 		t.Fatalf("retry=%v calls=%#v", err, runner.calls)
 	}
-	alter, remove, run := 0, 0, 0
+	remove, run := 0, 0
 	for _, call := range runner.calls {
-		if len(call) > 2 && call[0] == "exec" && call[1] == "-i" {
-			alter++
-		}
 		if len(call) > 0 && call[0] == "rm" && call[len(call)-1] == old.Name {
 			remove++
 		}
@@ -2571,8 +2595,9 @@ func TestPostgresAlterThenUnknownRemovalResumesWithoutSecondAlter(t *testing.T) 
 			run++
 		}
 	}
+	alter := countAdminPasswordAlter(runner)
 	if alter != 1 || remove != 1 || run != 1 || runner.hasSecret("new") {
-		t.Fatalf("alter=%d rm=%d run=%d calls=%#v", alter, remove, run, runner.calls)
+		t.Fatalf("admin-alter=%d rm=%d run=%d calls=%#v", alter, remove, run, runner.calls)
 	}
 	calls := len(runner.calls)
 	if _, err := rt.Reconcile(context.Background(), second); err != nil || len(runner.calls) != calls {
@@ -2592,7 +2617,7 @@ func TestPostgresReplacementRunUnknownResumesWithoutSecondAlterOrRun(t *testing.
 	}
 	state, _ = rt.readState()
 	old := findLocalData(mustInventory(t, rt), localDataToken("primary"))
-	runner.calls = nil
+	runner.calls, runner.stdin = nil, nil
 	runner.failAfter = true
 	runner.fail = func(argv []string) error {
 		if len(argv) > 0 && argv[0] == "run" {
@@ -2601,14 +2626,15 @@ func TestPostgresReplacementRunUnknownResumesWithoutSecondAlterOrRun(t *testing.
 		return nil
 	}
 	second := requestFor(state, revisionC())
-	second.Target.DataServices = first.Target.DataServices
+	second.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432, Persistence: true}}
 	second.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "new"}}
 	if _, err := rt.Reconcile(context.Background(), second); err == nil {
 		t.Fatal("replacement run unexpectedly succeeded")
 	}
 	runner.fail, runner.failAfter = nil, false
 	result, err := rt.Reconcile(context.Background(), second)
-	if err != nil || result.Status != hostprotocol.ResultApplied || runner.mutations("run") != 1 || runner.mutations("rm") != 1 || countAlter(runner.calls) != 1 || runner.hasSecret("new") {
+	alter := countAdminPasswordAlter(runner)
+	if err != nil || result.Status != hostprotocol.ResultApplied || runner.mutations("run") != 1 || runner.mutations("rm") != 1 || alter != 1 || runner.hasSecret("new") {
 		t.Fatalf("retry=%#v %v calls=%#v", result, err, runner.calls)
 	}
 	if runner.targets[old.Name] != targetLabelFor(findLocalData(mustInventory(t, rt), localDataToken("primary"))) {
@@ -2635,7 +2661,7 @@ func TestPostgresPendingReplacementRejectsWrongProposedTarget(t *testing.T) {
 		return nil
 	}
 	second := requestFor(state, revisionC())
-	second.Target.DataServices = first.Target.DataServices
+	second.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432, Persistence: true}}
 	second.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "new"}}
 	if _, err := rt.Reconcile(context.Background(), second); err == nil {
 		t.Fatal("replacement run unexpectedly succeeded")
@@ -3148,6 +3174,7 @@ func mustInventory(t *testing.T, rt *Runtime) inventory {
 
 type recordingRunner struct {
 	calls                 [][]string
+	stdin                 [][]byte
 	stdinDigests          []string
 	inspect               map[string]string
 	targets               map[string]string
@@ -3549,6 +3576,7 @@ func (r *recordingNFTRunner) Run(_ context.Context, argv []string, stdin []byte)
 
 func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([]byte, error) {
 	r.calls = append(r.calls, append([]string(nil), argv...))
+	r.stdin = append(r.stdin, append([]byte(nil), stdin...))
 	if len(stdin) > 0 {
 		r.stdinDigests = append(r.stdinDigests, token(string(stdin)))
 	}
@@ -3978,10 +4006,11 @@ func eachRemovalAtMostOnce(calls [][]string) bool {
 	}
 	return true
 }
-func countAlter(calls [][]string) int {
+func countAdminPasswordAlter(r *recordingRunner) int {
 	count := 0
-	for _, call := range calls {
-		if len(call) > 1 && call[0] == "exec" && call[1] == "-i" {
+	for _, input := range r.stdin {
+		stdin := string(input)
+		if strings.Contains(stdin, "CREATE TEMP TABLE s2h_password(password text NOT NULL);\nCOPY s2h_password FROM STDIN;\n") && strings.Contains(stdin, "SELECT format('ALTER ROLE %I PASSWORD %L', 's2h_admin', password) FROM s2h_password \\gexec\n") {
 			count++
 		}
 	}
@@ -4049,10 +4078,22 @@ func appWithLinks(id, image string, firstName string, first hostcontract.DataIde
 func dataIdentity(id string) hostcontract.DataIdentity {
 	return hostcontract.DataIdentity{Kind: "postgres", ProviderID: id, Endpoint: id + ".db", Port: 5432, Database: "app", TLSServerName: id + ".db"}
 }
+func redisDataIdentity(id string) hostcontract.DataIdentity {
+	return hostcontract.DataIdentity{Kind: "redis", ProviderID: id, Endpoint: id + ".cache", Port: 6379, Database: "0"}
+}
 func requestFor(state State, revision string, apps ...hostcontract.AppTarget) hostprotocol.Request {
 	secrets := make(map[string]hostcontract.AppSecrets, len(apps))
 	for _, app := range apps {
-		secrets[app.ID] = hostcontract.AppSecrets{JWTSecret: "CANARY"}
+		secret := hostcontract.AppSecrets{JWTSecret: "CANARY"}
+		for _, link := range app.DataLinks {
+			switch link.Identity.Kind {
+			case "postgres":
+				secret.Postgres = &hostcontract.DataCredentials{Username: "pguser", Password: "pgpass"}
+			case "redis":
+				secret.Redis = &hostcontract.DataCredentials{Username: "redisuser", Password: "redispass"}
+			}
+		}
+		secrets[app.ID] = secret
 	}
 	return hostprotocol.Request{Action: hostcontract.ActionReconcile, Resource: state.Resource, TargetRevision: revision, PriorAppliedRevision: state.AppliedRevision, Target: &hostcontract.Target{ReleaseArtifact: "release", Apps: apps}, Secrets: &hostcontract.Secrets{Apps: secrets}}
 }

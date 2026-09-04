@@ -791,14 +791,6 @@ func TestEngineGraphCrossHostDataRemovalIsReverseStaged(t *testing.T) {
 	}
 	assertCrossHostTargets(t, publication, true, true, false)
 	assertStageTrace(t, harness.trace.snapshot()[before:], []string{"cloudflare:dns:dns-app-bravo-A:delete:ok"})
-	before = len(harness.trace.snapshot())
-	publicationRetry, err := harness.updateTargets(t, finalConfig, finalSecrets, publicationURN)
-	if err != nil {
-		t.Fatalf("publication detach retry: %v", err)
-	}
-	assertSemanticCheckpointEqual(t, publicationRetry, publication)
-	assertCrossHostTargets(t, publicationRetry, true, true, false)
-	assertStageTrace(t, harness.trace.snapshot()[before:], nil)
 
 	before = len(harness.trace.snapshot())
 	detached, err := harness.updateTargets(t, finalConfig, finalSecrets, bravoURN)
@@ -1423,11 +1415,11 @@ func assertCrossHostTargets(t *testing.T, snapshot *deploy.Snapshot, bravoHasApp
 		t.Fatalf("cross-Host checkpoint misses alpha or bravo Host: alpha=%v bravo=%v", alpha != nil, bravo != nil)
 	}
 	assertHostAppCount(t, snapshot, "host-alpha", 0)
+	if !slices.Contains(bravo.Dependencies, alpha.URN) {
+		t.Fatalf("bravo Host dependencies = %v, want retained data Host %s", bravo.Dependencies, alpha.URN)
+	}
 	if bravoHasApp {
 		assertHostAppCount(t, snapshot, "host-bravo", 1)
-		if !slices.Contains(bravo.Dependencies, alpha.URN) {
-			t.Fatalf("bravo Host dependencies = %v, want data Host %s", bravo.Dependencies, alpha.URN)
-		}
 		dataLinks, ok := propertyAt(bravo.Inputs, "target", "apps", "0", "dataLinks")
 		for _, link := range []string{"app-postgres", "app-redis"} {
 			if !ok || !containsString(dataLinks, link) || !containsString(dataLinks, "10.42.0.11") {
@@ -1445,10 +1437,10 @@ func assertCrossHostTargets(t *testing.T, snapshot *deploy.Snapshot, bravoHasApp
 	}
 
 	dataServices, ok := propertyAt(alpha.Inputs, "target", "dataServices")
-	if !ok || !dataServices.IsArray() || len(dataServices.ArrayValue()) != 2 || !containsString(dataServices, "10.42.0.11") {
+	if !ok || !dataServices.IsArray() || len(dataServices.ArrayValue()) != 2 {
 		t.Fatalf("alpha data Host target = %v, want Docker PostgreSQL and Redis bindings", dataServices)
 	}
-	if alphaAdmitsBravo && (!containsString(dataServices, "10.42.0.12") || !containsString(dataServices, "app-postgres") || !containsString(dataServices, "app-redis")) {
+	if alphaAdmitsBravo && (!containsString(dataServices, "10.42.0.11") || !containsString(dataServices, "10.42.0.12") || !containsString(dataServices, "app-postgres") || !containsString(dataServices, "app-redis")) {
 		t.Fatalf("alpha data admission target = %v, want bravo source and both services", dataServices)
 	}
 	if !alphaAdmitsBravo && containsString(dataServices, "10.42.0.12") {

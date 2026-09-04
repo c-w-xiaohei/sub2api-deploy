@@ -156,14 +156,15 @@ func importPreflight(ctx *pulumi.Context, validated environment.ValidatedConfig,
 
 func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, secrets environment.Secrets, release string, managed map[string]managedRedisInputs, importTarget string, key hostcontract.RevisionKey) (map[string]*hostResource, error) {
 	hosts := make(map[string]*hostResource, len(validated.ServerIDs))
-	order, err := hostOrder(validated.Config)
+	dockerDependencies := dockerDataOwnerDependencies(validated.Config)
+	order, err := hostOrderWithDockerDataDependencies(validated.Config, dockerDependencies)
 	if err != nil {
 		return nil, err
 	}
 	for _, serverID := range order {
 		var host hostResource
 		var options []pulumi.ResourceOption
-		if dependencies := hostDependencies(serverID, validated.Config, hosts); len(dependencies) != 0 {
+		if dependencies := hostDependencies(serverID, validated.Config, hosts, dockerDependencies); len(dependencies) != 0 {
 			options = append(options, pulumi.DependsOn(dependencies))
 		}
 		inputs := pulumi.Map{
@@ -567,7 +568,7 @@ func hostSecrets(config environment.Config, secrets environment.Secrets, server 
 	})
 }
 
-func hostDependencies(server string, config environment.Config, hosts map[string]*hostResource) []pulumi.Resource {
+func hostDependencies(server string, config environment.Config, hosts map[string]*hostResource, dockerDependencies map[string]map[string]bool) []pulumi.Resource {
 	dependencies := []pulumi.Resource{}
 	seen := map[string]bool{}
 	for _, id := range sortedAppIDs(config) {
@@ -583,29 +584,27 @@ func hostDependencies(server string, config environment.Config, hosts map[string
 			}
 		}
 	}
-	for _, app := range config.Apps {
-		for _, service := range []struct{ kind, owner string }{{"postgres", config.Postgres[app.Postgres.Name].Server}, {"redis", config.Redis[app.Redis.Name].Server}} {
-			if service.owner != "" && service.owner != server && contains(app.Servers, server) && !seen[service.owner] {
-				dependencies = append(dependencies, hosts[service.owner])
-				seen[service.owner] = true
-			}
+	for _, owner := range sortedStrings(mapKeys(dockerDependencies[server])) {
+		if !seen[owner] {
+			dependencies = append(dependencies, hosts[owner])
+			seen[owner] = true
 		}
 	}
 	return dependencies
 }
 
 func hostOrder(config environment.Config) ([]string, error) {
+	return hostOrderWithDockerDataDependencies(config, dockerDataOwnerDependencies(config))
+}
+
+func hostOrderWithDockerDataDependencies(config environment.Config, dockerDependencies map[string]map[string]bool) ([]string, error) {
 	deps := map[string]map[string]bool{}
 	for id := range config.Servers {
 		deps[id] = map[string]bool{}
 	}
-	for _, app := range config.Apps {
-		for _, server := range app.Servers {
-			for _, owner := range []string{config.Postgres[app.Postgres.Name].Server, config.Redis[app.Redis.Name].Server} {
-				if owner != "" && owner != server {
-					deps[server][owner] = true
-				}
-			}
+	for server, owners := range dockerDependencies {
+		for owner := range owners {
+			deps[server][owner] = true
 		}
 	}
 	var order []string
@@ -629,6 +628,37 @@ func hostOrder(config environment.Config) ([]string, error) {
 		}
 	}
 	return order, nil
+}
+
+// dockerDataOwnerDependencies retains data-owner ordering while an App is absent
+// from its final runtime placement, so targeted removal cannot revoke admission first.
+func dockerDataOwnerDependencies(config environment.Config) map[string]map[string]bool {
+	dependencies := map[string]map[string]bool{}
+	for _, app := range config.Apps {
+		owners := []string{}
+		if service, ok := config.Postgres[app.Postgres.Name]; ok && service.Type == "docker" {
+			owners = append(owners, service.Server)
+		}
+		if service, ok := config.Redis[app.Redis.Name]; ok && service.Type == "docker" {
+			owners = append(owners, service.Server)
+		}
+		consumers := app.Servers
+		if len(consumers) == 0 {
+			consumers = mapKeys(config.Servers)
+		}
+		for _, consumer := range consumers {
+			for _, owner := range owners {
+				if owner == "" || owner == consumer {
+					continue
+				}
+				if dependencies[consumer] == nil {
+					dependencies[consumer] = map[string]bool{}
+				}
+				dependencies[consumer][owner] = true
+			}
+		}
+	}
+	return dependencies
 }
 
 func appPlacementOrder(config environment.Config, app environment.App) []string {
