@@ -39,11 +39,29 @@ func TestProviderSchemaHasOnlyHostAndSecretRevisionKey(t *testing.T) {
 	if target := schema.Types["sub2api-host:index:Target"]; target.Properties["apps"].Items.Ref != "#/types/sub2api-host:index:AppTarget" || target.Properties["reverseProxy"].Ref != "#/types/sub2api-host:index:ReverseProxyTarget" {
 		t.Fatalf("Target shape = %#v", target)
 	}
-	if app := schema.Types["sub2api-host:index:AppTarget"]; app.Properties["initialBootstrap"].Type != "boolean" || app.Properties["dataLinks"].Items.Ref != "#/types/sub2api-host:index:DataLink" {
+	if app := schema.Types["sub2api-host:index:AppTarget"]; app.Properties["initialBootstrap"].Type != "boolean" || app.Properties["initialAdminEmail"].Type != "string" || !contains(app.Required, "initialAdminEmail") || app.Properties["dataLinks"].Items.Ref != "#/types/sub2api-host:index:DataLink" {
 		t.Fatalf("App shape = %#v", app)
 	}
 	if data := schema.Types["sub2api-host:index:DataIdentity"]; data.Properties["port"].Type != "integer" || data.Properties["endpoint"].Type != "string" {
 		t.Fatalf("Data identity shape = %#v", data)
+	}
+	if data := schema.Types["sub2api-host:index:DataIdentity"]; data.Properties["tlsMode"].Type != "string" {
+		t.Fatalf("Data identity TLS shape = %#v", data)
+	}
+	if contains(schema.Types["sub2api-host:index:DataIdentity"].Required, "tlsMode") {
+		t.Fatal("tlsMode must remain optional for legacy input compatibility")
+	}
+	if local := schema.Types["sub2api-host:index:LocalDataServiceTarget"]; local.Properties["bindings"].Items.Ref != "#/types/sub2api-host:index:LocalDataBinding" || local.Properties["clients"].Items.Ref != "#/types/sub2api-host:index:LocalDataClient" {
+		t.Fatalf("local data service shape = %#v", local)
+	}
+	if binding := schema.Types["sub2api-host:index:LocalDataBinding"]; binding.Properties["allowedSources"].Items.Type != "string" {
+		t.Fatalf("binding shape = %#v", binding)
+	}
+	if client := schema.Types["sub2api-host:index:LocalDataClient"]; client.Properties["appId"].Type != "string" || client.Properties["username"].Type != "string" {
+		t.Fatalf("client shape = %#v", client)
+	}
+	if localSecret := schema.Types["sub2api-host:index:LocalDataServiceSecrets"]; localSecret.Properties["clientPasswords"].AdditionalProperties.Type != "string" {
+		t.Fatalf("local data secret shape = %#v", localSecret)
 	}
 	for _, forbidden := range []string{"path", "compose", "slot", "phase", "approval"} {
 		if _, ok := schema.Resources["sub2api-host:index:Host"].InputProperties[forbidden]; ok {
@@ -175,11 +193,12 @@ func TestDiffReportsRefreshedDriftAndAppliedRevisionMismatch(t *testing.T) {
 	}
 }
 
-func TestReadRejectsImportStyleEmptyRequestBeforeTransport(t *testing.T) {
+// TestReadRejectsOpaqueHostImportToken is baseline-compilable RED coverage.
+func TestReadRejectsOpaqueHostImportTokenBeforeTransport(t *testing.T) {
 	r := &recordingLifecycleTransport{}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
-	got, err := h.read(t.Context(), p.ReadRequest{ID: "host-imported-without-context"})
-	if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 0 || !strings.Contains(err.Error(), "import") || !strings.Contains(err.Error(), "context") {
+	got, err := h.read(t.Context(), p.ReadRequest{ID: "hit1:opaque"})
+	if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 0 || !strings.Contains(err.Error(), "import") {
 		t.Fatalf("empty import-style Read did not fail explicitly before transport: %#v, %v", got, err)
 	}
 }
@@ -344,6 +363,113 @@ func TestDiffAndCreateFailClosedWithoutEffects(t *testing.T) {
 	if _, err := provider.Create(context.Background(), p.CreateRequest{Properties: old}); err == nil {
 		t.Fatal("non-preview Create accepted")
 	}
+}
+
+func TestCheckAcceptsCompleteCrossHostDataContract(t *testing.T) {
+	inputs := completeCrossHostInputs(true, "disable")
+	response, err := New("1.0.0").Check(t.Context(), p.CheckRequest{Inputs: inputs})
+	if err != nil || len(response.Failures) != 0 {
+		t.Fatalf("complete cross-host Check = %#v, %v", response, err)
+	}
+	secrets, _ := response.Inputs.GetOk("secrets")
+	if !secrets.Secret() {
+		t.Fatalf("Check lost secret class: %#v", secrets)
+	}
+}
+
+func TestCheckAcceptsLegacyOmittedTLSModeAndRejectsInvalidExplicitMode(t *testing.T) {
+	if response, err := New("1.0.0").Check(t.Context(), p.CheckRequest{Inputs: completeCrossHostInputs(false, "")}); err != nil || len(response.Failures) != 0 {
+		t.Fatalf("legacy omitted tlsMode = %#v, %v", response, err)
+	}
+	if response, err := New("1.0.0").Check(t.Context(), p.CheckRequest{Inputs: completeCrossHostInputs(true, "invalid")}); err != nil || len(response.Failures) == 0 {
+		t.Fatalf("invalid tlsMode accepted = %#v, %v", response, err)
+	}
+}
+
+func TestCheckRejectsUnsafePostgresClientContract(t *testing.T) {
+	response, err := New("1.0.0").Check(t.Context(), p.CheckRequest{Inputs: completeCrossHostInputsForUsername(true, "disable", "s2h_client")})
+	if err != nil || len(response.Failures) == 0 {
+		t.Fatalf("Provider Check accepted controller-reserved PostgreSQL role: %#v, %v", response, err)
+	}
+}
+
+func TestCheckRequiresSafeExplicitInitialAdminEmail(t *testing.T) {
+	for name, email := range map[string]property.Value{
+		"absent":  property.New("unused"),
+		"null":    property.New(property.Null),
+		"empty":   property.New(""),
+		"control": property.New("admin@example.test\x00"),
+		"newline": property.New("admin@example.test\nINJECTED=yes"),
+		"valid":   property.New("admin@example.test"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs := completeCrossHostInputs(true, "disable")
+			if name == "absent" {
+				target, _ := inputs.GetOk("target")
+				apps, _ := target.AsMap().GetOk("apps")
+				app := apps.AsArray().AsSlice()[0].AsMap().Delete("initialAdminEmail")
+				dataServices, _ := target.AsMap().GetOk("dataServices")
+				inputs = inputs.Set("target", object("releaseArtifact", property.New("release"), "apps", property.New(property.NewArray([]property.Value{property.New(app)})), "dataServices", dataServices))
+			} else {
+				target, _ := inputs.GetOk("target")
+				apps, _ := target.AsMap().GetOk("apps")
+				app := apps.AsArray().AsSlice()[0].AsMap().Set("initialAdminEmail", email)
+				dataServices, _ := target.AsMap().GetOk("dataServices")
+				inputs = inputs.Set("target", object("releaseArtifact", property.New("release"), "apps", property.New(property.NewArray([]property.Value{property.New(app)})), "dataServices", dataServices))
+			}
+			response, err := New("1.0.0").Check(t.Context(), p.CheckRequest{Inputs: inputs})
+			if err != nil || (name == "valid") != (len(response.Failures) == 0) {
+				t.Fatalf("initialAdminEmail %s = %#v, %v", name, response, err)
+			}
+		})
+	}
+}
+
+func TestCheckRejectsRuntimeAdminEmailOverrides(t *testing.T) {
+	for name, mutate := range map[string]func(property.Map) property.Map{
+		"settings": func(inputs property.Map) property.Map {
+			target, _ := inputs.GetOk("target")
+			apps, _ := target.AsMap().GetOk("apps")
+			app := apps.AsArray().AsSlice()[0].AsMap()
+			app = app.Set("runtimeSettings", property.New(property.NewMap(map[string]property.Value{"ADMIN_EMAIL": property.New("attacker@example.test")})))
+			dataServices, _ := target.AsMap().GetOk("dataServices")
+			return inputs.Set("target", object("releaseArtifact", property.New("release"), "apps", property.New(property.NewArray([]property.Value{property.New(app)})), "dataServices", dataServices))
+		},
+		"secrets": func(inputs property.Map) property.Map {
+			secrets, _ := inputs.GetOk("secrets")
+			apps, _ := secrets.AsMap().GetOk("apps")
+			appValue, _ := apps.AsMap().GetOk("app")
+			app := appValue.AsMap().Set("runtimeEnvironment", property.New(property.NewMap(map[string]property.Value{"ADMIN_EMAIL": property.New("attacker@example.test")})))
+			localDataServices, _ := secrets.AsMap().GetOk("localDataServices")
+			return inputs.Set("secrets", property.New(property.NewMap(map[string]property.Value{"apps": property.New(property.NewMap(map[string]property.Value{"app": property.New(app)})), "localDataServices": localDataServices})).WithSecret(true))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response, err := New("1.0.0").Check(t.Context(), p.CheckRequest{Inputs: mutate(completeCrossHostInputs(true, "disable"))})
+			if err != nil || len(response.Failures) == 0 {
+				t.Fatalf("ADMIN_EMAIL override accepted = %#v, %v", response, err)
+			}
+		})
+	}
+}
+
+func completeCrossHostInputs(includeTLS bool, tlsMode string) property.Map {
+	return completeCrossHostInputsForUsername(includeTLS, tlsMode, "app")
+}
+
+func completeCrossHostInputsForUsername(includeTLS bool, tlsMode, username string) property.Map {
+	identityFields := []any{"kind", property.New("postgres"), "providerId", property.New("docker:data:db"), "endpoint", property.New("10.0.0.1"), "port", property.New(5432.0), "database", property.New("app")}
+	if includeTLS {
+		identityFields = append(identityFields, "tlsMode", property.New(tlsMode))
+	}
+	identity := object(identityFields...)
+	link := object("name", property.New("db"), "identity", identity)
+	app := object("id", property.New("app"), "image", property.New("image"), "hostname", property.New("app.example"), "readinessPath", property.New("/ready"), "initialAdminEmail", property.New("admin@example.test"), "dataLinks", property.New(property.NewArray([]property.Value{link})))
+	binding := object("address", property.New("10.0.0.1"), "allowedSources", property.New(property.NewArray([]property.Value{property.New("10.0.0.2")})))
+	client := object("appId", property.New("app"), "username", property.New(username), "database", property.New("app"))
+	service := object("id", property.New("db"), "type", property.New("postgres"), "port", property.New(5432.0), "bindings", property.New(property.NewArray([]property.Value{binding})), "clients", property.New(property.NewArray([]property.Value{client})))
+	serviceSecrets := object("adminPassword", property.New("admin"), "clientPasswords", property.New(property.NewMap(map[string]property.Value{"app": property.New("password")})))
+	return property.NewMap(map[string]property.Value{"resource": object("environment", property.New("prod"), "serverKey", property.New("data")), "server": object("sshAlias", property.New("data-ssh")), "target": object("releaseArtifact", property.New("release"), "apps", property.New(property.NewArray([]property.Value{app})), "dataServices", property.New(property.NewArray([]property.Value{service}))), "secrets": property.New(property.NewMap(map[string]property.Value{"localDataServices": property.New(property.NewMap(map[string]property.Value{"db": serviceSecrets}))})).WithSecret(true)})
 }
 
 func hostInputs(server property.Value) property.Map {

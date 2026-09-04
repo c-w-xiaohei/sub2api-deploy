@@ -16,10 +16,12 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/artifact"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostimport"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/urn"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
@@ -274,7 +276,9 @@ func TestLifecycleCreateRejectsInvalidBootstrapAndFinalObservation(t *testing.T)
 			bundle, binary := lifecycleBundle(t, release(t, inputs))
 			digest := fmt.Sprintf("%x", sha256.Sum256(binary))
 			r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, outcomes: scenario.outcomes}
-			if scenario.calls == 4 { r.probes = []artifact.ProbeInfo{r.probe, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}} }
+			if scenario.calls == 4 {
+				r.probes = []artifact.ProbeInfo{r.probe, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}
+			}
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
 			got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
 			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != scenario.calls || len(r.outcomes) != 0 {
@@ -417,13 +421,16 @@ func TestLifecycleUpdateResponseLossWithTerminalNextReleaseReplaysPinnedBootstra
 	bootstrap := decodeBootstrapRequest(t, r.calls[2].stdin, binary)
 	assertReconcile(t, bootstrap, next, desired, oldRevision, nil)
 	assertInspect(t, r.calls[4], next, desired)
-	if newDigest == oldDigest { t.Fatal("digest fixture is not distinct") }
+	if newDigest == oldDigest {
+		t.Fatal("digest fixture is not distinct")
+	}
 	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
 }
 
 func TestLifecycleUpdateTerminalNextReleaseWithPinnedInstalledDigestCheckpointsWithoutReplay(t *testing.T) {
 	old := lifecycleInputs("edge")
-	nextTarget := decodeTarget(t, old); nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	next := old.Set("target", encodeValue(t, nextTarget))
 	bundle, binary := lifecycleBundle(t, nextTarget.ReleaseArtifact)
 	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
@@ -433,13 +440,16 @@ func TestLifecycleUpdateTerminalNextReleaseWithPinnedInstalledDigestCheckpointsW
 	final := observationFor(nextTarget, desired)
 	r.outcomes = []lifecycleOutcome{response(inspected(final))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || len(r.calls) != 2 || r.calls[0].request.Action != hostcontract.ActionInspect || r.calls[1].kind != "probe" || hasWrite(r) { t.Fatalf("terminal pinned digest shortcut = %#v, %v, %#v", got, err, r.calls) }
+	if err != nil || len(r.calls) != 2 || r.calls[0].request.Action != hostcontract.ActionInspect || r.calls[1].kind != "probe" || hasWrite(r) {
+		t.Fatalf("terminal pinned digest shortcut = %#v, %v, %#v", got, err, r.calls)
+	}
 	assertCheckpoint(t, got.Properties, next, final, desired)
 }
 
 func TestLifecycleUpdateTerminalNextReleaseWithMissingInstalledDigestReplaysPinnedBootstrap(t *testing.T) {
 	old := lifecycleInputs("edge")
-	nextTarget := decodeTarget(t, old); nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	next := old.Set("target", encodeValue(t, nextTarget))
 	bundle, binary := lifecycleBundle(t, nextTarget.ReleaseArtifact)
 	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
@@ -449,14 +459,17 @@ func TestLifecycleUpdateTerminalNextReleaseWithMissingInstalledDigestReplaysPinn
 	final := observationFor(nextTarget, desired)
 	r.outcomes = []lifecycleOutcome{response(inspected(final)), response(applied(desired)), response(inspected(final))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || len(r.calls) != 5 || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver || r.calls[3].kind != "probe" || r.calls[4].command != openssh.Host { t.Fatalf("missing digest terminal recovery = %#v, %v, %#v", got, err, r.calls) }
+	if err != nil || len(r.calls) != 5 || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver || r.calls[3].kind != "probe" || r.calls[4].command != openssh.Host {
+		t.Fatalf("missing digest terminal recovery = %#v, %v, %#v", got, err, r.calls)
+	}
 	assertReconcile(t, decodeBootstrapRequest(t, r.calls[2].stdin, binary), next, desired, oldRevision, nil)
 	assertCheckpoint(t, got.Properties, next, final, desired)
 }
 
 func TestLifecycleUpdateRejectsWrongPostBootstrapInstalledDigestBeforeFinalInspect(t *testing.T) {
 	old := lifecycleInputs("edge")
-	nextTarget := decodeTarget(t, old); nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	next := old.Set("target", encodeValue(t, nextTarget))
 	bundle, _ := lifecycleBundle(t, nextTarget.ReleaseArtifact)
 	for _, digest := range []string{"missing", strings.Repeat("0", 64)} {
@@ -465,7 +478,9 @@ func TestLifecycleUpdateRejectsWrongPostBootstrapInstalledDigestBeforeFinalInspe
 		oldRevision, desired := revision(t, h, old), revision(t, h, next)
 		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), response(applied(desired))}
 		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-		if err == nil || got.Properties.Len() != 0 || len(r.calls) != 4 || r.calls[3].kind != "probe" || len(r.outcomes) != 0 { t.Fatalf("wrong post-bootstrap digest checkpointed or inspected final: %#v, %v, %#v", got, err, r.calls) }
+		if err == nil || got.Properties.Len() != 0 || len(r.calls) != 4 || r.calls[3].kind != "probe" || len(r.outcomes) != 0 {
+			t.Fatalf("wrong post-bootstrap digest checkpointed or inspected final: %#v, %v, %#v", got, err, r.calls)
+		}
 		_ = desired
 	}
 }
@@ -543,10 +558,15 @@ func TestLifecycleUpdateDangerousTerminalRequiresExactCompleteEvidence(t *testin
 		oldRevision, desired := revision(t, h, old), revision(t, h, next)
 		approval := dangerousApprovalFixture(t, old, next, desired)
 		var evidence *hostprotocol.OperationEvidence
-		if mutate != nil { evidence = &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationComplete, Approval: &approval}; mutate(evidence) }
+		if mutate != nil {
+			evidence = &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: oldRevision}, Status: hostprotocol.OperationComplete, Approval: &approval}
+			mutate(evidence)
+		}
 		r.outcomes = []lifecycleOutcome{response(inspectedEvidence(observationFor(decodeTarget(t, next), desired), evidence))}
 		got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-		if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) || hasWrite(r) { t.Fatal("unproven dangerous terminal state was checkpointed") }
+		if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) || hasWrite(r) {
+			t.Fatal("unproven dangerous terminal state was checkpointed")
+		}
 	}
 	r := &recordingLifecycleTransport{}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
@@ -556,7 +576,9 @@ func TestLifecycleUpdateDangerousTerminalRequiresExactCompleteEvidence(t *testin
 	nextObservation := observationFor(decodeTarget(t, next), desired)
 	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(nextObservation, evidence))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || !onlyInspect(r) { t.Fatalf("exact dangerous completion = %#v, %v", got, err) }
+	if err != nil || !onlyInspect(r) {
+		t.Fatalf("exact dangerous completion = %#v, %v", got, err)
+	}
 	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
 }
 
@@ -570,7 +592,9 @@ func TestLifecycleUpdateDangerousPendingEvidenceResumesWithoutApprovalReplay(t *
 	nextObservation := observationFor(decodeTarget(t, next), desired)
 	r.outcomes = []lifecycleOutcome{response(inspectedEvidence(pendingObservation(oldRevision), evidence)), response(applied(desired)), response(inspected(nextObservation))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || len(r.calls) != 3 || r.calls[1].request.Approval != nil { t.Fatalf("dangerous pending resume = %#v, %v, %#v", got, err, r.calls) }
+	if err != nil || len(r.calls) != 3 || r.calls[1].request.Approval != nil {
+		t.Fatalf("dangerous pending resume = %#v, %v, %#v", got, err, r.calls)
+	}
 	assertReconcile(t, r.calls[1].request, next, desired, oldRevision, nil)
 	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
 }
@@ -579,7 +603,10 @@ func TestLifecycleUpdateDangerousMismatchedPendingEvidenceFailsClosed(t *testing
 	old, next := dangerousChange(t)
 	r := &recordingLifecycleTransport{}
 	approvals := 0
-	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { approvals++; return &subject, nil }})
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+		approvals++
+		return &subject, nil
+	}})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
 	approval := dangerousApprovalFixture(t, old, next, desired)
 	wrong := &hostprotocol.OperationEvidence{Key: hostcontract.OperationKey{Resource: lifecycleResource(t, next), Action: hostcontract.ActionReconcile, TargetRevision: desired, PriorAppliedRevision: mismatchedRevision()}, Status: hostprotocol.OperationPending, Approval: &approval}
@@ -604,7 +631,9 @@ func TestLifecycleUpdateRequestsApprovalForRenamedExactSingleDataLink(t *testing
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
 		approvals++
 		r.events = append(r.events, "approve")
-		if !reflect.DeepEqual(subject, expected) { t.Fatal("renamed link approval subject was not exact") }
+		if !reflect.DeepEqual(subject, expected) {
+			t.Fatal("renamed link approval subject was not exact")
+		}
 		return &expected, nil
 	}})
 	oldRevision, desired := revision(t, h, old), revision(t, h, next)
@@ -615,16 +644,26 @@ func TestLifecycleUpdateRequestsApprovalForRenamedExactSingleDataLink(t *testing
 	if err != nil || got.Properties.Len() == 0 || approvals != 1 || strings.Join(r.events, ",") != "inspect,approve,reconcile,inspect" {
 		t.Fatal("renamed exact single data-link did not use inspect, approve, reconcile, inspect")
 	}
-	if r.calls[1].request.Approval == nil || !reflect.DeepEqual(*r.calls[1].request.Approval, expected) { t.Fatal("renamed link reconcile did not include the exact approval") }
+	if r.calls[1].request.Approval == nil || !reflect.DeepEqual(*r.calls[1].request.Approval, expected) {
+		t.Fatal("renamed link reconcile did not include the exact approval")
+	}
 }
 
 func TestLifecycleUpdateApprovalFailuresAndMultipleChangesDoNotWrite(t *testing.T) {
 	old, next := dangerousChange(t)
 	for _, approval := range []func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error){
 		nil,
-		func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { return nil, errors.New("approval unavailable") },
-		func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { return nil, nil },
-		func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { wrong := subject; wrong.NewData.Endpoint = "wrong"; return &wrong, nil },
+		func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+			return nil, errors.New("approval unavailable")
+		},
+		func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+			return nil, nil
+		},
+		func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+			wrong := subject
+			wrong.NewData.Endpoint = "wrong"
+			return &wrong, nil
+		},
 	} {
 		r := &recordingLifecycleTransport{}
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: approval})
@@ -651,7 +690,11 @@ func TestLifecycleUpdateApprovalFailuresAndMultipleChangesDoNotWrite(t *testing.
 
 func TestLifecycleUpdateRejectsUnsafeInitialObservations(t *testing.T) {
 	old, next := lifecycleInputs("edge"), rotateSecret(t, lifecycleInputs("edge"))
-	for _, scenario := range []struct { name string; mutate func(hostcontract.StableObservation) hostcontract.StableObservation; outcome lifecycleOutcome }{
+	for _, scenario := range []struct {
+		name    string
+		mutate  func(hostcontract.StableObservation) hostcontract.StableObservation
+		outcome lifecycleOutcome
+	}{
 		{"machine", wrongMachine, lifecycleOutcome{}},
 		{"owner", wrongOwner, lifecycleOutcome{}},
 		{"third party revision", wrongRevision, lifecycleOutcome{}},
@@ -664,7 +707,11 @@ func TestLifecycleUpdateRejectsUnsafeInitialObservations(t *testing.T) {
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 			oldRevision := revision(t, h, old)
 			initial := observation(oldRevision)
-			if scenario.mutate != nil { r.outcomes = []lifecycleOutcome{response(inspected(scenario.mutate(initial)))} } else if scenario.outcome.err != nil || scenario.outcome.response.Result != nil { r.outcomes = []lifecycleOutcome{scenario.outcome} }
+			if scenario.mutate != nil {
+				r.outcomes = []lifecycleOutcome{response(inspected(scenario.mutate(initial)))}
+			} else if scenario.outcome.err != nil || scenario.outcome.response.Result != nil {
+				r.outcomes = []lifecycleOutcome{scenario.outcome}
+			}
 			got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
 			if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) {
 				t.Fatal("unsafe initial observation reached reconciliation")
@@ -716,7 +763,9 @@ func TestLifecycleUpdateAcceptsOwnershipScopedLocalDataIdentity(t *testing.T) {
 	}
 	r.outcomes = []lifecycleOutcome{response(inspected(oldObservation)), response(applied(desired)), response(inspected(nextObservation))}
 	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, oldObservation, oldRevision), OldInputs: old, Inputs: next})
-	if err != nil || len(r.calls) != 3 { t.Fatal("Update rejected an ownership-scoped local data identity") }
+	if err != nil || len(r.calls) != 3 {
+		t.Fatal("Update rejected an ownership-scoped local data identity")
+	}
 	assertCheckpoint(t, got.Properties, next, nextObservation, desired)
 }
 
@@ -793,25 +842,46 @@ func TestLifecycleUpdateReleaseUpgradeGuardsAndPostBootstrapFailures(t *testing.
 	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	next := old.Set("target", encodeValue(t, nextTarget))
 	for _, scenario := range []struct {
-		name    string
-		bundle  func(t *testing.T) (artifactBundle, error)
-		probe   artifact.ProbeInfo
-		calls   int
-		write   bool
+		name   string
+		bundle func(t *testing.T) (artifactBundle, error)
+		probe  artifact.ProbeInfo
+		calls  int
+		write  bool
 	}{
 		{"artifact unavailable", func(*testing.T) (artifactBundle, error) { return artifactBundle{}, errors.New("absent") }, artifact.ProbeInfo{}, 1, false},
-		{"manifest release mismatch", func(t *testing.T) (artifactBundle, error) { bundle, _ := lifecycleBundle(t, "other-release"); return bundle, nil }, artifact.ProbeInfo{}, 1, false},
-		{"unsupported architecture", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "mips", Machine: "machine-a"}, 2, false},
-		{"checksum mismatch", func(t *testing.T) (artifactBundle, error) { bundle := lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact); bundle.Manifest.LinuxAMD64.SHA256 = strings.Repeat("0", 64); return bundle, nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 2, false},
-		{"probe OS mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Darwin", Arch: "amd64", Machine: "machine-a"}, 2, false},
-		{"probe machine mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-b"}, 2, false},
-		{"bootstrap invalid response", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
-		{"bootstrap transport failure", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
-		{"final observation mismatch", func(t *testing.T) (artifactBundle, error) { return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil }, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, 5, true},
+		{"manifest release mismatch", func(t *testing.T) (artifactBundle, error) {
+			bundle, _ := lifecycleBundle(t, "other-release")
+			return bundle, nil
+		}, artifact.ProbeInfo{}, 1, false},
+		{"unsupported architecture", func(t *testing.T) (artifactBundle, error) {
+			return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil
+		}, artifact.ProbeInfo{OS: "Linux", Arch: "mips", Machine: "machine-a"}, 2, false},
+		{"checksum mismatch", func(t *testing.T) (artifactBundle, error) {
+			bundle := lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact)
+			bundle.Manifest.LinuxAMD64.SHA256 = strings.Repeat("0", 64)
+			return bundle, nil
+		}, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 2, false},
+		{"probe OS mismatch", func(t *testing.T) (artifactBundle, error) {
+			return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil
+		}, artifact.ProbeInfo{OS: "Darwin", Arch: "amd64", Machine: "machine-a"}, 2, false},
+		{"probe machine mismatch", func(t *testing.T) (artifactBundle, error) {
+			return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil
+		}, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-b"}, 2, false},
+		{"bootstrap invalid response", func(t *testing.T) (artifactBundle, error) {
+			return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil
+		}, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
+		{"bootstrap transport failure", func(t *testing.T) (artifactBundle, error) {
+			return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil
+		}, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a"}, 3, true},
+		{"final observation mismatch", func(t *testing.T) (artifactBundle, error) {
+			return lifecycleArtifactBundle(t, nextTarget.ReleaseArtifact), nil
+		}, artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, 5, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			r := &recordingLifecycleTransport{probe: scenario.probe}
-			if scenario.calls == 5 { r.probes = []artifact.ProbeInfo{scenario.probe, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: pinnedTestDigest()}} }
+			if scenario.calls == 5 {
+				r.probes = []artifact.ProbeInfo{scenario.probe, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: pinnedTestDigest()}}
+			}
 			artifactCalls := 0
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { artifactCalls++; return scenario.bundle(t) }, approve: fatalApproval(t)})
 			oldRevision, desired := revision(t, h, old), revision(t, h, next)
@@ -838,7 +908,11 @@ func TestLifecycleUpdateReleaseUpgradeGuardsAndPostBootstrapFailures(t *testing.
 
 func TestLifecycleUpdateDirectGuardsFailBeforeTransport(t *testing.T) {
 	old := lifecycleInputs("edge")
-	for _, scenario := range []struct { name string; id string; state, oldInputs, inputs property.Map }{
+	for _, scenario := range []struct {
+		name                     string
+		id                       string
+		state, oldInputs, inputs property.Map
+	}{
 		{"wrong physical ID", "other", checkpointFor(t, old), old, old},
 		{"environment", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old, old.Set("resource", object("environment", property.New("other"), "serverKey", property.New("edge")))},
 		{"server key", stableID(lifecycleResource(t, old)), checkpointFor(t, old), old, old.Set("resource", object("environment", property.New("prod"), "serverKey", property.New("other")))},
@@ -861,7 +935,9 @@ func TestLifecycleUpdateDirectGuardsFailBeforeTransport(t *testing.T) {
 			r := &recordingLifecycleTransport{}
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
 			got, err := h.update(t.Context(), p.UpdateRequest{ID: scenario.id, State: scenario.state, OldInputs: scenario.oldInputs, Inputs: scenario.inputs})
-			if err == nil || got.Properties.Len() != 0 { t.Fatal("invalid Update guard was accepted or fabricated state") }
+			if err == nil || got.Properties.Len() != 0 {
+				t.Fatal("invalid Update guard was accepted or fabricated state")
+			}
 			assertNoCalls(t, r)
 			assertNoCanary(t, errString(err))
 		})
@@ -876,7 +952,9 @@ func TestLifecycleRemoteErrorsReturnEmptyResponsesWithoutPanic(t *testing.T) {
 		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
 		assertNoPanic(t, func() {
 			got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
-			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 2 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver { t.Fatal("Create remote conflict did not return a bounded empty response") }
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != 2 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver {
+				t.Fatal("Create remote conflict did not return a bounded empty response")
+			}
 			assertNoCanary(t, errString(err))
 		})
 	})
@@ -887,7 +965,9 @@ func TestLifecycleRemoteErrorsReturnEmptyResponsesWithoutPanic(t *testing.T) {
 		oldRevision := revision(t, h, old)
 		assertNoPanic(t, func() {
 			got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-			if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) { t.Fatal("Update remote recovery error did not return a bounded empty response") }
+			if err == nil || got.Properties.Len() != 0 || !onlyInspect(r) {
+				t.Fatal("Update remote recovery error did not return a bounded empty response")
+			}
 			assertNoCanary(t, errString(err))
 		})
 	})
@@ -899,7 +979,9 @@ func TestLifecycleRemoteErrorsReturnEmptyResponsesWithoutPanic(t *testing.T) {
 		r.outcomes = []lifecycleOutcome{response(inspected(observation(oldRevision))), remoteError(hostprotocol.ErrorConflict, hostprotocol.CodeOperationConflict)}
 		assertNoPanic(t, func() {
 			got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
-			if err == nil || got.Properties.Len() != 0 || len(r.calls) != 2 || !onlyInspectThenReconcile(r) { t.Fatal("Update reconcile remote conflict did not return a bounded empty response") }
+			if err == nil || got.Properties.Len() != 0 || len(r.calls) != 2 || !onlyInspectThenReconcile(r) {
+				t.Fatal("Update reconcile remote conflict did not return a bounded empty response")
+			}
 			assertNoCanary(t, errString(err))
 		})
 	})
@@ -934,6 +1016,190 @@ func TestLifecycleReadRefreshesTrustedObservationWithOneInspect(t *testing.T) {
 	}
 }
 
+// TestImportBuildsReadOnlyStateFromVerifiedObservation specifies the program-first
+// import Read. Pulumi ReadStep sends registered Program inputs as both Inputs and
+// input-only Properties; an ordinary Read instead has checkpoint Properties with
+// lifecycle outputs. The recording transport specifies Provider validation of a
+// StableObservation; Runtime inventory and persistent-path attestation remain
+// integration responsibilities.
+func TestImportBuildsReadOnlyStateFromVerifiedObservation(t *testing.T) {
+	inputs := localDataInputs(t, "edge")
+	revision := revisionForInputs(t, inputs)
+	resource := lifecycleResource(t, inputs)
+	verified := observationFor(decodeTarget(t, inputs), revision)
+
+	t.Run("verified program inputs construct a checkpoint through inspect only", func(t *testing.T) {
+		r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(verified))}}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		request := p.ReadRequest{ID: stableID(resource), Urn: lifecycleURN(resource), Inputs: inputs, Properties: inputs}
+		if !reflect.DeepEqual(request.Properties, request.Inputs) {
+			t.Fatal("program-first Import marker must use input-only Properties equal to Inputs")
+		}
+		got, err := h.read(t.Context(), request)
+		if err != nil || got.ID != stableID(resource) || !onlyInspect(r) || hasWrite(r) {
+			t.Fatalf("program-first Import did not construct read-only state: %#v, %v, %#v", got, err, r.calls)
+		}
+		assertInspect(t, r.calls[0], inputs, revision)
+		assertCheckpoint(t, got.Properties, inputs, verified, revision)
+		if !reflect.DeepEqual(got.Inputs, inputs) || !valueAt(t, got.Inputs, "secrets").Secret() {
+			t.Fatalf("Import did not preserve exact program inputs and secret class: %#v", got.Inputs)
+		}
+	})
+
+	t.Run("exact observation produces no diff", func(t *testing.T) {
+		h := configuredLifecycleHost(t, lifecycleDependencies{artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		exact := checkpoint(t, inputs, verified, revision)
+		diff, err := h.diff(t.Context(), p.DiffRequest{OldInputs: inputs, State: exact, Inputs: inputs})
+		if err != nil || diff.HasChanges || len(diff.DetailedDiff) != 0 {
+			t.Fatalf("exact imported checkpoint diff = %#v, %v", diff, err)
+		}
+	})
+
+	for _, scenario := range []struct {
+		name     string
+		id       string
+		inputs   property.Map
+		observed hostcontract.StableObservation
+		calls    int
+	}{
+		{"wrong stable ID", "host-wrong", inputs, verified, 0},
+		{"missing program inputs", stableID(resource), property.NewMap(nil), verified, 0},
+		{"unsafe machine", stableID(resource), inputs, wrongMachine(verified), 1},
+		{"unsafe ownership", stableID(resource), inputs, wrongOwner(verified), 1},
+		{"unsafe release", stableID(resource), inputs, wrongRelease(verified), 1},
+		{"malformed revision", stableID(resource), inputs, func() hostcontract.StableObservation {
+			value := verified
+			value.AppliedRevision = "malformed"
+			return value
+		}(), 1},
+		{"drifted", stableID(resource), inputs, drifted(verified), 1},
+		{"unsafe app readiness", stableID(resource), inputs, notReadyApp(verified), 1},
+		{"unsafe app image", stableID(resource), inputs, wrongAppImage(verified), 1},
+		{"duplicate app", stableID(resource), inputs, duplicateAppID(verified), 1},
+		{"missing app", stableID(resource), inputs, missingApps(verified), 1},
+		{"unsafe managed data identity", stableID(resource), inputs, mismatchedLocalDataProviderAndEndpoint(verified), 1},
+		{"wrong managed data kind", stableID(resource), inputs, wrongLocalDataKind(verified), 1},
+		{"wrong managed data port", stableID(resource), inputs, wrongLocalDataPort(verified), 1},
+		{"wrong managed data database", stableID(resource), inputs, wrongLocalDataDatabase(verified), 1},
+		{"wrong managed data TLS", stableID(resource), inputs, wrongLocalDataTLS(verified), 1},
+		{"duplicate managed data", stableID(resource), inputs, duplicateLocalData(verified), 1},
+		{"missing managed data", stableID(resource), inputs, missingLocalData(verified), 1},
+		{"not ready managed data", stableID(resource), inputs, notReadyLocalData(verified), 1},
+	} {
+		scenario := scenario
+		t.Run(scenario.name, func(t *testing.T) {
+			r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(scenario.observed))}}
+			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+			got, err := h.read(t.Context(), p.ReadRequest{ID: scenario.id, Urn: lifecycleURN(resource), Inputs: scenario.inputs, Properties: scenario.inputs})
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 || len(r.calls) != scenario.calls || hasWrite(r) {
+				t.Fatalf("unsafe Import claimed state or wrote remotely: %#v, %v, %#v", got, err, r.calls)
+			}
+			if scenario.calls == 1 {
+				assertInspect(t, r.calls[0], inputs, revision)
+			}
+			assertNoCanary(t, errString(err))
+		})
+	}
+}
+
+func TestImportTokenBuildsStateFromEmptyProviderRead(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	revision := revisionForInputs(t, inputs)
+	tokenInputs := hostimport.Inputs{Resource: lifecycleResource(t, inputs), Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Target: decodeTarget(t, inputs), Secrets: decodeSecrets(t, inputs)}
+	token, err := hostimport.Encode(hostcontract.RevisionKey([]byte("01234567890123456789012345678901")), tokenInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(inspected(observationFor(tokenInputs.Target, revision)))}}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+	got, err := h.read(t.Context(), p.ReadRequest{ID: token, Urn: lifecycleURN(tokenInputs.Resource)})
+	if err != nil || got.ID != stableID(tokenInputs.Resource) || !onlyInspect(r) || hasWrite(r) {
+		t.Fatalf("token import = %#v, %v, %#v", got, err, r.calls)
+	}
+	assertCheckpoint(t, got.Properties, inputs, observationFor(tokenInputs.Target, revision), revision)
+	if !valueAt(t, got.Inputs, "secrets").Secret() {
+		t.Fatal("token import did not mark reconstructed secrets secret")
+	}
+}
+
+func TestImportTokenRequiresExactHostURNBeforeInspect(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	resource := lifecycleResource(t, inputs)
+	token, err := hostimport.Encode(hostcontract.RevisionKey([]byte("01234567890123456789012345678901")), hostimport.Inputs{Resource: resource, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Target: decodeTarget(t, inputs), Secrets: decodeSecrets(t, inputs)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongKeyToken, err := hostimport.Encode(hostcontract.RevisionKey([]byte("abcdefghijklmnopqrstuvwxyz012345")), hostimport.Inputs{Resource: resource, Server: hostcontract.ServerTarget{SSHAlias: "edge"}, Target: decodeTarget(t, inputs), Secrets: decodeSecrets(t, inputs)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, scenario := range []struct {
+		name string
+		id   string
+		urn  urn.URN
+	}{
+		{"invalid token", "not-an-import-token", lifecycleURN(resource)},
+		{"wrong token key", wrongKeyToken, lifecycleURN(resource)},
+		{"missing URN", token, ""},
+		{"wrong project", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("other-project"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong stack", token, urn.New("other-stack", tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong type", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type("sub2api-host:index:Other"), "host-"+resource.ServerKey)},
+		{"parent-qualified type", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), tokens.Type("sub2api-host:index:Component"), tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong name", token, urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-other")},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			r := &recordingLifecycleTransport{}
+			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+			got, err := h.read(t.Context(), p.ReadRequest{ID: scenario.id, Urn: scenario.urn})
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 {
+				t.Fatalf("invalid token import returned %#v, %v", got, err)
+			}
+			assertNoCalls(t, r)
+		})
+	}
+}
+
+func TestInputOnlyImportRequiresExactHostURNBeforeInspect(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	resource := lifecycleResource(t, inputs)
+	for _, scenario := range []struct {
+		name string
+		urn  urn.URN
+	}{
+		{"missing URN", ""},
+		{"wrong project", urn.New(tokens.QName(resource.Environment), tokens.PackageName("other-project"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong stack", urn.New("other-stack", tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong type", urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type("sub2api-host:index:Other"), "host-"+resource.ServerKey)},
+		{"parent-qualified type", urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), tokens.Type("sub2api-host:index:Component"), tokens.Type(hostToken), "host-"+resource.ServerKey)},
+		{"wrong name", urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-other")},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			r := &recordingLifecycleTransport{}
+			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+			got, err := h.read(t.Context(), p.ReadRequest{ID: stableID(resource), Urn: scenario.urn, Inputs: inputs, Properties: inputs})
+			if err == nil || got.ID != "" || got.Properties.Len() != 0 {
+				t.Fatalf("invalid input-only import returned %#v, %v", got, err)
+			}
+			assertNoCalls(t, r)
+		})
+	}
+}
+
+func TestLifecycleReadDoesNotTreatOutputOrExtraPropertiesAsImport(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	for _, properties := range []property.Map{inputs.Set("machine", object("value", property.New("forged"))), inputs.Set("unexpected", property.New("forged"))} {
+		r := &recordingLifecycleTransport{}
+		h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+		got, err := h.read(t.Context(), p.ReadRequest{ID: stableID(lifecycleResource(t, inputs)), Inputs: inputs, Properties: properties})
+		if err == nil || got.ID != "" || got.Properties.Len() != 0 {
+			t.Fatalf("non-input-only Properties were accepted as Import: %#v, %v", got, err)
+		}
+		assertNoCalls(t, r)
+		assertNoCanary(t, errString(err))
+	}
+}
+
 func TestLifecycleReadFailuresPreserveCheckpointAndDoNotClaimNotFound(t *testing.T) {
 	inputs := lifecycleInputs("edge")
 	priorRevision := revisionForInputs(t, inputs)
@@ -962,13 +1228,21 @@ func TestLifecycleReadRetirementEvidenceMustMatchManagedCheckpoint(t *testing.T)
 	prior := checkpoint(t, inputs, observation(revision), revision)
 	matching := retired()
 	for _, scenario := range []struct {
-		name    string
+		name     string
 		response hostprotocol.Response
-		ended   bool
+		ended    bool
 	}{
 		{"matching", matching, true},
-		{"wrong machine", func() hostprotocol.Response { value := retired(); value.Result.Machine.Value = "machine-b"; return value }(), false},
-		{"wrong ownership", func() hostprotocol.Response { value := retired(); value.Result.Ownership.Value = "owner-b"; return value }(), false},
+		{"wrong machine", func() hostprotocol.Response {
+			value := retired()
+			value.Result.Machine.Value = "machine-b"
+			return value
+		}(), false},
+		{"wrong ownership", func() hostprotocol.Response {
+			value := retired()
+			value.Result.Ownership.Value = "owner-b"
+			return value
+		}(), false},
 		{"malformed", hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: &hostcontract.OwnershipIdentity{Value: "owner-a"}}}, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -976,7 +1250,9 @@ func TestLifecycleReadRetirementEvidenceMustMatchManagedCheckpoint(t *testing.T)
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 			got, err := h.read(t.Context(), p.ReadRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: prior, Inputs: inputs})
 			if scenario.ended {
-				if err != nil || got.ID != "" || got.Properties.Len() != 0 || !onlyInspect(r) { t.Fatal("matching managed retirement did not report lifecycle ended") }
+				if err != nil || got.ID != "" || got.Properties.Len() != 0 || !onlyInspect(r) {
+					t.Fatal("matching managed retirement did not report lifecycle ended")
+				}
 			} else if err == nil || !onlyInspect(r) || hasWrite(r) {
 				t.Fatal("untrusted retirement evidence was accepted as NotFound")
 			}
@@ -991,7 +1267,9 @@ func TestLifecycleReadRefreshDriftDiffAndUpdateRepairChain(t *testing.T) {
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 	desired := revision(t, h, inputs)
 	refreshed := observation(revision(t, h, rotateSecret(t, inputs)))
-	if refreshed.AppliedRevision == desired { t.Fatal("drift fixture revision did not differ from desired") }
+	if refreshed.AppliedRevision == desired {
+		t.Fatal("drift fixture revision did not differ from desired")
+	}
 	r.outcomes = []lifecycleOutcome{response(inspected(refreshed))}
 	read, err := h.read(t.Context(), p.ReadRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint(t, inputs, observation(desired), desired), Inputs: inputs})
 	if err != nil || read.ID != stableID(lifecycleResource(t, inputs)) || !onlyInspect(r) {
@@ -1038,7 +1316,9 @@ func TestLifecycleDeleteApprovesExactPreserveDataRetirementAfterInspect(t *testi
 	var expected hostcontract.ApprovalSubject
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
 		r.events = append(r.events, "approve")
-		if !reflect.DeepEqual(subject, expected) { t.Fatal("retirement approval subject was not exact") }
+		if !reflect.DeepEqual(subject, expected) {
+			t.Fatal("retirement approval subject was not exact")
+		}
 		return &expected, nil
 	}})
 	revision := revision(t, h, inputs)
@@ -1046,7 +1326,9 @@ func TestLifecycleDeleteApprovesExactPreserveDataRetirementAfterInspect(t *testi
 	expected = hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: "prod", Resource: lifecycleResource(t, inputs), Machine: checkpointObservation.Machine, Ownership: checkpointObservation.Ownership, TargetRevision: revision, PreserveData: true}
 	r.outcomes = []lifecycleOutcome{response(inspected(checkpointObservation)), response(retired())}
 	err := h.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint(t, inputs, checkpointObservation, revision), OldInputs: inputs})
-	if err != nil || strings.Join(r.events, ",") != "inspect,approve,retire" || len(r.calls) != 2 { t.Fatal("Delete did not order inspect, approval, preserve-data retirement") }
+	if err != nil || strings.Join(r.events, ",") != "inspect,approve,retire" || len(r.calls) != 2 {
+		t.Fatal("Delete did not order inspect, approval, preserve-data retirement")
+	}
 	assertInspect(t, r.calls[0], inputs, revision)
 	assertRetire(t, r.calls[1], inputs, revision, expected)
 }
@@ -1056,20 +1338,35 @@ func TestLifecycleDeleteRejectsInvalidCheckpointIdentityOrApprovalWithoutWrite(t
 	revision := revisionForInputs(t, inputs)
 	checkpointObservation := observationFor(decodeTarget(t, inputs), revision)
 	valid := checkpoint(t, inputs, checkpointObservation, revision)
-	for _, scenario := range []struct { name, id string; properties property.Map; approve func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error); outcome lifecycleOutcome; calls int }{
+	for _, scenario := range []struct {
+		name, id   string
+		properties property.Map
+		approve    func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error)
+		outcome    lifecycleOutcome
+		calls      int
+	}{
 		{"wrong ID", "other", valid, fatalApproval(t), lifecycleOutcome{}, 0},
 		{"missing checkpoint", stableID(lifecycleResource(t, inputs)), valid.Delete("machine"), fatalApproval(t), lifecycleOutcome{}, 0},
 		{"missing approval", stableID(lifecycleResource(t, inputs)), valid, nil, response(inspected(checkpointObservation)), 1},
-		{"wrong approval", stableID(lifecycleResource(t, inputs)), valid, func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { subject.Machine.Value = "wrong"; return &subject, nil }, response(inspected(checkpointObservation)), 1},
+		{"wrong approval", stableID(lifecycleResource(t, inputs)), valid, func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+			subject.Machine.Value = "wrong"
+			return &subject, nil
+		}, response(inspected(checkpointObservation)), 1},
 		{"identity mismatch", stableID(lifecycleResource(t, inputs)), valid, fatalApproval(t), response(inspected(wrongMachine(checkpointObservation))), 1},
 		{"unreachable inspect", stableID(lifecycleResource(t, inputs)), valid, fatalApproval(t), failure(openssh.ErrTransport), 1},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			r := &recordingLifecycleTransport{}
-			if scenario.outcome.err != nil || scenario.outcome.response.Result != nil { r.outcomes = []lifecycleOutcome{scenario.outcome} }
+			if scenario.outcome.err != nil || scenario.outcome.response.Result != nil {
+				r.outcomes = []lifecycleOutcome{scenario.outcome}
+			}
 			h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: scenario.approve})
-			if err := h.delete(t.Context(), p.DeleteRequest{ID: scenario.id, Properties: scenario.properties, OldInputs: inputs}); err == nil || len(r.calls) != scenario.calls || hasWrite(r) { t.Fatal("unsafe Delete reached retirement write") }
-			if scenario.calls == 1 { assertInspect(t, r.calls[0], inputs, revision) }
+			if err := h.delete(t.Context(), p.DeleteRequest{ID: scenario.id, Properties: scenario.properties, OldInputs: inputs}); err == nil || len(r.calls) != scenario.calls || hasWrite(r) {
+				t.Fatal("unsafe Delete reached retirement write")
+			}
+			if scenario.calls == 1 {
+				assertInspect(t, r.calls[0], inputs, revision)
+			}
 		})
 	}
 }
@@ -1079,7 +1376,9 @@ func TestLifecycleDeleteRejectsReferencedTargetBeforeTransport(t *testing.T) {
 	revision := revisionForInputs(t, inputs)
 	r := &recordingLifecycleTransport{}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
-	if err := h.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint(t, inputs, observation(revision), revision), OldInputs: inputs}); err == nil || len(r.calls) != 0 || hasWrite(r) { t.Fatal("Delete accepted a target with still-referenced runtime") }
+	if err := h.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint(t, inputs, observation(revision), revision), OldInputs: inputs}); err == nil || len(r.calls) != 0 || hasWrite(r) {
+		t.Fatal("Delete accepted a target with still-referenced runtime")
+	}
 }
 
 func TestLifecycleDeleteAlreadyRetiredIsIdempotentWithoutApprovalOrWrite(t *testing.T) {
@@ -1087,7 +1386,9 @@ func TestLifecycleDeleteAlreadyRetiredIsIdempotentWithoutApprovalOrWrite(t *test
 	revision := revisionForInputs(t, inputs)
 	r := &recordingLifecycleTransport{outcomes: []lifecycleOutcome{response(retired())}}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
-	if err := h.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint(t, inputs, observationFor(decodeTarget(t, inputs), revision), revision), OldInputs: inputs}); err != nil || !onlyInspect(r) || hasWrite(r) { t.Fatal("already-retired Delete was not idempotent") }
+	if err := h.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint(t, inputs, observationFor(decodeTarget(t, inputs), revision), revision), OldInputs: inputs}); err != nil || !onlyInspect(r) || hasWrite(r) {
+		t.Fatal("already-retired Delete was not idempotent")
+	}
 	assertInspect(t, r.calls[0], inputs, revision)
 }
 
@@ -1100,110 +1401,584 @@ func TestLifecycleDeleteResponseLossRetriesTheSameRetirementOperation(t *testing
 	expected := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalRetire, Environment: "prod", Resource: lifecycleResource(t, inputs), Machine: checkpointObservation.Machine, Ownership: checkpointObservation.Ownership, TargetRevision: revision, PreserveData: true}
 	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: func(_ context.Context, subject hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
 		r.events = append(r.events, "approve")
-		if !reflect.DeepEqual(subject, expected) { t.Fatal("response-loss retirement approval subject was not exact") }
+		if !reflect.DeepEqual(subject, expected) {
+			t.Fatal("response-loss retirement approval subject was not exact")
+		}
 		return &expected, nil
 	}})
 	r.outcomes = []lifecycleOutcome{response(inspected(checkpointObservation)), failure(openssh.ErrTransport)}
-	if err := h.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint, OldInputs: inputs}); err == nil || len(r.calls) != 2 || !hasWrite(r) { t.Fatal("Delete response loss did not leave one unknown retirement request") }
+	if err := h.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint, OldInputs: inputs}); err == nil || len(r.calls) != 2 || !hasWrite(r) {
+		t.Fatal("Delete response loss did not leave one unknown retirement request")
+	}
 	assertInspect(t, r.calls[0], inputs, revision)
 	assertRetire(t, r.calls[1], inputs, revision, expected)
 	r.outcomes = []lifecycleOutcome{response(retired())}
 	retry := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
-	if err := retry.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint, OldInputs: inputs}); err != nil || len(r.calls) != 3 || !r.calls[2].decoded || r.calls[2].request.Action != hostcontract.ActionInspect || strings.Join(r.events, ",") != "inspect,approve,retire,inspect" { t.Fatal("fresh-provider Delete retry did not accept matching retirement evidence without another write") }
+	if err := retry.delete(t.Context(), p.DeleteRequest{ID: stableID(lifecycleResource(t, inputs)), Properties: checkpoint, OldInputs: inputs}); err != nil || len(r.calls) != 3 || !r.calls[2].decoded || r.calls[2].request.Action != hostcontract.ActionInspect || strings.Join(r.events, ",") != "inspect,approve,retire,inspect" {
+		t.Fatal("fresh-provider Delete retry did not accept matching retirement evidence without another write")
+	}
 	assertInspect(t, r.calls[2], inputs, revision)
 }
 
-type lifecycleCall struct { kind, alias string; command openssh.Command; stdin []byte; request hostprotocol.Request; hostAttempted, decoded bool }
-type lifecycleOutcome struct { response hostprotocol.Response; err error }
-type recordingLifecycleTransport struct { probe artifact.ProbeInfo; probes []artifact.ProbeInfo; probeErr error; outcomes []lifecycleOutcome; calls []lifecycleCall; events []string }
+type lifecycleCall struct {
+	kind, alias            string
+	command                openssh.Command
+	stdin                  []byte
+	request                hostprotocol.Request
+	hostAttempted, decoded bool
+}
+type lifecycleOutcome struct {
+	response hostprotocol.Response
+	err      error
+}
+type recordingLifecycleTransport struct {
+	probe    artifact.ProbeInfo
+	probes   []artifact.ProbeInfo
+	probeErr error
+	outcomes []lifecycleOutcome
+	calls    []lifecycleCall
+	events   []string
+}
+
 func response(value hostprotocol.Response) lifecycleOutcome { return lifecycleOutcome{response: value} }
-func failure(err error) lifecycleOutcome { return lifecycleOutcome{err: err} }
-func remoteError(category hostprotocol.ErrorCategory, code hostprotocol.ErrorCode) lifecycleOutcome { return response(hostprotocol.Response{Version: hostprotocol.Version, Error: &hostprotocol.RemoteError{Category: category, Code: code}}) }
-func (r *recordingLifecycleTransport) Probe(_ context.Context, alias string) (artifact.ProbeInfo, error) { r.calls = append(r.calls, lifecycleCall{kind: "probe", alias: alias}); if len(r.probes) != 0 { probe := r.probes[0]; r.probes = r.probes[1:]; return probe, r.probeErr }; return r.probe, r.probeErr }
-func (r *recordingLifecycleTransport) Bootstrap(ctx context.Context, alias string, stdin []byte) (hostprotocol.Response, error) { return r.Run(ctx, alias, openssh.BootstrapReceiver, stdin) }
+func failure(err error) lifecycleOutcome                    { return lifecycleOutcome{err: err} }
+func remoteError(category hostprotocol.ErrorCategory, code hostprotocol.ErrorCode) lifecycleOutcome {
+	return response(hostprotocol.Response{Version: hostprotocol.Version, Error: &hostprotocol.RemoteError{Category: category, Code: code}})
+}
+func (r *recordingLifecycleTransport) Probe(_ context.Context, alias string) (artifact.ProbeInfo, error) {
+	r.calls = append(r.calls, lifecycleCall{kind: "probe", alias: alias})
+	if len(r.probes) != 0 {
+		probe := r.probes[0]
+		r.probes = r.probes[1:]
+		return probe, r.probeErr
+	}
+	return r.probe, r.probeErr
+}
+func (r *recordingLifecycleTransport) Bootstrap(ctx context.Context, alias string, stdin []byte) (hostprotocol.Response, error) {
+	return r.Run(ctx, alias, openssh.BootstrapReceiver, stdin)
+}
 func (r *recordingLifecycleTransport) Run(_ context.Context, alias string, command openssh.Command, stdin []byte) (hostprotocol.Response, error) {
 	call := lifecycleCall{kind: "run", alias: alias, command: command, stdin: append([]byte(nil), stdin...)}
 	r.calls = append(r.calls, call)
-	if command == openssh.Host { r.calls[len(r.calls)-1].hostAttempted = true; request, err := hostprotocol.DecodeRequest(stdin); if err != nil { return hostprotocol.Response{}, err }; r.calls[len(r.calls)-1].request, r.calls[len(r.calls)-1].decoded = request, true; switch request.Action { case hostcontract.ActionInspect: r.events = append(r.events, "inspect"); case hostcontract.ActionRetirePreserveData: r.events = append(r.events, "retire"); default: r.events = append(r.events, "reconcile") } }
-	if len(r.outcomes) == 0 { return hostprotocol.Response{}, errors.New("missing fake outcome") }
-	outcome := r.outcomes[0]; r.outcomes = r.outcomes[1:]
+	if command == openssh.Host {
+		r.calls[len(r.calls)-1].hostAttempted = true
+		request, err := hostprotocol.DecodeRequest(stdin)
+		if err != nil {
+			return hostprotocol.Response{}, err
+		}
+		r.calls[len(r.calls)-1].request, r.calls[len(r.calls)-1].decoded = request, true
+		switch request.Action {
+		case hostcontract.ActionInspect:
+			r.events = append(r.events, "inspect")
+		case hostcontract.ActionRetirePreserveData:
+			r.events = append(r.events, "retire")
+		default:
+			r.events = append(r.events, "reconcile")
+		}
+	}
+	if len(r.outcomes) == 0 {
+		return hostprotocol.Response{}, errors.New("missing fake outcome")
+	}
+	outcome := r.outcomes[0]
+	r.outcomes = r.outcomes[1:]
 	return outcome.response, outcome.err
 }
 
-func configuredLifecycleHost(t *testing.T, deps lifecycleDependencies) *host { t.Helper(); h := newHostWithDependencies("1.0.0", deps); configureHost(t, h); return h }
-func configureHost(t *testing.T, h *host) { t.Helper(); key := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901")); if err := h.configure(t.Context(), p.ConfigureRequest{Args: property.NewMap(map[string]property.Value{"revisionKey": property.New(key).WithSecret(true)})}); err != nil { t.Fatal("Configure failed") } }
-func configureProvider(t *testing.T, provider p.Provider) { t.Helper(); key := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901")); if err := provider.Configure(t.Context(), p.ConfigureRequest{Args: property.NewMap(map[string]property.Value{"revisionKey": property.New(key).WithSecret(true)})}); err != nil { t.Fatal("Configure failed") } }
-func lifecycleInputs(alias string) property.Map { return property.NewMap(map[string]property.Value{"resource": object("environment", property.New("prod"), "serverKey", property.New("edge")), "server": object("sshAlias", property.New(alias)), "target": object("releaseArtifact", property.New("release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "apps", property.New(property.NewArray([]property.Value{object("id", property.New("api"), "image", property.New("api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "hostname", property.New("api.example"), "readinessPath", property.New("/ready"), "dataLinks", property.New(property.NewArray([]property.Value{object("name", property.New("main"), "identity", object("kind", property.New("postgres"), "providerId", property.New("db-1"), "endpoint", property.New("db.example"), "port", property.New(5432.0), "database", property.New("app"), "tlsServerName", property.New("db.example")))})))}))), "secrets": property.New(property.NewMap(map[string]property.Value{"apps": object("api", object("jwtSecret", property.New(lifecycleCanary)))})).WithSecret(true)}) }
-func drainedLifecycleInputs(t *testing.T, alias string) property.Map { t.Helper(); inputs := lifecycleInputs(alias); target := decodeTarget(t, inputs); target.Apps = nil; return inputs.Set("target", encodeValue(t, target)).Set("secrets", property.New(property.NewMap(nil)).WithSecret(true)) }
-func lifecycleResource(t *testing.T, inputs property.Map) hostcontract.ResourceIdentity { t.Helper(); resource := valueAt(t, inputs, "resource"); return hostcontract.ResourceIdentity{Environment: field(resource, "environment").AsString(), ServerKey: field(resource, "serverKey").AsString()} }
-func localDataInputs(t *testing.T, alias string) property.Map { t.Helper(); inputs := lifecycleInputs(alias); target, secrets := decodeTarget(t, inputs), decodeSecrets(t, inputs); target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432, Persistence: true}, {ID: "replica", Type: "postgres", Port: 5432, Persistence: true}}; secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: lifecycleCanary}, "replica": {AdminPassword: lifecycleCanary}}; return inputs.Set("target", encodeValue(t, target)).Set("secrets", encodeValue(t, secrets).WithSecret(true)) }
-func revision(t *testing.T, h *host, inputs property.Map) string { t.Helper(); value, err := hostcontract.TargetRevision(h.key, lifecycleResource(t, inputs), decodeTarget(t, inputs), decodeSecrets(t, inputs)); if err != nil { t.Fatal("revision failed") }; return value }
-func revisionForInputs(t *testing.T, inputs property.Map) string { t.Helper(); h := configuredLifecycleHost(t, lifecycleDependencies{}); return revision(t, h, inputs) }
-func baselineRevision(t *testing.T, h *host, inputs property.Map) string { t.Helper(); value, err := hostcontract.TargetRevision(h.key, lifecycleResource(t, inputs), hostcontract.Target{ReleaseArtifact: release(t, inputs)}, hostcontract.Secrets{}); if err != nil { t.Fatal("baseline revision failed") }; return value }
-func release(t *testing.T, inputs property.Map) string { t.Helper(); return field(valueAt(t, inputs, "target"), "releaseArtifact").AsString() }
-func observation(revision string) hostcontract.StableObservation { return observationFor(hostcontract.Target{ReleaseArtifact: "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}, revision) }
-func pendingObservation(revision string) hostcontract.StableObservation { value := observation(revision); value.Ready, value.Drifted = false, true; return value }
-func observationFor(target hostcontract.Target, revision string) hostcontract.StableObservation { observation := hostcontract.StableObservation{Machine: hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner-a"}, HostRelease: target.ReleaseArtifact, AppliedRevision: revision, Ready: true}; for _, app := range target.Apps { observation.Apps = append(observation.Apps, hostcontract.AppObservation{ID: app.ID, ActiveImage: app.Image, Ready: true}) }; for _, service := range target.DataServices { observation.Data = append(observation.Data, hostcontract.DataObservation{Identity: localDataIdentity(service), Ready: true}) }; return observation }
-func applied(revision string) hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: revision}} }
-func inspected(value hostcontract.StableObservation) hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &value}} }
-func inspectedEvidence(value hostcontract.StableObservation, evidence *hostprotocol.OperationEvidence) hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &value, OperationEvidence: evidence}} }
-func retired() hostprotocol.Response { return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: &hostcontract.OwnershipIdentity{Value: "owner-a"}, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}} }
-func wrongMachine(value hostcontract.StableObservation) hostcontract.StableObservation { value.Machine.Value = "machine-b"; return value }
-func wrongOwner(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ownership.Value = "owner-b"; return value }
-func emptyOwner(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ownership.Value = ""; return value }
-func wrongRelease(value hostcontract.StableObservation) hostcontract.StableObservation { value.HostRelease = "other"; return value }
-func wrongRevision(value hostcontract.StableObservation) hostcontract.StableObservation { value.AppliedRevision = mismatchedRevision(); return value }
-func mismatchedRevision() string { return "tr1:0000000000000000:0000000000000000000000000000000000000000000000000000000000000000" }
-func notReady(value hostcontract.StableObservation) hostcontract.StableObservation { value.Ready = false; return value }
-func drifted(value hostcontract.StableObservation) hostcontract.StableObservation { value.Drifted = true; return value }
-func wrongAppImage(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps[0].ActiveImage = "wrong"; return value }
-func notReadyApp(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps[0].Ready = false; return value }
-func wrongAppID(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps[0].ID = "other"; return value }
-func duplicateAppID(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps = append(value.Apps, value.Apps[0]); return value }
-func missingApps(value hostcontract.StableObservation) hostcontract.StableObservation { value.Apps = nil; return value }
-func wrongLocalDataKind(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Kind = "redis"; return value }
-func emptyLocalDataIdentity(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.ProviderID, value.Data[0].Identity.Endpoint = "", ""; return value }
-func wrongLocalDataPort(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Port++; return value }
-func wrongLocalDataDatabase(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Database = "other"; return value }
-func wrongLocalDataTLS(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.TLSServerName = "other"; return value }
-func mismatchedLocalDataProviderAndEndpoint(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Identity.Endpoint = "other"; return value }
-func missingLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data = value.Data[:1]; return value }
-func duplicateLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[1] = value.Data[0]; return value }
-func notReadyLocalData(value hostcontract.StableObservation) hostcontract.StableObservation { value.Data[0].Ready = false; return value }
-func rotateSecret(t *testing.T, inputs property.Map) property.Map { secrets := decodeSecrets(t, inputs); secrets.Apps["api"] = hostcontract.AppSecrets{JWTSecret: "rotated-" + lifecycleCanary}; return inputs.Set("secrets", encodeValue(t, secrets).WithSecret(true)) }
-func changeImage(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Image = "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; return inputs.Set("target", encodeValue(t, target)) }
-func changeHostname(t *testing.T, inputs property.Map) property.Map { target := decodeTarget(t, inputs); target.Apps[0].Hostname = "other.example"; return inputs.Set("target", encodeValue(t, target)) }
-func dangerousChange(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); target := decodeTarget(t, old); target.Apps[0].DataLinks[0].Identity.Endpoint = "old-db.example"; return old.Set("target", encodeValue(t, target)), next }
-func dangerousApprovalFixture(t *testing.T, old, next property.Map, revision string) hostcontract.ApprovalSubject { t.Helper(); return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: lifecycleResource(t, next).Environment, Resource: lifecycleResource(t, next), AppID: "api", DataKind: "postgres", OldData: decodeTarget(t, old).Apps[0].DataLinks[0].Identity, NewData: decodeTarget(t, next).Apps[0].DataLinks[0].Identity, TargetRevision: revision} }
-func twoDangerousChanges(t *testing.T) (property.Map, property.Map) { old, next := lifecycleInputs("edge"), lifecycleInputs("edge"); oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next); secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSServerName: "old-two.example"}; secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSServerName: "new-two.example"}; oldTarget.Apps[0].DataLinks = append(oldTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondOld}); nextTarget.Apps[0].DataLinks = append(nextTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondNew}); oldTarget.Apps[0].DataLinks[0].Identity.Endpoint = "old-one.example"; nextTarget.Apps[0].DataLinks[0].Identity.Endpoint = "new-one.example"; return old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget)) }
-func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity { database, tls := "sub2api", ""; managed := "owner-scoped-" + service.Type + "-" + service.ID + "-managed"; if service.Type == "redis" { database = "0" } else { tls = managed }; return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSServerName: tls} }
-func lifecycleBundle(t *testing.T, release string) (artifactBundle, []byte) { t.Helper(); root := t.TempDir(); amd64, arm64 := []byte("pinned-host-amd64"), []byte("pinned-host-arm64"); write := func(name string, contents []byte) { if err := os.WriteFile(filepath.Join(root, name), contents, 0o600); err != nil { t.Fatal("artifact fixture write failed") } }; write("host-amd64", amd64); write("host-arm64", arm64); sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }; return artifactBundle{Root: root, Manifest: artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "host-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "host-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}}, amd64 }
-func lifecycleArtifactBundle(t *testing.T, release string) artifactBundle { t.Helper(); bundle, _ := lifecycleBundle(t, release); return bundle }
-func releaseBundleProvider(t *testing.T, bundleRoot string) string { t.Helper(); provider := filepath.Join(bundleRoot, "bin", "pulumi-resource-sub2api-host"); if err := os.MkdirAll(filepath.Dir(provider), 0o700); err != nil { t.Fatal(err) }; if err := os.WriteFile(provider, []byte("provider"), 0o700); err != nil { t.Fatal(err) }; return provider }
-func releaseBundleHostArtifacts(t *testing.T, bundleRoot, release string) (artifactBundle, []byte) { t.Helper(); root := filepath.Join(bundleRoot, "artifacts", "sub2api-host"); if err := os.MkdirAll(root, 0o700); err != nil { t.Fatal(err) }; amd64, arm64 := []byte("released-host-amd64"), []byte("released-host-arm64"); sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }; manifest := artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "sub2api-host-linux-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "sub2api-host-linux-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}; for name, contents := range map[string][]byte{manifest.LinuxAMD64.Path: amd64, manifest.LinuxARM64.Path: arm64} { if err := os.WriteFile(filepath.Join(root, name), contents, 0o700); err != nil { t.Fatal(err) } }; encoded, err := json.Marshal(manifest); if err != nil { t.Fatal(err) }; if err := os.WriteFile(filepath.Join(root, "manifest.json"), encoded, 0o600); err != nil { t.Fatal(err) }; return artifactBundle{Root: root, Manifest: manifest}, amd64 }
-func decodeBootstrapRequest(t *testing.T, stdin, binary []byte) hostprotocol.Request { t.Helper(); hash := sha256.Sum256(binary); prefix := []byte(fmt.Sprintf("s2a1:%d:%x\n", len(binary), hash)); if len(stdin) < len(prefix)+len(binary) || !bytes.Equal(stdin[:len(prefix)], prefix) || !bytes.Equal(stdin[len(prefix):len(prefix)+len(binary)], binary) { t.Fatal("bootstrap input did not contain the pinned artifact") }; request, err := hostprotocol.DecodeRequest(stdin[len(prefix)+len(binary):]); if err != nil { t.Fatal("bootstrap did not contain one valid request frame") }; return request }
-func assertInspect(t *testing.T, call lifecycleCall, inputs property.Map, desired string) { t.Helper(); alias := field(valueAt(t, inputs, "server"), "sshAlias").AsString(); request := call.request; if call.command != openssh.Host || call.alias != alias || request.Action != hostcontract.ActionInspect || request.Server.SSHAlias != alias || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != desired || request.Target != nil || request.Secrets != nil || request.Approval != nil || request.PriorAppliedRevision != "" || request.PriorObservation != "" { t.Fatal("Inspect request contract was not exact") } }
-func assertReconcile(t *testing.T, request hostprotocol.Request, inputs property.Map, desired, prior string, approval *hostcontract.ApprovalSubject) { t.Helper(); alias := field(valueAt(t, inputs, "server"), "sshAlias").AsString(); if request.Action != hostcontract.ActionReconcile || request.Server.SSHAlias != alias || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != desired || request.PriorAppliedRevision != prior || request.PriorObservation != "" || !reflect.DeepEqual(request.Approval, approval) || request.Target == nil || request.Secrets == nil || !reflect.DeepEqual(*request.Target, decodeTarget(t, inputs)) || !reflect.DeepEqual(*request.Secrets, decodeSecrets(t, inputs)) { t.Fatal("Reconcile request contract was not exact") } }
-func assertRetire(t *testing.T, call lifecycleCall, inputs property.Map, revision string, approval hostcontract.ApprovalSubject) { t.Helper(); request := call.request; if call.command != openssh.Host || request.Action != hostcontract.ActionRetirePreserveData || request.Server != (hostcontract.ServerTarget{SSHAlias: field(valueAt(t, inputs, "server"), "sshAlias").AsString()}) || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != revision || request.PriorAppliedRevision != revision || request.PriorObservation != "" || request.Target != nil || request.Secrets != nil || request.Approval == nil || !reflect.DeepEqual(*request.Approval, approval) { t.Fatal("retire request contract was not exact") } }
-func assertReconcileFrame(t *testing.T, actual []byte, inputs property.Map, desired, prior string) { t.Helper(); target, secrets := decodeTarget(t, inputs), decodeSecrets(t, inputs); expected, err := hostprotocol.EncodeRequest(hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: field(valueAt(t, inputs, "server"), "sshAlias").AsString()}, Resource: lifecycleResource(t, inputs), TargetRevision: desired, PriorAppliedRevision: prior, Target: &target, Secrets: &secrets}); if err != nil || !bytes.Equal(actual, expected) { t.Fatal("response-loss Reconcile frame was not byte-equivalent") } }
-func checkpoint(t *testing.T, inputs property.Map, value hostcontract.StableObservation, revision string) property.Map { t.Helper(); return inputs.Set("machine", encodeValue(t, value.Machine)).Set("ownership", encodeValue(t, value.Ownership)).Set("appliedRevision", property.New(revision)).Set("observation", encodeValue(t, value)) }
-func checkpointFor(t *testing.T, inputs property.Map) property.Map { t.Helper(); h := configuredLifecycleHost(t, lifecycleDependencies{}); revision := revision(t, h, inputs); return checkpoint(t, inputs, observationFor(decodeTarget(t, inputs), revision), revision) }
-func assertCheckpoint(t *testing.T, state, inputs property.Map, value hostcontract.StableObservation, revision string) { t.Helper(); assertInputsPreserved(t, state, inputs); if !valueAt(t, state, "secrets").Secret() || !valueAt(t, state, "machine").Equals(encodeValue(t, value.Machine)) || !valueAt(t, state, "ownership").Equals(encodeValue(t, value.Ownership)) || !valueAt(t, state, "appliedRevision").Equals(property.New(revision)) || !valueAt(t, state, "observation").Equals(encodeValue(t, value)) { t.Fatal("checkpoint ordinary outputs were not exact") }; assertNoCanary(t, fmt.Sprint(valueAt(t, state, "machine")), fmt.Sprint(valueAt(t, state, "ownership")), fmt.Sprint(valueAt(t, state, "appliedRevision")), fmt.Sprint(valueAt(t, state, "observation"))) }
-func assertInputsPreserved(t *testing.T, state, inputs property.Map) { t.Helper(); for _, name := range []string{"resource", "server", "target", "secrets"} { if !valueAt(t, state, name).Equals(valueAt(t, inputs, name)) { t.Fatalf("checkpoint changed input %s", name) } } }
-func valueAt(t *testing.T, values property.Map, key string) property.Value { t.Helper(); value, ok := values.GetOk(key); if !ok { t.Fatalf("missing property %s", key) }; return value }
-func decodeTarget(t *testing.T, values property.Map) hostcontract.Target { t.Helper(); var target hostcontract.Target; if err := decode(valueAt(t, values, "target"), &target); err != nil { t.Fatal("target fixture decode failed") }; return target }
-func decodeSecrets(t *testing.T, values property.Map) hostcontract.Secrets { t.Helper(); var secrets hostcontract.Secrets; if err := decode(valueAt(t, values, "secrets"), &secrets); err != nil { t.Fatal("secret fixture decode failed") }; return secrets }
-func encodeValue(t *testing.T, value any) property.Value { t.Helper(); encoded, err := json.Marshal(value); if err != nil { t.Fatal("fixture encode failed") }; var raw any; if err := json.Unmarshal(encoded, &raw); err != nil { t.Fatal("fixture decode failed") }; return propertyFromRaw(t, raw) }
-func propertyFromRaw(t *testing.T, raw any) property.Value { t.Helper(); switch value := raw.(type) { case nil: return property.New(property.Null); case string: return property.New(value); case bool: return property.New(value); case float64: return property.New(value); case []any: values := make([]property.Value, len(value)); for i := range value { values[i] = propertyFromRaw(t, value[i]) }; return property.New(property.NewArray(values)); case map[string]any: values := map[string]property.Value{}; for key, nested := range value { values[key] = propertyFromRaw(t, nested) }; return property.New(property.NewMap(values)); default: t.Fatal("unsupported fixture value"); return property.New(property.Null) } }
-func createWithReadyHost(t *testing.T, inputs property.Map) string { t.Helper(); bundle, binary := lifecycleBundle(t, release(t, inputs)); digest := fmt.Sprintf("%x", sha256.Sum256(binary)); r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}; h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }}); desired := revision(t, h, inputs); r.outcomes = []lifecycleOutcome{response(applied(desired)), response(inspected(observationFor(decodeTarget(t, inputs), desired)))}; got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs}); if err != nil { t.Fatal("Create failed") }; return got.ID }
+func configuredLifecycleHost(t *testing.T, deps lifecycleDependencies) *host {
+	t.Helper()
+	h := newHostWithDependencies("1.0.0", deps)
+	configureHost(t, h)
+	return h
+}
+func configureHost(t *testing.T, h *host) {
+	t.Helper()
+	key := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	if err := h.configure(t.Context(), p.ConfigureRequest{Args: property.NewMap(map[string]property.Value{"revisionKey": property.New(key).WithSecret(true)})}); err != nil {
+		t.Fatal("Configure failed")
+	}
+}
+func configureProvider(t *testing.T, provider p.Provider) {
+	t.Helper()
+	key := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	if err := provider.Configure(t.Context(), p.ConfigureRequest{Args: property.NewMap(map[string]property.Value{"revisionKey": property.New(key).WithSecret(true)})}); err != nil {
+		t.Fatal("Configure failed")
+	}
+}
+func lifecycleInputs(alias string) property.Map {
+	return property.NewMap(map[string]property.Value{"resource": object("environment", property.New("prod"), "serverKey", property.New("edge")), "server": object("sshAlias", property.New(alias)), "target": object("releaseArtifact", property.New("release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "apps", property.New(property.NewArray([]property.Value{object("id", property.New("api"), "image", property.New("api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "hostname", property.New("api.example"), "readinessPath", property.New("/ready"), "initialAdminEmail", property.New("admin@example.test"), "dataLinks", property.New(property.NewArray([]property.Value{object("name", property.New("main"), "identity", object("kind", property.New("postgres"), "providerId", property.New("db-1"), "endpoint", property.New("db.example"), "port", property.New(5432.0), "database", property.New("app"), "tlsServerName", property.New("db.example")))})))}))), "secrets": property.New(property.NewMap(map[string]property.Value{"apps": object("api", object("jwtSecret", property.New(lifecycleCanary)))})).WithSecret(true)})
+}
+func drainedLifecycleInputs(t *testing.T, alias string) property.Map {
+	t.Helper()
+	inputs := lifecycleInputs(alias)
+	target := decodeTarget(t, inputs)
+	target.Apps = nil
+	return inputs.Set("target", encodeValue(t, target)).Set("secrets", property.New(property.NewMap(nil)).WithSecret(true))
+}
+func lifecycleResource(t *testing.T, inputs property.Map) hostcontract.ResourceIdentity {
+	t.Helper()
+	resource := valueAt(t, inputs, "resource")
+	return hostcontract.ResourceIdentity{Environment: field(resource, "environment").AsString(), ServerKey: field(resource, "serverKey").AsString()}
+}
+func localDataInputs(t *testing.T, alias string) property.Map {
+	t.Helper()
+	inputs := lifecycleInputs(alias)
+	target, secrets := decodeTarget(t, inputs), decodeSecrets(t, inputs)
+	target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432, Persistence: true}, {ID: "replica", Type: "postgres", Port: 5432, Persistence: true}}
+	secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: lifecycleCanary}, "replica": {AdminPassword: lifecycleCanary}}
+	return inputs.Set("target", encodeValue(t, target)).Set("secrets", encodeValue(t, secrets).WithSecret(true))
+}
+func revision(t *testing.T, h *host, inputs property.Map) string {
+	t.Helper()
+	value, err := hostcontract.TargetRevision(h.key, lifecycleResource(t, inputs), decodeTarget(t, inputs), decodeSecrets(t, inputs))
+	if err != nil {
+		t.Fatal("revision failed")
+	}
+	return value
+}
+func revisionForInputs(t *testing.T, inputs property.Map) string {
+	t.Helper()
+	h := configuredLifecycleHost(t, lifecycleDependencies{})
+	return revision(t, h, inputs)
+}
+func baselineRevision(t *testing.T, h *host, inputs property.Map) string {
+	t.Helper()
+	value, err := hostcontract.TargetRevision(h.key, lifecycleResource(t, inputs), hostcontract.Target{ReleaseArtifact: release(t, inputs)}, hostcontract.Secrets{})
+	if err != nil {
+		t.Fatal("baseline revision failed")
+	}
+	return value
+}
+func release(t *testing.T, inputs property.Map) string {
+	t.Helper()
+	return field(valueAt(t, inputs, "target"), "releaseArtifact").AsString()
+}
+func observation(revision string) hostcontract.StableObservation {
+	return observationFor(hostcontract.Target{ReleaseArtifact: "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Apps: []hostcontract.AppTarget{{ID: "api", Image: "api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", InitialAdminEmail: "admin@example.test"}}}, revision)
+}
+func pendingObservation(revision string) hostcontract.StableObservation {
+	value := observation(revision)
+	value.Ready, value.Drifted = false, true
+	return value
+}
+func observationFor(target hostcontract.Target, revision string) hostcontract.StableObservation {
+	observation := hostcontract.StableObservation{Machine: hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner-a"}, HostRelease: target.ReleaseArtifact, AppliedRevision: revision, Ready: true}
+	for _, app := range target.Apps {
+		observation.Apps = append(observation.Apps, hostcontract.AppObservation{ID: app.ID, ActiveImage: app.Image, Ready: true})
+	}
+	for _, service := range target.DataServices {
+		observation.Data = append(observation.Data, hostcontract.DataObservation{Identity: localDataIdentity(service), Ready: true})
+	}
+	return observation
+}
+func applied(revision string) hostprotocol.Response {
+	return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: revision}}
+}
+func inspected(value hostcontract.StableObservation) hostprotocol.Response {
+	return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &value}}
+}
+func inspectedEvidence(value hostcontract.StableObservation, evidence *hostprotocol.OperationEvidence) hostprotocol.Response {
+	return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultInspected, Observation: &value, OperationEvidence: evidence}}
+}
+func retired() hostprotocol.Response {
+	return hostprotocol.Response{Version: hostprotocol.Version, Result: &hostprotocol.Result{Status: hostprotocol.ResultRetired, Machine: &hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: &hostcontract.OwnershipIdentity{Value: "owner-a"}, Retirement: &hostprotocol.RetirementEvidence{PreserveData: true}}}
+}
+func wrongMachine(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Machine.Value = "machine-b"
+	return value
+}
+func wrongOwner(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Ownership.Value = "owner-b"
+	return value
+}
+func emptyOwner(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Ownership.Value = ""
+	return value
+}
+func wrongRelease(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.HostRelease = "other"
+	return value
+}
+func wrongRevision(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.AppliedRevision = mismatchedRevision()
+	return value
+}
+func mismatchedRevision() string {
+	return "tr1:0000000000000000:0000000000000000000000000000000000000000000000000000000000000000"
+}
+func notReady(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Ready = false
+	return value
+}
+func drifted(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Drifted = true
+	return value
+}
+func wrongAppImage(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Apps[0].ActiveImage = "wrong"
+	return value
+}
+func notReadyApp(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Apps[0].Ready = false
+	return value
+}
+func wrongAppID(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Apps[0].ID = "other"
+	return value
+}
+func duplicateAppID(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Apps = append(value.Apps, value.Apps[0])
+	return value
+}
+func missingApps(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Apps = nil
+	return value
+}
+func wrongLocalDataKind(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[0].Identity.Kind = "redis"
+	return value
+}
+func emptyLocalDataIdentity(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[0].Identity.ProviderID, value.Data[0].Identity.Endpoint = "", ""
+	return value
+}
+func wrongLocalDataPort(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[0].Identity.Port++
+	return value
+}
+func wrongLocalDataDatabase(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[0].Identity.Database = "other"
+	return value
+}
+func wrongLocalDataTLS(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[0].Identity.TLSServerName = "other"
+	return value
+}
+func mismatchedLocalDataProviderAndEndpoint(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[0].Identity.Endpoint = "other"
+	return value
+}
+func missingLocalData(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data = value.Data[:1]
+	return value
+}
+func duplicateLocalData(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[1] = value.Data[0]
+	return value
+}
+func notReadyLocalData(value hostcontract.StableObservation) hostcontract.StableObservation {
+	value.Data[0].Ready = false
+	return value
+}
+func rotateSecret(t *testing.T, inputs property.Map) property.Map {
+	secrets := decodeSecrets(t, inputs)
+	secrets.Apps["api"] = hostcontract.AppSecrets{JWTSecret: "rotated-" + lifecycleCanary}
+	return inputs.Set("secrets", encodeValue(t, secrets).WithSecret(true))
+}
+func changeImage(t *testing.T, inputs property.Map) property.Map {
+	target := decodeTarget(t, inputs)
+	target.Apps[0].Image = "api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	return inputs.Set("target", encodeValue(t, target))
+}
+func changeHostname(t *testing.T, inputs property.Map) property.Map {
+	target := decodeTarget(t, inputs)
+	target.Apps[0].Hostname = "other.example"
+	return inputs.Set("target", encodeValue(t, target))
+}
+func dangerousChange(t *testing.T) (property.Map, property.Map) {
+	old, next := lifecycleInputs("edge"), lifecycleInputs("edge")
+	target := decodeTarget(t, old)
+	target.Apps[0].DataLinks[0].Identity.Endpoint = "old-db.example"
+	return old.Set("target", encodeValue(t, target)), next
+}
+func dangerousApprovalFixture(t *testing.T, old, next property.Map, revision string) hostcontract.ApprovalSubject {
+	t.Helper()
+	return hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: lifecycleResource(t, next).Environment, Resource: lifecycleResource(t, next), AppID: "api", DataKind: "postgres", OldData: decodeTarget(t, old).Apps[0].DataLinks[0].Identity, NewData: decodeTarget(t, next).Apps[0].DataLinks[0].Identity, TargetRevision: revision}
+}
+func twoDangerousChanges(t *testing.T) (property.Map, property.Map) {
+	old, next := lifecycleInputs("edge"), lifecycleInputs("edge")
+	oldTarget, nextTarget := decodeTarget(t, old), decodeTarget(t, next)
+	secondOld := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old-two", Endpoint: "old-two.example", Port: 5432, Database: "two", TLSServerName: "old-two.example"}
+	secondNew := hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new-two", Endpoint: "new-two.example", Port: 5432, Database: "two", TLSServerName: "new-two.example"}
+	oldTarget.Apps[0].DataLinks = append(oldTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondOld})
+	nextTarget.Apps[0].DataLinks = append(nextTarget.Apps[0].DataLinks, hostcontract.DataLink{Name: "second", Identity: secondNew})
+	oldTarget.Apps[0].DataLinks[0].Identity.Endpoint = "old-one.example"
+	nextTarget.Apps[0].DataLinks[0].Identity.Endpoint = "new-one.example"
+	return old.Set("target", encodeValue(t, oldTarget)), next.Set("target", encodeValue(t, nextTarget))
+}
+func localDataIdentity(service hostcontract.LocalDataServiceTarget) hostcontract.DataIdentity {
+	database, tls := "sub2api", ""
+	managed := "owner-scoped-" + service.Type + "-" + service.ID + "-managed"
+	if service.Type == "redis" {
+		database = "0"
+	} else {
+		tls = managed
+	}
+	return hostcontract.DataIdentity{Kind: service.Type, ProviderID: managed, Endpoint: managed, Port: service.Port, Database: database, TLSServerName: tls}
+}
+func lifecycleBundle(t *testing.T, release string) (artifactBundle, []byte) {
+	t.Helper()
+	root := t.TempDir()
+	amd64, arm64 := []byte("pinned-host-amd64"), []byte("pinned-host-arm64")
+	write := func(name string, contents []byte) {
+		if err := os.WriteFile(filepath.Join(root, name), contents, 0o600); err != nil {
+			t.Fatal("artifact fixture write failed")
+		}
+	}
+	write("host-amd64", amd64)
+	write("host-arm64", arm64)
+	sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }
+	return artifactBundle{Root: root, Manifest: artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "host-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "host-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}}, amd64
+}
+func lifecycleArtifactBundle(t *testing.T, release string) artifactBundle {
+	t.Helper()
+	bundle, _ := lifecycleBundle(t, release)
+	return bundle
+}
+func releaseBundleProvider(t *testing.T, bundleRoot string) string {
+	t.Helper()
+	provider := filepath.Join(bundleRoot, "bin", "pulumi-resource-sub2api-host")
+	if err := os.MkdirAll(filepath.Dir(provider), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(provider, []byte("provider"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return provider
+}
+func releaseBundleHostArtifacts(t *testing.T, bundleRoot, release string) (artifactBundle, []byte) {
+	t.Helper()
+	root := filepath.Join(bundleRoot, "artifacts", "sub2api-host")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	amd64, arm64 := []byte("released-host-amd64"), []byte("released-host-arm64")
+	sum := func(value []byte) string { hash := sha256.Sum256(value); return fmt.Sprintf("%x", hash) }
+	manifest := artifact.Manifest{SchemaVersion: 1, Release: release, LinuxAMD64: artifact.Entry{Path: "sub2api-host-linux-amd64", Size: int64(len(amd64)), SHA256: sum(amd64)}, LinuxARM64: artifact.Entry{Path: "sub2api-host-linux-arm64", Size: int64(len(arm64)), SHA256: sum(arm64)}}
+	for name, contents := range map[string][]byte{manifest.LinuxAMD64.Path: amd64, manifest.LinuxARM64.Path: arm64} {
+		if err := os.WriteFile(filepath.Join(root, name), contents, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return artifactBundle{Root: root, Manifest: manifest}, amd64
+}
+func decodeBootstrapRequest(t *testing.T, stdin, binary []byte) hostprotocol.Request {
+	t.Helper()
+	hash := sha256.Sum256(binary)
+	prefix := []byte(fmt.Sprintf("s2a1:%d:%x\n", len(binary), hash))
+	if len(stdin) < len(prefix)+len(binary) || !bytes.Equal(stdin[:len(prefix)], prefix) || !bytes.Equal(stdin[len(prefix):len(prefix)+len(binary)], binary) {
+		t.Fatal("bootstrap input did not contain the pinned artifact")
+	}
+	request, err := hostprotocol.DecodeRequest(stdin[len(prefix)+len(binary):])
+	if err != nil {
+		t.Fatal("bootstrap did not contain one valid request frame")
+	}
+	return request
+}
+func assertInspect(t *testing.T, call lifecycleCall, inputs property.Map, desired string) {
+	t.Helper()
+	alias := field(valueAt(t, inputs, "server"), "sshAlias").AsString()
+	request := call.request
+	if call.command != openssh.Host || call.alias != alias || request.Action != hostcontract.ActionInspect || request.Server.SSHAlias != alias || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != desired || request.Target != nil || request.Secrets != nil || request.Approval != nil || request.PriorAppliedRevision != "" || request.PriorObservation != "" {
+		t.Fatal("Inspect request contract was not exact")
+	}
+}
+func assertReconcile(t *testing.T, request hostprotocol.Request, inputs property.Map, desired, prior string, approval *hostcontract.ApprovalSubject) {
+	t.Helper()
+	alias := field(valueAt(t, inputs, "server"), "sshAlias").AsString()
+	if request.Action != hostcontract.ActionReconcile || request.Server.SSHAlias != alias || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != desired || request.PriorAppliedRevision != prior || request.PriorObservation != "" || !reflect.DeepEqual(request.Approval, approval) || request.Target == nil || request.Secrets == nil || !reflect.DeepEqual(*request.Target, decodeTarget(t, inputs)) || !reflect.DeepEqual(*request.Secrets, decodeSecrets(t, inputs)) {
+		t.Fatal("Reconcile request contract was not exact")
+	}
+}
+func assertRetire(t *testing.T, call lifecycleCall, inputs property.Map, revision string, approval hostcontract.ApprovalSubject) {
+	t.Helper()
+	request := call.request
+	if call.command != openssh.Host || request.Action != hostcontract.ActionRetirePreserveData || request.Server != (hostcontract.ServerTarget{SSHAlias: field(valueAt(t, inputs, "server"), "sshAlias").AsString()}) || request.Resource != lifecycleResource(t, inputs) || request.TargetRevision != revision || request.PriorAppliedRevision != revision || request.PriorObservation != "" || request.Target != nil || request.Secrets != nil || request.Approval == nil || !reflect.DeepEqual(*request.Approval, approval) {
+		t.Fatal("retire request contract was not exact")
+	}
+}
+func assertReconcileFrame(t *testing.T, actual []byte, inputs property.Map, desired, prior string) {
+	t.Helper()
+	target, secrets := decodeTarget(t, inputs), decodeSecrets(t, inputs)
+	expected, err := hostprotocol.EncodeRequest(hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: hostcontract.ServerTarget{SSHAlias: field(valueAt(t, inputs, "server"), "sshAlias").AsString()}, Resource: lifecycleResource(t, inputs), TargetRevision: desired, PriorAppliedRevision: prior, Target: &target, Secrets: &secrets})
+	if err != nil || !bytes.Equal(actual, expected) {
+		t.Fatal("response-loss Reconcile frame was not byte-equivalent")
+	}
+}
+func checkpoint(t *testing.T, inputs property.Map, value hostcontract.StableObservation, revision string) property.Map {
+	t.Helper()
+	return inputs.Set("machine", encodeValue(t, value.Machine)).Set("ownership", encodeValue(t, value.Ownership)).Set("appliedRevision", property.New(revision)).Set("observation", encodeValue(t, value))
+}
+func checkpointFor(t *testing.T, inputs property.Map) property.Map {
+	t.Helper()
+	h := configuredLifecycleHost(t, lifecycleDependencies{})
+	revision := revision(t, h, inputs)
+	return checkpoint(t, inputs, observationFor(decodeTarget(t, inputs), revision), revision)
+}
+func assertCheckpoint(t *testing.T, state, inputs property.Map, value hostcontract.StableObservation, revision string) {
+	t.Helper()
+	assertInputsPreserved(t, state, inputs)
+	if !valueAt(t, state, "secrets").Secret() || !valueAt(t, state, "machine").Equals(encodeValue(t, value.Machine)) || !valueAt(t, state, "ownership").Equals(encodeValue(t, value.Ownership)) || !valueAt(t, state, "appliedRevision").Equals(property.New(revision)) || !valueAt(t, state, "observation").Equals(encodeValue(t, value)) {
+		t.Fatal("checkpoint ordinary outputs were not exact")
+	}
+	assertNoCanary(t, fmt.Sprint(valueAt(t, state, "machine")), fmt.Sprint(valueAt(t, state, "ownership")), fmt.Sprint(valueAt(t, state, "appliedRevision")), fmt.Sprint(valueAt(t, state, "observation")))
+}
+func assertInputsPreserved(t *testing.T, state, inputs property.Map) {
+	t.Helper()
+	for _, name := range []string{"resource", "server", "target", "secrets"} {
+		if !valueAt(t, state, name).Equals(valueAt(t, inputs, name)) {
+			t.Fatalf("checkpoint changed input %s", name)
+		}
+	}
+}
+func valueAt(t *testing.T, values property.Map, key string) property.Value {
+	t.Helper()
+	value, ok := values.GetOk(key)
+	if !ok {
+		t.Fatalf("missing property %s", key)
+	}
+	return value
+}
+func decodeTarget(t *testing.T, values property.Map) hostcontract.Target {
+	t.Helper()
+	var target hostcontract.Target
+	if err := decode(valueAt(t, values, "target"), &target); err != nil {
+		t.Fatal("target fixture decode failed")
+	}
+	return target
+}
+func decodeSecrets(t *testing.T, values property.Map) hostcontract.Secrets {
+	t.Helper()
+	var secrets hostcontract.Secrets
+	if err := decode(valueAt(t, values, "secrets"), &secrets); err != nil {
+		t.Fatal("secret fixture decode failed")
+	}
+	return secrets
+}
+
+func lifecycleURN(resource hostcontract.ResourceIdentity) urn.URN {
+	return urn.New(tokens.QName(resource.Environment), tokens.PackageName("sub2api-environment"), "", tokens.Type(hostToken), "host-"+resource.ServerKey)
+}
+
+func readRequest(inputs property.Map, id string, properties, refreshInputs property.Map) p.ReadRequest {
+	resource := valueAtMap(inputs, "resource").AsMap()
+	environment, _ := resource.GetOk("environment")
+	serverKey, _ := resource.GetOk("serverKey")
+	return p.ReadRequest{ID: id, Urn: lifecycleURN(hostcontract.ResourceIdentity{Environment: environment.AsString(), ServerKey: serverKey.AsString()}), Properties: properties, Inputs: refreshInputs}
+}
+func encodeValue(t *testing.T, value any) property.Value {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal("fixture encode failed")
+	}
+	var raw any
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatal("fixture decode failed")
+	}
+	return propertyFromRaw(t, raw)
+}
+func propertyFromRaw(t *testing.T, raw any) property.Value {
+	t.Helper()
+	switch value := raw.(type) {
+	case nil:
+		return property.New(property.Null)
+	case string:
+		return property.New(value)
+	case bool:
+		return property.New(value)
+	case float64:
+		return property.New(value)
+	case []any:
+		values := make([]property.Value, len(value))
+		for i := range value {
+			values[i] = propertyFromRaw(t, value[i])
+		}
+		return property.New(property.NewArray(values))
+	case map[string]any:
+		values := map[string]property.Value{}
+		for key, nested := range value {
+			values[key] = propertyFromRaw(t, nested)
+		}
+		return property.New(property.NewMap(values))
+	default:
+		t.Fatal("unsupported fixture value")
+		return property.New(property.Null)
+	}
+}
+func createWithReadyHost(t *testing.T, inputs property.Map) string {
+	t.Helper()
+	bundle, binary := lifecycleBundle(t, release(t, inputs))
+	digest := fmt.Sprintf("%x", sha256.Sum256(binary))
+	r := &recordingLifecycleTransport{probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, probes: []artifact.ProbeInfo{{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"}, {OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: digest}}}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
+	desired := revision(t, h, inputs)
+	r.outcomes = []lifecycleOutcome{response(applied(desired)), response(inspected(observationFor(decodeTarget(t, inputs), desired)))}
+	got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
+	if err != nil {
+		t.Fatal("Create failed")
+	}
+	return got.ID
+}
 func pinnedTestDigest() string { return fmt.Sprintf("%x", sha256.Sum256([]byte("pinned-host-amd64"))) }
-func fatalArtifact(t *testing.T) func() (artifactBundle, error) { return func() (artifactBundle, error) { t.Fatal("artifact source was called"); return artifactBundle{}, nil } }
-func fatalApproval(t *testing.T) func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { return func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) { t.Fatal("approval source was called"); return nil, nil } }
-func assertNoCalls(t *testing.T, r *recordingLifecycleTransport) { t.Helper(); if len(r.calls) != 0 { t.Fatal("transport was called") } }
-func onlyInspect(r *recordingLifecycleTransport) bool { return len(r.calls) == 1 && r.calls[0].command == openssh.Host && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect }
-func onlyInspectThenReconcile(r *recordingLifecycleTransport) bool { return len(r.calls) == 2 && r.calls[0].command == openssh.Host && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect && r.calls[1].command == openssh.Host && r.calls[1].decoded && r.calls[1].request.Action == hostcontract.ActionReconcile }
-func onlyInspectThenReconcileThenInspect(r *recordingLifecycleTransport) bool { return len(r.calls) == 3 && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect && r.calls[1].decoded && r.calls[1].request.Action == hostcontract.ActionReconcile && r.calls[2].decoded && r.calls[2].request.Action == hostcontract.ActionInspect }
-func hasWrite(r *recordingLifecycleTransport) bool { for _, call := range r.calls { if call.command == openssh.BootstrapReceiver || call.hostAttempted && (!call.decoded || call.request.Action != hostcontract.ActionInspect) { return true } }; return false }
-func errString(err error) string { if err == nil { return "" }; return err.Error() }
-func assertNoCanary(t *testing.T, values ...string) { t.Helper(); for _, value := range values { if strings.Contains(value, lifecycleCanary) { t.Fatal("secret canary leaked") } } }
-func assertNoPanic(t *testing.T, run func()) { t.Helper(); defer func() { if recover() != nil { t.Fatal("lifecycle panicked") } }(); run() }
+func fatalArtifact(t *testing.T) func() (artifactBundle, error) {
+	return func() (artifactBundle, error) { t.Fatal("artifact source was called"); return artifactBundle{}, nil }
+}
+func fatalApproval(t *testing.T) func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+	return func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error) {
+		t.Fatal("approval source was called")
+		return nil, nil
+	}
+}
+func assertNoCalls(t *testing.T, r *recordingLifecycleTransport) {
+	t.Helper()
+	if len(r.calls) != 0 {
+		t.Fatal("transport was called")
+	}
+}
+func onlyInspect(r *recordingLifecycleTransport) bool {
+	return len(r.calls) == 1 && r.calls[0].command == openssh.Host && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect
+}
+func onlyInspectThenReconcile(r *recordingLifecycleTransport) bool {
+	return len(r.calls) == 2 && r.calls[0].command == openssh.Host && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect && r.calls[1].command == openssh.Host && r.calls[1].decoded && r.calls[1].request.Action == hostcontract.ActionReconcile
+}
+func onlyInspectThenReconcileThenInspect(r *recordingLifecycleTransport) bool {
+	return len(r.calls) == 3 && r.calls[0].decoded && r.calls[0].request.Action == hostcontract.ActionInspect && r.calls[1].decoded && r.calls[1].request.Action == hostcontract.ActionReconcile && r.calls[2].decoded && r.calls[2].request.Action == hostcontract.ActionInspect
+}
+func hasWrite(r *recordingLifecycleTransport) bool {
+	for _, call := range r.calls {
+		if call.command == openssh.BootstrapReceiver || call.hostAttempted && (!call.decoded || call.request.Action != hostcontract.ActionInspect) {
+			return true
+		}
+	}
+	return false
+}
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+func assertNoCanary(t *testing.T, values ...string) {
+	t.Helper()
+	for _, value := range values {
+		if strings.Contains(value, lifecycleCanary) {
+			t.Fatal("secret canary leaked")
+		}
+	}
+}
+func assertNoPanic(t *testing.T, run func()) {
+	t.Helper()
+	defer func() {
+		if recover() != nil {
+			t.Fatal("lifecycle panicked")
+		}
+	}()
+	run()
+}

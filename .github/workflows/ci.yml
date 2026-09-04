@@ -3,72 +3,76 @@ name: Pull-Request CI
 on:
   pull_request:
   push:
-    branches:
-      - "agent/**"
+    branches: ["agent/**"]
   workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact 40-character commit SHA to verify
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.inputs.target_sha || github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
+
+env:
+  TARGET_SHA: ${{ github.event.inputs.target_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
         with:
-          go-version: "1.25.11"
-          cache: true
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Verify repository
-        run: bash scripts/verify-release.sh
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25.11", cache: true }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - name: Verify contracts and repository
+        run: |
+          npm ci
+          npx vitest run test/environment-program-target.test.ts test/controller-ci.test.ts test/release-ci.test.ts
+          bash scripts/verify-release.sh
 
   host-controller:
     name: Host Controller (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        arch:
-          - amd64
-          - arm64
+      matrix: { arch: [amd64, arm64] }
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
         with:
-          go-version: "1.25.11"
-          cache: true
-
-      - name: Verify Go modules
-        run: go mod verify
-
-      - name: Test Host controller
-        run: go test -count=1 ./internal/... ./cmd/...
-
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25.11", cache: true }
+      - run: go mod verify
+      - name: Test Host controller and record required evidence
+        run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/host-controller-${TARGET_SHA}-${{ matrix.arch }}.jsonl"; stderr="$RUNNER_TEMP/host-controller-${TARGET_SHA}-${{ matrix.arch }}.stderr"; safe="$RUNNER_TEMP/host-controller-safe-${TARGET_SHA}-${{ matrix.arch }}"
+          trap 'rm -f "$raw" "$stderr"' EXIT
+          tests='^(TestRegisterFoundationGraph|TestRegisterPreservesComputedUpstashOutputs|TestConfigAndHostCheckPreservePropertyClassesWithoutEffects|TestRunUsesFixedSSHArgvAndFramedStdin|TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry|TestStdioProcessExitsAfterOneFrameAndRejectsTwo|TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi)$'
+          go test -json -count=1 -run "$tests" ./internal/... ./cmd/... > "$raw" 2> "$stderr"
+          test ! -s "$stderr"
+          REQUIRED_TESTS="$tests" node - "$raw" "$safe" <<'NODE'
+          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required)if(terminal.get(test)!=='pass')throw Error(`required test did not pass: ${test}`);fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/host-controller.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+          NODE
+          go test -count=1 ./internal/... ./cmd/...
       - name: Vet Host controller
         run: go vet ./internal/... ./cmd/...
-
       - name: Race-test Host controller
         if: matrix.arch == 'amd64'
-        run: go test -race -count=1 ./internal/... ./cmd/...
-
+        run: go test -race -count=1 $(go list ./internal/... ./cmd/... | grep -v '/internal/integration/providerruntime$')
       - name: Build Host controller binaries
         env:
           GOOS: linux
@@ -79,10 +83,273 @@ jobs:
           go build -o "dist/host-controller/sub2api-environment-linux-${GOARCH}" ./cmd/sub2api-environment
           go build -o "dist/host-controller/sub2api-host-linux-${GOARCH}" ./cmd/sub2api-host
           go build -o "dist/host-controller/pulumi-resource-sub2api-host-linux-${GOARCH}" ./cmd/pulumi-resource-sub2api-host
-
-      - name: Upload Host controller binaries
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: host-controller-${{ matrix.arch }}
           path: dist/host-controller/
+          if-no-files-found: error
+      - name: Upload sanitized Host Controller evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-controller-evidence-${{ env.TARGET_SHA }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/host-controller-safe-${{ env.TARGET_SHA }}-${{ matrix.arch }}/host-controller.jsonl
+          if-no-files-found: error
+
+  engine-graph:
+    name: Engine Graph
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25.11", cache: true }
+      - run: go mod verify
+      - name: Vet Engine Graph
+        run: go vet ./internal/integration/enginegraph
+      - name: Record required sanitized Engine Graph evidence
+        run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/engine-graph-${TARGET_SHA}.jsonl"; stderr="$RUNNER_TEMP/engine-graph-${TARGET_SHA}.stderr"; safe="$RUNNER_TEMP/engine-graph-safe-${TARGET_SHA}"
+          trap 'rm -f "$raw" "$stderr"' EXIT
+          tests='^(TestEngineGraphFailureStopsPublication|TestEngineGraphReadyPublishesAfterOrderedHosts|TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication|TestEngineConfiguredServerCountZero|TestEngineConfiguredServerCountOneTwo|TestEngineAppPlacementOneReadyFailure|TestEngineManagedUpstashPreviewPreservesComputedSecretProjection|TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor|TestEngineManagedUpstashStateIsProtectedAndRetained|TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop|TestEngineGraphCrossHostDataRemovalIsReverseStaged|TestEngineGraphTraceArtifactIsSanitizedJSONL)$'
+          trace="$RUNNER_TEMP/engine-graph-trace-${TARGET_SHA}"; mkdir -m 0700 "$trace"; mkdir -m 0700 "$safe"
+          ENGINE_GRAPH_TRACE_DIR="$trace" go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$raw" 2> "$stderr"
+          test ! -s "$stderr"
+          REQUIRED_TESTS="$tests" node - "$raw" "$trace" "$safe" <<'NODE'
+          const crypto=require('node:crypto'),fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe]=process.argv.slice(2); const required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'); const terminal=new Map(); const out=[];
+          for(const line of fs.readFileSync(raw,'utf8').split('\n')) { if(!line) continue; const e=JSON.parse(line); if(required.includes(e.Test) && ['pass','fail','skip'].includes(e.Action)) { terminal.set(e.Test,e.Action); out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed}); } }
+          for(const t of required) if(terminal.get(t)!=='pass') throw Error(`required test did not pass: ${t}`);
+          // The artifact test owns a separate t.TempDir trace via t.Setenv; all other harness instances write here.
+          const traceTests=['TestEngineGraphFailureStopsPublication','TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor','TestEngineManagedUpstashStateIsProtectedAndRetained','TestEngineManagedUpstashPreviewPreservesComputedSecretProjection','TestEngineGraphReadyPublishesAfterOrderedHosts','TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication','TestEngineConfiguredServerCountOneTwo','TestEngineConfiguredServerCountZero','TestEngineAppPlacementOneReadyFailure_alpha_failure_blocks_publication','TestEngineAppPlacementOneReadyFailure_alpha_ready_publishes_once','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop_admission_then_App_then_publication','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop_data_failure_stops_App_and_publication','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop_App_failure_stops_publication','TestEngineGraphCrossHostDataRemovalIsReverseStaged'];
+          const fileName=t=>{let stem=t.replace(/[^A-Za-z0-9_.-]/g,'_').replace(/^[._]+|[._]+$/g,'').slice(0,96)||'engine-graph'; return `${stem}-${crypto.createHash('sha256').update(t).digest('hex')}.jsonl`}; const expected=traceTests.map(fileName).sort(),traceStat=fs.lstatSync(trace),files=fs.readdirSync(trace).sort(); if(!traceStat.isDirectory()||traceStat.isSymbolicLink()||(traceStat.mode&0o777)!==0o700) throw Error('invalid persisted trace directory mode'); if(JSON.stringify(files)!==JSON.stringify(expected)) throw Error('unexpected persisted trace inventory');
+          for(const f of files) { const p=path.join(trace,f),stat=fs.lstatSync(p); if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600) throw Error('invalid persisted trace mode'); const text=fs.readFileSync(p,'utf8'),lines=text.split('\n').filter(Boolean); if(lines.length===0) throw Error('persisted trace must contain at least one event'); for(const line of lines) { const e=JSON.parse(line),keys=Object.keys(e).sort(),event=['lifecycle_event','publication_event','summary'].filter(k=>typeof e[k]==='string'&&e[k]!==''),allowed=event[0]==='summary'?['summary','test_name']:['test_name',event[0]]; if(!e.test_name||event.length!==1||JSON.stringify(keys)!==JSON.stringify(allowed.sort())) throw Error('invalid persisted trace schema'); } if(/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:|CrossHost.*(?:Password|Secret)/i.test(text)) throw Error('persisted trace is not sanitized'); }
+          fs.writeFileSync(path.join(safe,'engine-graph.jsonl'),out.map(JSON.stringify).join('\n')+'\n');
+          NODE
+          test "$(find "$safe" -type f | wc -l)" -eq 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-graph-evidence-${{ env.TARGET_SHA }}
+          path: ${{ runner.temp }}/engine-graph-safe-${{ env.TARGET_SHA }}/engine-graph.jsonl
+          if-no-files-found: error
+
+  provider-ssh:
+    name: Provider SSH
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25.11", cache: true }
+      - run: go mod verify
+      - name: Test Provider SSH and record required evidence
+        run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/provider-ssh-${TARGET_SHA}.jsonl"; stderr="$RUNNER_TEMP/provider-ssh-${TARGET_SHA}.stderr"; safe="$RUNNER_TEMP/provider-ssh-safe-${TARGET_SHA}"
+          trap 'rm -f "$raw" "$stderr"' EXIT
+          tests='^(TestProviderProcessUsesScriptedSSHTransport|TestProtocolFrameBoundaries|TestLoopbackStrictKnownHostAndOptionTerminator)$'
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+          go test -json -count=1 -run "$tests" ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh > "$raw" 2> "$stderr"
+          test ! -s "$stderr"
+          REQUIRED_TESTS="$tests" node - "$raw" "$safe" <<'NODE'
+          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required)if(terminal.get(test)!=='pass')throw Error(`required test did not pass: ${test}`);fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/provider-ssh.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+          NODE
+          go test -count=1 ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh
+      - name: Vet Provider SSH
+        run: go vet ./internal/integration/providerssh ./internal/hostprotocol ./internal/openssh
+      - name: Upload sanitized Provider SSH evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-ssh-evidence-${{ env.TARGET_SHA }}
+          path: ${{ runner.temp }}/provider-ssh-safe-${{ env.TARGET_SHA }}/provider-ssh.jsonl
+          if-no-files-found: error
+
+  provider-runtime:
+    name: Provider Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Initialize private Provider Runtime failure evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          safe="$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA"
+          rm -rf "$safe"; mkdir -m 0700 "$safe"
+          printf '%s\n' '{"status":"live-validation-not-complete"}' > "$safe/metadata.json"
+          chmod 0600 "$safe/metadata.json"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25.11", cache: true }
+      - run: go mod verify
+      - name: Run normal and race Provider Runtime gates
+        run: |
+          set -euo pipefail
+          tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime)$'
+          for mode in normal race; do
+            raw="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.stderr"
+            if test "$mode" = race; then go test -race -json -count=1 -timeout=15m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; else go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; fi
+            test ! -s "$stderr"
+            MODE="$mode" REQUIRED_TESTS="$tests" node - "$raw" "$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA" <<'NODE'
+            const fs=require('node:fs'),[raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const t of required)if(terminal.get(t)!=='pass')throw Error(`required test did not pass: ${t}`);fs.writeFileSync(`${safe}/${process.env.MODE}.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600})
+            NODE
+            rm -f "$raw" "$stderr"
+          done
+      - name: Vet Provider Runtime
+        run: go vet ./internal/integration/providerruntime
+      - name: Prepare exact candidate and offline live prerequisites
+        run: |
+          set -euo pipefail
+          sudo -n true
+          sudo unshare --mount --net --propagation private true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server docker.io nftables iproute2 util-linux postgresql-client redis-tools sudo openssl
+          for tool in dockerd docker sshd ssh sudo nft ip unshare nsenter psql redis-cli openssl; do command -v "$tool"; done
+          daemon_pid_file="$RUNNER_TEMP/provider-runtime-dockerd-${TARGET_SHA}.pid"; daemon_log="$RUNNER_TEMP/provider-runtime-dockerd-${TARGET_SHA}.log"
+          if ! sudo docker info >/dev/null 2>&1; then sudo dockerd >"$daemon_log" 2>&1 & echo "$!" > "$daemon_pid_file"; fi
+          ready=false; for _ in $(seq 1 45); do if sudo docker info >/dev/null 2>&1; then ready=true; break; fi; sleep 1; done; test "$ready" = true
+          candidate="$RUNNER_TEMP/provider-runtime-candidate-$TARGET_SHA"; components="$candidate/components"; mkdir -p "$components"
+          go build -trimpath -o "$components/sub2api-deploy" ./cmd/sub2api-deploy
+          scripts/build-pulumi-release.sh "$components/pulumi-program"
+          go build -trimpath -o "$components/pulumi-resource-sub2api-host" ./cmd/pulumi-resource-sub2api-host
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$components/sub2api-host-linux-amd64" ./cmd/sub2api-host
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o "$components/sub2api-host-linux-arm64" ./cmd/sub2api-host
+          bash scripts/release-bundle.sh assemble "$candidate/bundle" "$components" "$TARGET_SHA"
+          tar -C "$candidate" -czf "$candidate/sub2api-controller-$TARGET_SHA.tar.gz" bundle
+          bash scripts/release-bundle.sh verify "$candidate/sub2api-controller-$TARGET_SHA.tar.gz"
+          (cd "$candidate" && sha256sum "sub2api-controller-$TARGET_SHA.tar.gz" > "sub2api-controller-$TARGET_SHA.tar.gz.sha256")
+          sudo docker pull postgres:18-alpine
+          sudo docker pull redis:8-alpine
+          sudo docker build --tag sub2api-live-app:mx-allowlist --file internal/integration/providerruntime/testdata/live-app.Dockerfile internal/integration/providerruntime/testdata
+          sudo docker save postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist -o "$RUNNER_TEMP/provider-runtime-images-$TARGET_SHA.tar"
+      - name: Run isolated live MX-ALLOWLIST-01 gate and write candidate trace
+        id: live-validation
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/provider-runtime-candidate-$TARGET_SHA"; consumer="$RUNNER_TEMP/provider-runtime-consumer-$TARGET_SHA"; raw="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.stderr"; image="$RUNNER_TEMP/provider-runtime-images-$TARGET_SHA.tar"; trace="$RUNNER_TEMP/provider-runtime-live-trace-$TARGET_SHA"; safe="$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA"
+          mkdir -p "$consumer"; mkdir -m 0700 "$trace"; sudo chown root:root "$trace"; chmod a+rX "$candidate" "$candidate/sub2api-controller-$TARGET_SHA.tar.gz"; tar -xzf "$candidate/sub2api-controller-$TARGET_SHA.tar.gz" -C "$consumer"; chmod -R a+rX "$consumer"
+          provider="$consumer/bundle/bin/pulumi-resource-sub2api-host"; provider_sha="$(sha256sum "$provider" | cut -d ' ' -f1)"
+          go_bin="$(command -v go)"; sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOMODCACHE,GOPATH,GOENV env SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=8m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"
+          test ! -s "$stderr"
+          sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<'NODE'
+          const fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe,consumerTrace]=process.argv.slice(2), test='TestProviderRuntimeCrossHostDataAdmissionLive'; let terminal; for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(e.Test===test&&['pass','fail','skip'].includes(e.Action))terminal=e.Action} if(terminal!=='pass')throw Error('live test did not pass'); const files=fs.readdirSync(trace); if(JSON.stringify(files)!==JSON.stringify(['mx-allowlist-live.json']))throw Error('unexpected live evidence inventory'); const p=path.join(trace,files[0]),stat=fs.lstatSync(p),e=JSON.parse(fs.readFileSync(p,'utf8')); const keys=['appDataEnvironmentAuthenticated','appHostPass','appReadyAfterData','dataHostPass','foreignTableSHA256','foreignTableUnchanged','hostAMD64SHA256','postgresCatalog','postgresDrop','postgresPass','postgresWrongPasswordDenied','providerSHA256','redisACL','redisDefaultDenied','redisDrop','redisPass','redisWrongPasswordDenied','releasedBoundary','test']; if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600||JSON.stringify(Object.keys(e).sort())!==JSON.stringify(keys.sort())||e.test!==test||e.releasedBoundary!==process.env.TARGET_SHA||e.providerSHA256!==process.env.PROVIDER_SHA||!Object.values(e).every(v=>typeof v!=='boolean'||v)||!['providerSHA256','hostAMD64SHA256','foreignTableSHA256'].every(k=>/^[0-9a-f]{64}$/.test(e[k]))||/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |CrossHost.*(?:Password|Secret)|(?:\d{1,3}\.){3}\d{1,3}/i.test(JSON.stringify(e)))throw Error('invalid live evidence'); fs.rmSync(path.join(safe,'metadata.json')); fs.copyFileSync(p,path.join(safe,files[0])); fs.chmodSync(path.join(safe,files[0]),0o600); fs.writeFileSync(path.join(safe,'live.jsonl'),JSON.stringify({Action:'pass',Test:test})+'\n',{mode:0o600}); fs.writeFileSync(consumerTrace,JSON.stringify({sha:process.env.TARGET_SHA,providerRuntimeCrossHostAppLive:'data-then-app-pass',providerSHA256:e.providerSHA256,hostAMD64SHA256:e.hostAMD64SHA256})+'\n',{mode:0o600});
+          NODE
+          test "$(find "$safe" -type f | wc -l)" -eq 4
+      - name: Finalize Provider Runtime private files
+        if: always()
+        run: |
+          set +e
+          safe="$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA"
+          rm -rf "$RUNNER_TEMP/provider-runtime-consumer-$TARGET_SHA" "$RUNNER_TEMP/provider-runtime-live-trace-$TARGET_SHA"
+          rm -f "$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.jsonl" "$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.stderr" "$RUNNER_TEMP/provider-runtime-images-$TARGET_SHA.tar" "$RUNNER_TEMP/provider-runtime-dockerd-$TARGET_SHA.log"
+          if test -f "$RUNNER_TEMP/provider-runtime-dockerd-$TARGET_SHA.pid"; then kill "$(cat "$RUNNER_TEMP/provider-runtime-dockerd-$TARGET_SHA.pid")" 2>/dev/null || true; rm -f "$RUNNER_TEMP/provider-runtime-dockerd-$TARGET_SHA.pid"; fi
+          sudo chown -R "$USER:$USER" "$safe" 2>/dev/null || true
+          chmod 0700 "$safe" 2>/dev/null || true
+          find "$safe" -type f -exec chmod 0600 {} + 2>/dev/null || true
+      - name: Upload sanitized Provider Runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-runtime-evidence-${{ env.TARGET_SHA }}
+          path: ${{ runner.temp }}/provider-runtime-safe-${{ env.TARGET_SHA }}
+          if-no-files-found: error
+      - name: Upload exact-SHA intermediate candidate
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-runtime-candidate-${{ env.TARGET_SHA }}
+          path: |
+            ${{ runner.temp }}/provider-runtime-candidate-${{ env.TARGET_SHA }}/sub2api-controller-${{ env.TARGET_SHA }}.tar.gz
+            ${{ runner.temp }}/provider-runtime-candidate-${{ env.TARGET_SHA }}/sub2api-controller-${{ env.TARGET_SHA }}.tar.gz.sha256
+            ${{ runner.temp }}/provider-runtime-candidate-${{ env.TARGET_SHA }}/consumer-trace.json
+          if-no-files-found: error
+
+  provider-import:
+    name: Provider Import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25.11", cache: true }
+      - run: go mod verify
+      - name: Test Provider Import and record required evidence
+        run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/provider-import-${TARGET_SHA}.jsonl"; stderr="$RUNNER_TEMP/provider-import-${TARGET_SHA}.stderr"; safe="$RUNNER_TEMP/provider-import-safe-${TARGET_SHA}"
+          trap 'rm -f "$raw" "$stderr"' EXIT
+          tests='^(TestEngineImportPreviewIsNoOpOrAcceptedDiff)$'
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+          go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerimport > "$raw" 2> "$stderr"
+          test ! -s "$stderr"
+          REQUIRED_TESTS="$tests" node - "$raw" "$safe" <<'NODE'
+          const fs=require('node:fs');const [raw,safe]=process.argv.slice(2),required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'),terminal=new Map(),out=[];for(const line of fs.readFileSync(raw,'utf8').split('\n')){if(!line)continue;const e=JSON.parse(line);if(required.includes(e.Test)&&['pass','fail','skip'].includes(e.Action)){terminal.set(e.Test,e.Action);out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed})}}for(const test of required)if(terminal.get(test)!=='pass')throw Error(`required test did not pass: ${test}`);fs.mkdirSync(safe,{mode:0o700});fs.writeFileSync(`${safe}/provider-import.jsonl`,out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+          NODE
+          go test -count=1 -timeout=8m ./internal/integration/providerimport
+      - name: Vet Provider Import
+        run: go vet ./internal/integration/providerimport
+      - name: Upload sanitized Provider Import evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-import-evidence-${{ env.TARGET_SHA }}
+          path: ${{ runner.temp }}/provider-import-safe-${{ env.TARGET_SHA }}/provider-import.jsonl
+          if-no-files-found: error
+
+  target-release:
+    name: Target Release
+    needs: [verify, host-controller, engine-graph, provider-ssh, provider-runtime, provider-import]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - name: Download exact Provider Runtime candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: provider-runtime-candidate-${{ env.TARGET_SHA }}
+          path: ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}
+      - name: Verify and finalize consumed candidate
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/target-release-$TARGET_SHA"; archive="sub2api-controller-$TARGET_SHA.tar.gz"; consumer="$RUNNER_TEMP/target-release-consumer-$TARGET_SHA"
+          expected="$(printf '%s\n' "$candidate/$archive" "$candidate/$archive.sha256" "$candidate/consumer-trace.json" | sort)"
+          actual="$(find "$candidate" -maxdepth 1 -type f -print | sort)"
+          test "$actual" = "$expected"
+          (cd "$candidate" && sha256sum -c "$archive.sha256")
+          bash scripts/release-bundle.sh verify "$candidate/$archive"
+          mkdir -p "$consumer"; tar -xzf "$candidate/$archive" -C "$consumer"
+          expected_files="$(printf '%s\n' "$consumer/bundle/Pulumi.production.example.yaml" "$consumer/bundle/Pulumi.yaml" "$consumer/bundle/README.md" "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-arm64" "$consumer/bundle/bin/go" "$consumer/bundle/bin/pulumi" "$consumer/bundle/bin/pulumi-program" "$consumer/bundle/bin/pulumi-resource-sub2api-host" "$consumer/bundle/bin/sub2api-deploy" "$consumer/bundle/go.mod" "$consumer/bundle/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" "$consumer/bundle/scripts/pulumi-plugins/upstash/pulumi-plugin.json" | sort)"
+          actual_files="$(find "$consumer" -type f -print | sort)"
+          test "$actual_files" = "$expected_files"
+          TARGET_SHA="$TARGET_SHA" node - "$candidate/consumer-trace.json" <<'NODE'
+          const fs=require('node:fs'),t=JSON.parse(fs.readFileSync(process.argv[2],'utf8')),keys=['hostAMD64SHA256','providerRuntimeCrossHostAppLive','providerSHA256','sha']; if(JSON.stringify(Object.keys(t).sort())!==JSON.stringify(keys)||t.sha!==process.env.TARGET_SHA||t.providerRuntimeCrossHostAppLive!=='data-then-app-pass'||!['providerSHA256','hostAMD64SHA256'].every(k=>/^[0-9a-f]{64}$/.test(t[k])))throw Error('invalid consumed live trace');
+          NODE
+          sha256sum "$consumer/bundle/bin/pulumi-resource-sub2api-host" | grep -q "^$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1])).providerSHA256)' "$candidate/consumer-trace.json") "
+          sha256sum "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" | grep -q "^$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1])).hostAMD64SHA256)' "$candidate/consumer-trace.json") "
+          sha256="$(sha256sum "$candidate/$archive" | cut -d ' ' -f1)"
+          TARGET_SHA="$TARGET_SHA" ARCHIVE="$archive" SHA256="$sha256" RUN_ID="$GITHUB_RUN_ID" RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" node - "$candidate/metadata.json" <<'NODE'
+          const fs=require('node:fs'); const gateSymbols={verify:['test/environment-program-target.test.ts::targets the environment program without an infra fallback'],'host-controller':['TestRegisterFoundationGraph','TestRegisterPreservesComputedUpstashOutputs','TestConfigAndHostCheckPreservePropertyClassesWithoutEffects','TestRunUsesFixedSSHArgvAndFramedStdin','TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry','TestStdioProcessExitsAfterOneFrameAndRejectsTwo','TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi'],'engine-graph':['TestEngineGraphFailureStopsPublication','TestEngineGraphReadyPublishesAfterOrderedHosts','TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication','TestEngineConfiguredServerCountZero','TestEngineConfiguredServerCountOneTwo','TestEngineAppPlacementOneReadyFailure','TestEngineManagedUpstashPreviewPreservesComputedSecretProjection','TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor','TestEngineManagedUpstashStateIsProtectedAndRetained','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop','TestEngineGraphCrossHostDataRemovalIsReverseStaged','TestEngineGraphTraceArtifactIsSanitizedJSONL'],'provider-ssh':['TestProviderProcessUsesScriptedSSHTransport','TestProtocolFrameBoundaries','TestLoopbackStrictKnownHostAndOptionTerminator'],'provider-runtime':['TestProviderProcessReachesSharedTemporaryRuntimeServe','TestProviderLifecycleWithHostProcessTempRuntime','TestProviderRuntimeCrossHostDataAdmissionLive'],'provider-import':['TestEngineImportPreviewIsNoOpOrAcceptedDiff']}; fs.writeFileSync(process.argv[2],JSON.stringify({sha:process.env.TARGET_SHA,runId:process.env.RUN_ID,runUrl:process.env.RUN_URL,gate:'target-release',archive:process.env.ARCHIVE,sha256:process.env.SHA256,requiredGateIds:Object.keys(gateSymbols),gateSymbols})+'\n');
+          NODE
+      - name: Upload target release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-release-${{ env.TARGET_SHA }}
+          path: |
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/sub2api-controller-${{ env.TARGET_SHA }}.tar.gz
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/sub2api-controller-${{ env.TARGET_SHA }}.tar.gz.sha256
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/metadata.json
+            ${{ runner.temp }}/target-release-${{ env.TARGET_SHA }}/consumer-trace.json
           if-no-files-found: error

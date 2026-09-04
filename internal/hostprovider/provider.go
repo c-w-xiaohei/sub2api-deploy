@@ -1,5 +1,4 @@
-// Package hostprovider exposes the single Host resource. Runtime work is deliberately
-// unavailable until the Host lifecycle implementation is installed in Task 7.
+// Package hostprovider exposes the single Host resource.
 package hostprovider
 
 import (
@@ -89,7 +88,32 @@ type host struct {
 func (h *host) schema(context.Context, p.GetSchemaRequest) (p.GetSchemaResponse, error) {
 	// This is an explicit, closed typed schema for the frozen hostcontract structs. It
 	// intentionally has no map-of-object escape hatch for target or secrets.
-	return p.GetSchemaResponse{Schema: fmt.Sprintf(`{"name":"sub2api-host","version":%q,"config":{"variables":{"revisionKey":{"type":"string","secret":true}},"defaults":["revisionKey"]},"resources":{"%s":{"inputProperties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true}},"requiredInputs":["resource","server","target","secrets"],"properties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true},"machine":{"$ref":"#/types/sub2api-host:index:MachineIdentity"},"ownership":{"$ref":"#/types/sub2api-host:index:OwnershipIdentity"},"appliedRevision":{"type":"string"},"observation":{"$ref":"#/types/sub2api-host:index:StableObservation"}}}},"types":%s}`, h.version, hostToken, schemaTypes)}, nil
+	types, err := expandedSchemaTypes()
+	if err != nil {
+		return p.GetSchemaResponse{}, err
+	}
+	return p.GetSchemaResponse{Schema: fmt.Sprintf(`{"name":"sub2api-host","version":%q,"config":{"variables":{"revisionKey":{"type":"string","secret":true}},"defaults":["revisionKey"]},"resources":{"%s":{"inputProperties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true}},"requiredInputs":["resource","server","target","secrets"],"properties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true},"machine":{"$ref":"#/types/sub2api-host:index:MachineIdentity"},"ownership":{"$ref":"#/types/sub2api-host:index:OwnershipIdentity"},"appliedRevision":{"type":"string"},"observation":{"$ref":"#/types/sub2api-host:index:StableObservation"}}}},"types":%s}`, h.version, hostToken, types)}, nil
+}
+
+func expandedSchemaTypes() (string, error) {
+	var types map[string]any
+	if err := json.Unmarshal([]byte(schemaTypes), &types); err != nil {
+		return "", fmt.Errorf("invalid static schema types: %w", err)
+	}
+	types["sub2api-host:index:LocalDataBinding"] = map[string]any{"type": "object", "properties": map[string]any{"address": map[string]any{"type": "string"}, "allowedSources": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"address", "allowedSources"}}
+	types["sub2api-host:index:LocalDataClient"] = map[string]any{"type": "object", "properties": map[string]any{"appId": map[string]any{"type": "string"}, "username": map[string]any{"type": "string"}, "database": map[string]any{"type": "string"}}, "required": []string{"appId", "username", "database"}}
+	data := types["sub2api-host:index:DataIdentity"].(map[string]any)
+	data["properties"].(map[string]any)["tlsMode"] = map[string]any{"type": "string"}
+	local := types["sub2api-host:index:LocalDataServiceTarget"].(map[string]any)
+	local["properties"].(map[string]any)["bindings"] = map[string]any{"type": "array", "items": map[string]any{"$ref": "#/types/sub2api-host:index:LocalDataBinding"}}
+	local["properties"].(map[string]any)["clients"] = map[string]any{"type": "array", "items": map[string]any{"$ref": "#/types/sub2api-host:index:LocalDataClient"}}
+	app := types["sub2api-host:index:AppTarget"].(map[string]any)
+	app["properties"].(map[string]any)["initialAdminEmail"] = map[string]any{"type": "string"}
+	app["required"] = append(app["required"].([]any), "initialAdminEmail")
+	secret := types["sub2api-host:index:LocalDataServiceSecrets"].(map[string]any)
+	secret["properties"].(map[string]any)["clientPasswords"] = map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}
+	encoded, err := json.Marshal(types)
+	return string(encoded), err
 }
 
 func (h *host) checkConfig(_ context.Context, req p.CheckRequest) (p.CheckResponse, error) {
@@ -302,7 +326,18 @@ func validate(m property.Map) error {
 	if err := decode(secrets, &s); err != nil {
 		return fmt.Errorf("secrets are invalid")
 	}
-	return hostcontract.ValidateTarget(t, s)
+	if err := hostcontract.ValidateTarget(t, s); err != nil {
+		return err
+	}
+	for _, app := range t.Apps {
+		if _, ok := app.RuntimeSettings["ADMIN_EMAIL"]; ok {
+			return fmt.Errorf("runtime settings reserve ADMIN_EMAIL")
+		}
+		if _, ok := s.Apps[app.ID].RuntimeEnvironment["ADMIN_EMAIL"]; ok {
+			return fmt.Errorf("runtime environment reserves ADMIN_EMAIL")
+		}
+	}
+	return nil
 }
 func decode(value property.Value, out any) error {
 	raw, err := rawValue(unwrap(value))
@@ -368,11 +403,11 @@ var boolean = shape{kind: "bool"}
 var number = shape{kind: "number"}
 var requiredString = shape{kind: "string", nonEmpty: true}
 var port = shape{kind: "number", minimum: 1, maximum: 65535}
-var dataIdentity = shape{fields: map[string]shape{"kind": {kind: "string", nonEmpty: true, oneOf: []string{"postgres", "redis"}}, "providerId": requiredString, "endpoint": requiredString, "port": port, "database": requiredString, "tlsServerName": scalar}, required: []string{"kind", "providerId", "endpoint", "port", "database"}}
-var appTarget = shape{fields: map[string]shape{"id": requiredString, "image": requiredString, "hostname": requiredString, "readinessPath": requiredString, "drainTimeout": scalar, "initialBootstrap": boolean, "runtimeSettings": {mapValue: &scalar, keyNonEmpty: true}, "dataLinks": {array: &shape{fields: map[string]shape{"name": requiredString, "identity": dataIdentity}, required: []string{"name", "identity"}}}}, required: []string{"id", "image", "hostname", "readinessPath"}}
-var targetShape = shape{fields: map[string]shape{"releaseArtifact": requiredString, "apps": {array: &appTarget}, "dataServices": {array: &shape{fields: map[string]shape{"id": requiredString, "type": {kind: "string", nonEmpty: true, oneOf: []string{"postgres", "redis"}}, "port": port, "persistence": boolean}, required: []string{"id", "type", "port"}}}, "reverseProxy": {fields: map[string]shape{"image": requiredString, "acmeEmail": requiredString}, required: []string{"image", "acmeEmail"}}, "microSocks": {fields: map[string]shape{"server": boolean, "clients": {array: &shape{fields: map[string]shape{"id": requiredString}, required: []string{"id"}}}}}, "connectors": {array: &shape{fields: map[string]shape{"id": requiredString, "tunnelId": requiredString, "appIds": {array: &requiredString}}, required: []string{"id", "tunnelId"}}}}, required: []string{"releaseArtifact"}}
+var dataIdentity = shape{fields: map[string]shape{"kind": {kind: "string", nonEmpty: true, oneOf: []string{"postgres", "redis"}}, "providerId": requiredString, "endpoint": requiredString, "port": port, "database": requiredString, "tlsMode": {kind: "string", nonEmpty: true, oneOf: []string{"disable", "require", "verify-ca", "verify-full"}}, "tlsServerName": scalar}, required: []string{"kind", "providerId", "endpoint", "port", "database"}}
+var appTarget = shape{fields: map[string]shape{"id": requiredString, "image": requiredString, "hostname": requiredString, "readinessPath": requiredString, "drainTimeout": scalar, "initialBootstrap": boolean, "initialAdminEmail": requiredString, "runtimeSettings": {mapValue: &scalar, keyNonEmpty: true}, "dataLinks": {array: &shape{fields: map[string]shape{"name": requiredString, "identity": dataIdentity}, required: []string{"name", "identity"}}}}, required: []string{"id", "image", "hostname", "readinessPath", "initialAdminEmail"}}
+var targetShape = shape{fields: map[string]shape{"releaseArtifact": requiredString, "apps": {array: &appTarget}, "dataServices": {array: &shape{fields: map[string]shape{"id": requiredString, "type": {kind: "string", nonEmpty: true, oneOf: []string{"postgres", "redis"}}, "port": port, "persistence": boolean, "bindings": {array: &shape{fields: map[string]shape{"address": requiredString, "allowedSources": {array: &requiredString}}, required: []string{"address", "allowedSources"}}}, "clients": {array: &shape{fields: map[string]shape{"appId": requiredString, "username": requiredString, "database": requiredString}, required: []string{"appId", "username", "database"}}}}, required: []string{"id", "type", "port"}}}, "reverseProxy": {fields: map[string]shape{"image": requiredString, "acmeEmail": requiredString}, required: []string{"image", "acmeEmail"}}, "microSocks": {fields: map[string]shape{"server": boolean, "clients": {array: &shape{fields: map[string]shape{"id": requiredString}, required: []string{"id"}}}}}, "connectors": {array: &shape{fields: map[string]shape{"id": requiredString, "tunnelId": requiredString, "appIds": {array: &requiredString}}, required: []string{"id", "tunnelId"}}}}, required: []string{"releaseArtifact"}}
 var credentials = shape{fields: map[string]shape{"username": requiredString, "password": requiredString}, required: []string{"username", "password"}}
-var secretsShape = shape{fields: map[string]shape{"apps": {mapValue: &shape{fields: map[string]shape{"initialAdminPassword": scalar, "jwtSecret": scalar, "totpEncryptionKey": scalar, "adminApiKey": scalar, "runtimeEnvironment": {mapValue: &scalar, keyNonEmpty: true}, "postgres": credentials, "redis": credentials}}, keyNonEmpty: true}, "localDataServices": {mapValue: &shape{fields: map[string]shape{"adminPassword": requiredString}, required: []string{"adminPassword"}}, keyNonEmpty: true}, "reverseProxy": {fields: map[string]shape{"dnsChallengeToken": requiredString}, required: []string{"dnsChallengeToken"}}, "microSocks": {fields: map[string]shape{"serverUsername": scalar, "serverPassword": scalar, "clientCredentials": {mapValue: &credentials, keyNonEmpty: true}}}, "connectors": {mapValue: &shape{fields: map[string]shape{"token": requiredString}, required: []string{"token"}}, keyNonEmpty: true}}}
+var secretsShape = shape{fields: map[string]shape{"apps": {mapValue: &shape{fields: map[string]shape{"initialAdminPassword": scalar, "jwtSecret": scalar, "totpEncryptionKey": scalar, "adminApiKey": scalar, "runtimeEnvironment": {mapValue: &scalar, keyNonEmpty: true}, "postgres": credentials, "redis": credentials}}, keyNonEmpty: true}, "localDataServices": {mapValue: &shape{fields: map[string]shape{"adminPassword": requiredString, "clientPasswords": {mapValue: &requiredString, keyNonEmpty: true}}, required: []string{"adminPassword"}}, keyNonEmpty: true}, "reverseProxy": {fields: map[string]shape{"dnsChallengeToken": requiredString}, required: []string{"dnsChallengeToken"}}, "microSocks": {fields: map[string]shape{"serverUsername": scalar, "serverPassword": scalar, "clientCredentials": {mapValue: &credentials, keyNonEmpty: true}}}, "connectors": {mapValue: &shape{fields: map[string]shape{"token": requiredString}, required: []string{"token"}}, keyNonEmpty: true}}}
 
 func validateShape(root string, v property.Value) []p.CheckFailure {
 	var s shape

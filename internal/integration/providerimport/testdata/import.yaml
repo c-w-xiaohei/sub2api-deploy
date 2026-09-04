@@ -1,0 +1,30 @@
+version: 1
+reverseProxy:
+  image: traefik@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  acmeEmail: ops@example.test
+servers:
+  edge:
+    sshAlias: edge
+postgres:
+  app-postgres:
+    type: external
+    host: postgres.external.test
+    port: 5433
+    tls: {mode: verify-full}
+redis:
+  app-redis:
+    type: external
+    host: redis.external.test
+    port: 6381
+    tls: true
+apps:
+  app:
+    hostname: app.example.test
+    image: ghcr.io/example/sub2api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    initialAdminEmail: admin@example.test
+    readinessPath: /ready
+    environment: {FEATURE_FLAG: enabled}
+    servers: [edge]
+    postgres: {name: app-postgres, database: sub2api}
+    redis: {name: app-redis, database: 0}
+    publicAccess: {type: none}

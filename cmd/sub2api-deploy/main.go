@@ -1,33 +1,61 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/sshcheck"
 )
 
 func main() {
-	if err := execute(os.Args[1:], os.Getwd, os.Stdout, os.Stderr); err != nil {
+	args := os.Args[1:]
+	ctx := context.Background()
+	if len(args) == 0 || args[0] != "validate" {
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+	}
+	if err := execute(ctx, args, os.Getwd, os.Executable, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func execute(args []string, getwd func() (string, error), stdout, stderr io.Writer) error {
+func execute(ctx context.Context, args []string, getwd func() (string, error), executable func() (string, error), stdout, stderr io.Writer) error {
 	directory, err := getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
-	return run(args, directory, stdout, stderr)
+	return run(ctx, args, directory, executable, stdout, stderr)
 }
 
-func run(args []string, workdir string, stdout, stderr io.Writer) error {
-	if len(args) != 2 || args[0] != "validate" {
+func run(ctx context.Context, args []string, workdir string, executable func() (string, error), stdout, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "validate" {
+		return runValidate(args, workdir, stdout, stderr)
+	}
+	plan, err := parsePulumiPlan(args)
+	if err != nil {
+		return err
+	}
+	if ctx == nil || executable == nil {
+		return errInvalidPulumiInputs
+	}
+	cliPath, err := executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	return runPulumiPlan(ctx, plan, workdir, cliPath, os.Environ(), stdout, stderr, terminalApproval)
+}
+
+func runValidate(args []string, workdir string, stdout, stderr io.Writer) error {
+	if len(args) != 2 {
 		return fmt.Errorf("usage: sub2api-deploy validate <environment>")
 	}
 	paths, err := environment.ResolveEnvironment(filepath.Clean(workdir), args[1])

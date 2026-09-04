@@ -1,0 +1,8 @@
+version: 1
+reverseProxy:
+  image: traefik@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  acmeEmail: ops@example.test
+servers: {}
+postgres: {}
+redis: {}
+apps: {}

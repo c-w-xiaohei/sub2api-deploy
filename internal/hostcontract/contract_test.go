@@ -38,6 +38,11 @@ func TestTargetRevisionNormalizesAndCommitsHostSemantics(t *testing.T) {
 	if got := mustRevision(t, key, resource, changedRelease, secrets); got == baseline {
 		t.Fatal("target field changes must change revision")
 	}
+	changedEmail := cloneTarget(target)
+	changedEmail.Apps[0].InitialAdminEmail = "changed@example.test"
+	if got := mustRevision(t, key, resource, changedEmail, secrets); got == baseline {
+		t.Fatal("initial admin email change did not change revision")
+	}
 	if got := mustRevision(t, key, ResourceIdentity{Environment: "production", ServerKey: "edge-b"}, target, secrets); got == baseline {
 		t.Fatal("resource identity did not change revision")
 	}
@@ -47,7 +52,7 @@ func TestTargetRevisionNormalizesAndCommitsHostSemantics(t *testing.T) {
 		t.Fatal("secret-only change did not change revision")
 	}
 
-	minimal := Target{ReleaseArtifact: target.ReleaseArtifact, Apps: []AppTarget{{ID: "api", Image: target.Apps[1].Image, Hostname: target.Apps[1].Hostname, ReadinessPath: target.Apps[1].ReadinessPath}}}
+	minimal := Target{ReleaseArtifact: target.ReleaseArtifact, Apps: []AppTarget{{ID: "api", Image: target.Apps[1].Image, Hostname: target.Apps[1].Hostname, ReadinessPath: target.Apps[1].ReadinessPath, InitialAdminEmail: target.Apps[1].InitialAdminEmail}}}
 	empty := minimal
 	empty.Apps[0].RuntimeSettings = map[string]string{}
 	empty.Apps[0].DataLinks = []DataLink{}
@@ -86,6 +91,23 @@ func TestTargetRevisionRejectsInvalidScopeAndInputWithoutLeakingSecrets(t *testi
 	}
 	if _, err := TargetRevision(RevisionKey("short"), resource, target, secrets); err == nil {
 		t.Fatal("short revision key was accepted")
+	}
+}
+
+func TestValidateTargetRequiresSafeInitialAdminEmail(t *testing.T) {
+	for name, email := range map[string]string{
+		"empty":        "",
+		"newline":      "admin@example.test\nINJECTED=yes",
+		"control":      "admin@example.test\x00",
+		"invalid utf8": "\xff",
+	} {
+		t.Run(name, func(t *testing.T) {
+			target, secrets := validTarget()
+			target.Apps[0].InitialAdminEmail = email
+			if err := ValidateTarget(target, secrets); err == nil {
+				t.Fatal("unsafe initial admin email accepted")
+			}
+		})
 	}
 }
 
@@ -231,8 +253,78 @@ func TestTargetRevisionNormalizationIsPureAndMicroSocksEmptyIsNil(t *testing.T) 
 	}
 }
 
+func TestLocalDataServiceNormalizesBindingsAndClients(t *testing.T) {
+	target := Target{ReleaseArtifact: "release", DataServices: []LocalDataServiceTarget{{
+		ID: "db", Type: "redis", Port: 5432,
+		Bindings: []LocalDataBinding{{Address: "2001:db8::1", AllowedSources: []string{"2001:db8::3", "2001:db8::2"}}, {Address: "10.0.0.1", AllowedSources: []string{"10.0.0.3", "10.0.0.2"}}},
+		Clients:  []LocalDataClient{{AppID: "z", Username: "z-user", Database: "zdb"}, {AppID: "a", Username: "a-user", Database: "adb"}},
+	}}}
+	secrets := Secrets{LocalDataServices: map[string]LocalDataServiceSecrets{"db": {AdminPassword: "admin", ClientPasswords: map[string]string{"z": "zp", "a": "ap"}}}}
+	normalized, normalizedSecrets := NormalizeTargetSecrets(target, secrets)
+	service := normalized.DataServices[0]
+	if service.Bindings[0].Address != "10.0.0.1" || service.Bindings[0].AllowedSources[0] != "10.0.0.2" || service.Clients[0].AppID != "a" {
+		t.Fatalf("local data service was not deterministically normalized: %#v", service)
+	}
+	if normalizedSecrets.LocalDataServices["db"].ClientPasswords["a"] != "ap" {
+		t.Fatalf("client passwords were not retained: %#v", normalizedSecrets)
+	}
+	if err := ValidateTarget(normalized, normalizedSecrets); err != nil {
+		t.Fatalf("ValidateTarget rejected scoped local data service: %v", err)
+	}
+
+	invalid := normalized
+	invalid.DataServices[0].Clients = append(invalid.DataServices[0].Clients, LocalDataClient{AppID: "other", Username: "a-user", Database: "other"})
+	if err := ValidateTarget(invalid, normalizedSecrets); err == nil {
+		t.Fatal("ValidateTarget accepted incompatible duplicate local data username")
+	}
+}
+
+func TestLocalDataServiceRejectsUnsafeBindingsAndMissingAdminSecrets(t *testing.T) {
+	target := Target{ReleaseArtifact: "release", DataServices: []LocalDataServiceTarget{{ID: "db", Type: "postgres", Port: 5432, Bindings: []LocalDataBinding{{Address: "10.0.0.1", AllowedSources: []string{"2001:db8::2"}}}}}}
+	if err := ValidateTarget(target, Secrets{LocalDataServices: map[string]LocalDataServiceSecrets{"db": {}}}); err == nil {
+		t.Fatal("accepted missing admin secret and mismatched source family")
+	}
+	target.DataServices = append(target.DataServices, LocalDataServiceTarget{ID: "cache", Type: "redis", Port: 5432, Bindings: []LocalDataBinding{{Address: "10.0.0.1", AllowedSources: []string{"10.0.0.2"}}}})
+	if err := ValidateTarget(target, Secrets{LocalDataServices: map[string]LocalDataServiceSecrets{"db": {AdminPassword: "a"}, "cache": {AdminPassword: "b"}}}); err == nil {
+		t.Fatal("accepted local socket collision")
+	}
+}
+
+func TestLocalDataServiceDuplicateUsernameRequiresIdenticalPassword(t *testing.T) {
+	target := Target{ReleaseArtifact: "release", DataServices: []LocalDataServiceTarget{{ID: "db", Type: "postgres", Port: 5432, Clients: []LocalDataClient{{AppID: "one", Username: "shared", Database: "app"}, {AppID: "two", Username: "shared", Database: "app"}}}}}
+	secrets := Secrets{LocalDataServices: map[string]LocalDataServiceSecrets{"db": {AdminPassword: "admin", ClientPasswords: map[string]string{"one": "first", "two": "second"}}}}
+	if err := ValidateTarget(target, secrets); err == nil {
+		t.Fatal("accepted duplicate username with distinct client passwords")
+	}
+	secrets.LocalDataServices["db"] = LocalDataServiceSecrets{AdminPassword: "admin", ClientPasswords: map[string]string{"one": "same", "two": "same"}}
+	if err := ValidateTarget(target, secrets); err != nil {
+		t.Fatalf("rejected identical principal tuple: %v", err)
+	}
+}
+
+func TestLocalPostgresClientContractRejectsReservedIdentifiersAndUnsafeDSNPasswords(t *testing.T) {
+	valid := func() (Target, Secrets) {
+		return Target{ReleaseArtifact: "release", Apps: []AppTarget{{ID: "app-id", Image: "image", Hostname: "app", ReadinessPath: "/", InitialAdminEmail: "admin@example.test"}}, DataServices: []LocalDataServiceTarget{{ID: "db", Type: "postgres", Port: 5432, Clients: []LocalDataClient{{AppID: "app-id", Username: "app", Database: "app"}}}}}, Secrets{Apps: map[string]AppSecrets{"app-id": {Postgres: &DataCredentials{Username: "app", Password: "safe$;=\"quote"}}}, LocalDataServices: map[string]LocalDataServiceSecrets{"db": {AdminPassword: "admin", ClientPasswords: map[string]string{"app-id": "safe$;=\"quote"}}}}
+	}
+	target, secrets := valid()
+	if err := ValidateTarget(target, secrets); err != nil {
+		t.Fatalf("rejected permitted DSN password: %v", err)
+	}
+	for name, mutate := range map[string]func(*Target, *Secrets){"reserved role": func(t *Target, _ *Secrets) { t.DataServices[0].Clients[0].Username = "s2h_client" }, "reserved database": func(t *Target, _ *Secrets) { t.DataServices[0].Clients[0].Database = "postgres" }, "unsafe password": func(_ *Target, s *Secrets) {
+		s.Apps["app-id"] = AppSecrets{Postgres: &DataCredentials{Username: "app", Password: "bad\npassword"}}
+	}} {
+		t.Run(name, func(t *testing.T) {
+			target, secrets := valid()
+			mutate(&target, &secrets)
+			if err := ValidateTarget(target, secrets); err == nil {
+				t.Fatal("accepted invalid PostgreSQL contract")
+			}
+		})
+	}
+}
+
 func validTarget() (Target, Secrets) {
-	return Target{ReleaseArtifact: "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Apps: []AppTarget{{ID: "web", Image: "web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Hostname: "web.example", ReadinessPath: "/ready", DrainTimeout: "10s", InitialBootstrap: true}, {ID: "api", Image: "api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Hostname: "api.example", ReadinessPath: "/ready", RuntimeSettings: map[string]string{"A": "1"}, DataLinks: []DataLink{{Name: "cache", Identity: DataIdentity{Kind: "redis", ProviderID: "cache-1", Endpoint: "cache.example", Port: 6379, Database: "0"}}, {Name: "main", Identity: DataIdentity{Kind: "postgres", ProviderID: "db-1", Endpoint: "db.example", Port: 5432, Database: "app", TLSServerName: "db.example"}}}}}, DataServices: []LocalDataServiceTarget{{ID: "redis", Type: "redis", Port: 6379, Persistence: true}, {ID: "postgres", Type: "postgres", Port: 5432}}, ReverseProxy: &ReverseProxyTarget{Image: "traefik:v3", ACMEEmail: "ops@example"}, MicroSocks: &MicroSocksTarget{Server: true, Clients: []MicroSocksClientTarget{{ID: "api"}}}, Connectors: []TunnelConnectorTarget{{ID: "tunnel-b", TunnelID: "b"}, {ID: "tunnel-a", TunnelID: "a"}}}, Secrets{Apps: map[string]AppSecrets{"api": {JWTSecret: "CANARY_SECRET_DO_NOT_EXPOSE", RuntimeEnvironment: map[string]string{"SECRET": "CANARY_SECRET_DO_NOT_EXPOSE"}}, "web": {InitialAdminPassword: "bootstrap"}}, LocalDataServices: map[string]LocalDataServiceSecrets{"postgres": {AdminPassword: "admin"}}, ReverseProxy: &ReverseProxySecrets{DNSChallengeToken: "dns"}, MicroSocks: &MicroSocksSecrets{ServerPassword: "server"}, Connectors: map[string]TunnelConnectorSecrets{"tunnel-a": {Token: "a"}, "tunnel-b": {Token: "b"}}}
+	return Target{ReleaseArtifact: "release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Apps: []AppTarget{{ID: "web", Image: "web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Hostname: "web.example", ReadinessPath: "/ready", DrainTimeout: "10s", InitialBootstrap: true, InitialAdminEmail: "web@example.test"}, {ID: "api", Image: "api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Hostname: "api.example", ReadinessPath: "/ready", InitialAdminEmail: "api@example.test", RuntimeSettings: map[string]string{"A": "1"}, DataLinks: []DataLink{{Name: "cache", Identity: DataIdentity{Kind: "redis", ProviderID: "cache-1", Endpoint: "cache.example", Port: 6379, Database: "0"}}, {Name: "main", Identity: DataIdentity{Kind: "postgres", ProviderID: "db-1", Endpoint: "db.example", Port: 5432, Database: "app", TLSServerName: "db.example"}}}}}, DataServices: []LocalDataServiceTarget{{ID: "redis", Type: "redis", Port: 6379, Persistence: true}, {ID: "postgres", Type: "postgres", Port: 5432}}, ReverseProxy: &ReverseProxyTarget{Image: "traefik:v3", ACMEEmail: "ops@example"}, MicroSocks: &MicroSocksTarget{Server: true, Clients: []MicroSocksClientTarget{{ID: "api"}}}, Connectors: []TunnelConnectorTarget{{ID: "tunnel-b", TunnelID: "b"}, {ID: "tunnel-a", TunnelID: "a"}}}, Secrets{Apps: map[string]AppSecrets{"api": {JWTSecret: "CANARY_SECRET_DO_NOT_EXPOSE", RuntimeEnvironment: map[string]string{"SECRET": "CANARY_SECRET_DO_NOT_EXPOSE"}}, "web": {InitialAdminPassword: "bootstrap"}}, LocalDataServices: map[string]LocalDataServiceSecrets{"postgres": {AdminPassword: "admin"}, "redis": {AdminPassword: "admin"}}, ReverseProxy: &ReverseProxySecrets{DNSChallengeToken: "dns"}, MicroSocks: &MicroSocksSecrets{ServerPassword: "server"}, Connectors: map[string]TunnelConnectorSecrets{"tunnel-a": {Token: "a"}, "tunnel-b": {Token: "b"}}}
 }
 
 func mustRevision(t *testing.T, key RevisionKey, resource ResourceIdentity, target Target, secrets Secrets) string {

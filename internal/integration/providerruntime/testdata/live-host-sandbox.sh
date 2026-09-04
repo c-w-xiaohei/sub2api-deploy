@@ -1,0 +1,55 @@
+#!/bin/sh
+# Runs inside one test-owned Host network namespace and creates that Host's
+# private mount namespace. No path below /usr/local or /var/lib is touched on
+# the runner mount namespace.
+set -eu
+name=${1:?}
+root=${LIVE_ROOT:?}
+host=${LIVE_HOST_BINARY:?}
+images=${LIVE_IMAGE_ARCHIVE:?}
+log="$root/$name.private.log"
+mkdir -p "$root/$name" "$root/$name/run" "$root/$name/docker" "$root/$name/mount"
+mount --bind "$root/$name.machine-id" /etc/machine-id
+mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
+mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
+mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
+mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
+printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
+setsid dockerd --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
+dockerd=$!
+sshd=
+cleanup() {
+  status=$?
+  for pid in "$sshd" "$dockerd"; do
+    [ -n "$pid" ] || continue
+    kill -TERM "-$pid" 2>/dev/null || true
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 15 ]; do
+      sleep 1
+      i=$((i + 1))
+    done
+    kill -KILL "-$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  trap - EXIT INT TERM
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+i=0
+until docker info >/dev/null 2>&1; do
+  i=$((i + 1))
+  [ "$i" -lt 45 ] || exit 1
+  sleep 1
+done
+docker load --input "$images" >/dev/null 2>&1
+docker image inspect postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist >/dev/null 2>&1
+setsid /usr/sbin/sshd -D -e -f "$root/$name/sshd_config" >>"$log" 2>&1 &
+sshd=$!
+i=0
+until kill -0 "$sshd" 2>/dev/null; do
+  i=$((i + 1))
+  [ "$i" -lt 15 ] || exit 1
+  sleep 1
+done
+touch "$root/$name.ready"
+wait "$sshd"

@@ -36,7 +36,13 @@ func TestWithStagedStackStagesPrivateRenderedFileAndCleansUp(t *testing.T) {
 		stagedParent = parent
 		assertStagedStackDirectoryMode(t, parent)
 		assertStagedStackFileMode(t, stagedPath)
-		assertStagedStackParentContainsOnly(t, parent, filepath.Base(stagedPath))
+		assertStagedStackParentContainsOnly(t, parent, filepath.Base(stagedPath), "passphrase")
+		passphrasePath := filepath.Join(parent, "passphrase")
+		assertStagedStackFileMode(t, passphrasePath)
+		passphraseContents, err := os.ReadFile(passphrasePath)
+		if err != nil || string(passphraseContents) != stagePassphrase {
+			t.Fatalf("passphrase file contents = %q, err=%v", passphraseContents, err)
+		}
 
 		rendered, err := os.ReadFile(stagedPath)
 		if err != nil {
@@ -321,14 +327,19 @@ func assertStagedStackFileMode(t *testing.T, path string) {
 	}
 }
 
-func assertStagedStackParentContainsOnly(t *testing.T, parent, want string) {
+func assertStagedStackParentContainsOnly(t *testing.T, parent string, want ...string) {
 	t.Helper()
 	entries, err := os.ReadDir(parent)
 	if err != nil {
 		t.Fatal("could not read staged parent")
 	}
-	if len(entries) != 1 || entries[0].Name() != want {
-		t.Fatal("staged parent did not contain only final staged file")
+	if len(entries) != len(want) {
+		t.Fatal("staged parent did not contain the expected private files")
+	}
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries { seen[entry.Name()] = true }
+	for _, name := range want {
+		if !seen[name] { t.Fatalf("staged parent is missing %q", name) }
 	}
 }
 

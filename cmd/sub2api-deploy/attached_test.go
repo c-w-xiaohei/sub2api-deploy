@@ -173,6 +173,26 @@ func TestAttachedPulumiEnvUsesOnlyLastEffectiveDebugProviderValue(t *testing.T) 
 	}
 }
 
+func TestAttachedProviderEnvRemovesAllPulumiVariablesAndPreservesUnrelatedVariables(t *testing.T) {
+	env := attachedProviderEnv([]string{
+		"PULUMI_DEBUG_PROVIDERS=sub2api-host:1234",
+		"PULUMI_CONFIG_PASSPHRASE=secret",
+		"PULUMI_CONFIG_PASSPHRASE_FILE=/secret",
+		"PULUMI_ARBITRARY_CANARY=must-not-reach-provider",
+		"SUB2API_HOST_APPROVAL_FD=9",
+		"UNRELATED=value",
+	})
+	got := strings.Join(env, "\n")
+	for _, forbidden := range []string{"PULUMI_DEBUG_PROVIDERS=", "PULUMI_CONFIG_PASSPHRASE=", "PULUMI_CONFIG_PASSPHRASE_FILE=", "PULUMI_ARBITRARY_CANARY="} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("provider environment retained %q: %q", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "SUB2API_HOST_APPROVAL_FD=3") || !strings.Contains(got, "UNRELATED=value") {
+		t.Fatalf("provider environment lost approval or unrelated value: %q", got)
+	}
+}
+
 func TestRunAttachedFailsWhenProviderExitsAfterPublishingPortAndStopsPulumi(t *testing.T) {
 	paths := attachedHelperPaths(t)
 	directory := t.TempDir()

@@ -251,7 +251,7 @@ func readAttachedPort(reader *bufio.Reader) (string, error) {
 func attachedProviderEnv(env []string) []string {
 	result := make([]string, 0, len(env)+1)
 	for _, value := range env {
-		if !strings.HasPrefix(value, "SUB2API_HOST_APPROVAL_FD=") {
+		if !strings.HasPrefix(value, "SUB2API_HOST_APPROVAL_FD=") && !strings.HasPrefix(value, "PULUMI_") {
 			result = append(result, value)
 		}
 	}

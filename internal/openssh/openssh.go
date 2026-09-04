@@ -67,13 +67,20 @@ stage=%s
 lock=%s
 final=%s
 ok="$stage.ok"
-mkdir "$lock"
+command -v flock >/dev/null 2>&1
+command -v stat >/dev/null 2>&1
+if [ -L "$lock" ]; then exit 64; fi
+if [ -e "$lock" ] && [ ! -f "$lock" ]; then exit 64; fi
+exec 9>>"$lock"
+owner=$(id -u)
+[ -f /proc/self/fd/9 ]
+[ "$(stat -Lc '%%a:%%u:%%h' /proc/self/fd/9)" = "600:$owner:1" ]
+flock -n 9
 child=
 cancelled=
 interrupted=
 cleanup() {
   rm -f "$stage" "$ok"
-  rmdir "$lock"
 }
 stop() {
   cancelled=143
@@ -98,7 +105,7 @@ chmod 700 "$stage"
 if [ -L "$final" ]; then exit 64; fi
 if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
 set +e
-"$stage" install-attest </dev/null 3>"$ok" 4<&- >/dev/null 2>/dev/null
+"$stage" install-attest </dev/null 3>"$ok" 4<&- 9>&- >/dev/null 2>/dev/null
 status=$?
 set -e
 [ "$status" -eq 0 ]
@@ -109,7 +116,7 @@ printf %%s 'sub2api-bootstrap-attested-v1' | cmp -s "$ok" -
 if [ -L "$final" ]; then exit 64; fi
 if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
 mv -T -- "$stage" "$final"
-"$final" bootstrap-stdio <&4 4<&- &
+"$final" bootstrap-stdio <&4 4<&- 9>&- &
 child=$!
 exec 4<&-
 set +e

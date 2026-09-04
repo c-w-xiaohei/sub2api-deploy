@@ -116,11 +116,16 @@ func TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi(t *testing
 	for _, want := range []string{
 		"cwd=" + workdir,
 		"args=<up><--stack=production><--config-file=", "<--yes><--message=release>",
-		"fd3=no", "approval=", "passphrase=absent", "runtime=absent", "sops=absent",
+		"fd3=no",
+		"approval=",
 	} {
 		if !strings.Contains(data, want) {
 			t.Fatalf("Pulumi observation missing %q", want)
 		}
+	}
+	if got := pulumiRunRead(t, logs.providerEnv); got != "/\n" { t.Fatalf("provider received passphrase environment: %q", got) }
+	if data := pulumiRunRead(t, logs.pulumi); !strings.Contains(data, "debug=existing:123,sub2api-host:43123\n") || !strings.Contains(data, "passphrase-file=set\n") {
+		t.Fatalf("Pulumi did not receive required environment: %q", data)
 	}
 	staged := pulumiRunRead(t, logs.staged)
 	if bytes.Contains([]byte(staged), []byte(pulumiRunPassphrase)) || bytes.Contains([]byte(staged), []byte(pulumiRunRuntime)) {
@@ -233,7 +238,7 @@ func assertPulumiRunTextRedacted(t *testing.T, values ...string) {
 	}
 }
 
-type pulumiRunLogs struct { pulumi, staged, cleanup, providerStarted, stagedParent string }
+type pulumiRunLogs struct { pulumi, staged, cleanup, providerStarted, providerEnv, stagedParent string }
 
 type pulumiRunSource struct {
 	bytes   []byte
@@ -253,13 +258,15 @@ func pulumiRunFixture(t *testing.T, sopsOutput []byte, pulumiMode string) (strin
 	if err := os.WriteFile(source, sourceBytes, 0o600); err != nil { t.Fatal(err) }
 	beforeInfo, err := os.Lstat(source); if err != nil { t.Fatal(err) }
 	before := pulumiRunSource{bytes: append([]byte(nil), sourceBytes...), info: beforeInfo, manager: manager}
-	logs := pulumiRunLogs{pulumi: filepath.Join(logsDir, "pulumi"), staged: filepath.Join(logsDir, "staged"), cleanup: filepath.Join(logsDir, "cleanup"), providerStarted: filepath.Join(logsDir, "provider-started"), stagedParent: filepath.Join(logsDir, "staged-parent")}
+	logs := pulumiRunLogs{pulumi: filepath.Join(logsDir, "pulumi"), staged: filepath.Join(logsDir, "staged"), cleanup: filepath.Join(logsDir, "cleanup"), providerStarted: filepath.Join(logsDir, "provider-started"), providerEnv: filepath.Join(logsDir, "provider-env"), stagedParent: filepath.Join(logsDir, "staged-parent")}
 	writeAttachedExecutable(t, filepath.Join(bin, "sub2api-deploy"), "#!/bin/sh\nexit 0\n")
 	writeAttachedExecutable(t, filepath.Join(bin, "sops"), "#!/bin/sh\n[ \"$SOPS_AGE_KEY\" = '"+pulumiRunSOPSKey+"' ] || exit 24\nprintf '%s' '"+strings.ReplaceAll(string(sopsOutput), "'", "'\\''")+"'\n")
-	writeAttachedExecutable(t, filepath.Join(bin, "pulumi-resource-sub2api-host"), "#!/bin/sh\nif env | grep -q '"+pulumiRunSOPSKey+"'; then exit 25; fi\nprintf x > '"+logs.providerStarted+"'\nprintf '%s\\n' 43123\ncat <&3 >/dev/null\nprintf '%s\\n' closed > '"+logs.cleanup+"'\n")
-	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; esac; done\nprintf '\\nfd3=' >> '"+logs.pulumi+"'; if [ -e /proc/self/fd/3 ]; then printf yes >> '"+logs.pulumi+"'; else printf no >> '"+logs.pulumi+"'; fi\nprintf '\\napproval=%s\\n' \"$SUB2API_HOST_APPROVAL_FD\" >> '"+logs.pulumi+"'\nprintf 'passphrase=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunPassphrase+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\nprintf '\\nruntime=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunRuntime+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\nprintf '\\nsops=' >> '"+logs.pulumi+"'; if env | grep -q '"+pulumiRunSOPSKey+"'; then printf leaked >> '"+logs.pulumi+"'; else printf absent >> '"+logs.pulumi+"'; fi\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
+	writeAttachedExecutable(t, filepath.Join(bin, "pulumi-resource-sub2api-host"), "#!/bin/sh\nif env | grep -q '"+pulumiRunSOPSKey+"'; then exit 25; fi\nif env | grep -q '^PULUMI_'; then exit 27; fi\nprintf '%s/%s\\n' \"${PULUMI_CONFIG_PASSPHRASE+x}\" \"${PULUMI_CONFIG_PASSPHRASE_FILE+x}\" > '"+logs.providerEnv+"'\nprintf x > '"+logs.providerStarted+"'\nprintf '%s\\n' 43123\ncat <&3 >/dev/null\nprintf '%s\\n' closed > '"+logs.cleanup+"'\n")
+	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; esac; done\n[ -n \"$PULUMI_CONFIG_PASSPHRASE_FILE\" ] && [ \"$(cat \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = '"+pulumiRunPassphrase+"' ] && [ \"$(stat -c %a \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = 600 ] || exit 26\nprintf '\\nfd3=no\\napproval=\\ndebug=%s\\npassphrase-file=%s\\n' \"$PULUMI_DEBUG_PROVIDERS\" \"${PULUMI_CONFIG_PASSPHRASE_FILE:+set}\" >> '"+logs.pulumi+"'\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SOPS_AGE_KEY", pulumiRunSOPSKey)
+	t.Setenv("PULUMI_DEBUG_PROVIDERS", "existing:123")
+	t.Setenv("PULUMI_ARBITRARY_CANARY", "must-not-reach-provider")
 	return workdir, filepath.Join(bin, "sub2api-deploy"), source, before, logs
 }
 

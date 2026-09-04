@@ -1,0 +1,90 @@
+#!/bin/sh
+# CI-only outer launcher. It owns a bridge and distinct data/App/unauthorized
+# namespaces. Each Host starts a separate private mount namespace and Docker.
+set -eu
+
+root=${LIVE_ROOT:?}
+images=${LIVE_IMAGE_ARCHIVE:?}
+test_binary=${1:?}
+shift
+data_pid=
+app_pid=
+cleanup_failed=0
+
+stop_group() {
+  pid=$1
+  [ -n "$pid" ] || return 0
+  kill -TERM "-$pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "-$pid" 2>/dev/null || true
+    sleep 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    cleanup_failed=1
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+cleanup() {
+  status=$?
+  stop_group "$data_pid"
+  stop_group "$app_pid"
+  ip netns del "${LIVE_DATA_NS:?}" 2>/dev/null || true
+  ip netns del "${LIVE_APP_NS:?}" 2>/dev/null || true
+  ip netns del "${LIVE_UNAUTHORIZED_NS:?}" 2>/dev/null || true
+  ip link del "${LIVE_BRIDGE:?}" 2>/dev/null || true
+  trap - EXIT INT TERM
+  [ "$cleanup_failed" -eq 0 ] || exit 1
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+for binary in bash dockerd docker sshd ssh sudo nft ip psql redis-cli openssl unshare setsid; do
+  command -v "$binary" >/dev/null 2>&1 || exit 1
+done
+
+ip link add "${LIVE_BRIDGE:?}" type bridge
+ip addr add 10.252.0.1/24 dev "$LIVE_BRIDGE"
+ip link set "$LIVE_BRIDGE" up
+ip netns add "${LIVE_DATA_NS:?}"
+ip netns add "${LIVE_APP_NS:?}"
+ip netns add "${LIVE_UNAUTHORIZED_NS:?}"
+ip link add "${LIVE_DATA_VETH_OUT:?}" type veth peer name "${LIVE_DATA_VETH_IN:?}"
+ip link set "$LIVE_DATA_VETH_IN" netns "$LIVE_DATA_NS"
+ip link set "$LIVE_DATA_VETH_OUT" master "$LIVE_BRIDGE"
+ip link set "$LIVE_DATA_VETH_OUT" up
+ip -n "$LIVE_DATA_NS" addr add "$LIVE_DATA_IP/24" dev "$LIVE_DATA_VETH_IN"
+ip -n "$LIVE_DATA_NS" link set lo up
+ip -n "$LIVE_DATA_NS" link set "$LIVE_DATA_VETH_IN" up
+ip link add "${LIVE_APP_VETH_OUT:?}" type veth peer name "${LIVE_APP_VETH_IN:?}"
+ip link set "$LIVE_APP_VETH_IN" netns "$LIVE_APP_NS"
+ip link set "$LIVE_APP_VETH_OUT" master "$LIVE_BRIDGE"
+ip link set "$LIVE_APP_VETH_OUT" up
+ip -n "$LIVE_APP_NS" addr add "$LIVE_APP_IP/24" dev "$LIVE_APP_VETH_IN"
+ip -n "$LIVE_APP_NS" link set lo up
+ip -n "$LIVE_APP_NS" link set "$LIVE_APP_VETH_IN" up
+ip link add "${LIVE_BAD_VETH_OUT:?}" type veth peer name "${LIVE_BAD_VETH_IN:?}"
+ip link set "$LIVE_BAD_VETH_IN" netns "$LIVE_UNAUTHORIZED_NS"
+ip link set "$LIVE_BAD_VETH_OUT" master "$LIVE_BRIDGE"
+ip link set "$LIVE_BAD_VETH_OUT" up
+ip -n "$LIVE_UNAUTHORIZED_NS" addr add "$LIVE_BAD_IP/24" dev "$LIVE_BAD_VETH_IN"
+ip -n "$LIVE_UNAUTHORIZED_NS" link set lo up
+ip -n "$LIVE_UNAUTHORIZED_NS" link set "$LIVE_BAD_VETH_IN" up
+setsid ip netns exec "$LIVE_DATA_NS" unshare --mount --propagation private "$root/host-sandbox.sh" data &
+data_pid=$!
+setsid ip netns exec "$LIVE_APP_NS" unshare --mount --propagation private "$root/host-sandbox.sh" app &
+app_pid=$!
+i=0
+until [ -f "$root/data.ready" ] && [ -f "$root/app.ready" ]; do
+  i=$((i + 1))
+  [ "$i" -lt 60 ] || exit 1
+  sleep 1
+done
+
+"$test_binary" "$@"
+status=$?
+exit "$status"

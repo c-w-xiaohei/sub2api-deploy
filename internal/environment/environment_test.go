@@ -66,6 +66,21 @@ reverseProxy:
   dnsChallengeToken: dns-placeholder
 `
 
+const emptyTopologyConfig = `version: 1
+reverseProxy:
+  image: traefik:v3.3.3
+  acmeEmail: ops@example.com
+servers: {}
+postgres: {}
+redis: {}
+apps: {}
+`
+
+const emptyTopologySecrets = `revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+reverseProxy:
+  dnsChallengeToken: dns-placeholder
+`
+
 func TestParseAndValidateAcceptsValidEnvironment(t *testing.T) {
 	config, err := ParseConfig([]byte(validConfig))
 	if err != nil {
@@ -87,6 +102,55 @@ func TestParseAndValidateAcceptsValidEnvironment(t *testing.T) {
 	}
 	if validated.Postgres["main-db"].Port == nil || *validated.Postgres["main-db"].Port != 5432 || validated.Redis["main-cache"].Port == nil || *validated.Redis["main-cache"].Port != 6379 {
 		t.Fatalf("service defaults were not applied")
+	}
+}
+
+func TestValidateAcceptsExplicitlyEmptyTopology(t *testing.T) {
+	validated, err := Validate(mustParseConfig(t, emptyTopologyConfig), mustParseSecrets(t, emptyTopologySecrets))
+	if err != nil {
+		t.Fatalf("Validate rejected explicitly empty topology: %v", err)
+	}
+	if len(validated.ServerIDs) != 0 {
+		t.Fatalf("ServerIDs = %v, want no servers", validated.ServerIDs)
+	}
+}
+
+func TestValidateStillRequiresRevisionAndReverseProxySecretsForEmptyTopology(t *testing.T) {
+	for name, secrets := range map[string]string{
+		"revision key":  strings.Replace(emptyTopologySecrets, "revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=\n", "", 1),
+		"reverse proxy": strings.Replace(emptyTopologySecrets, "reverseProxy:\n  dnsChallengeToken: dns-placeholder\n", "", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Validate(mustParseConfig(t, emptyTopologyConfig), mustParseSecrets(t, secrets)); err == nil {
+				t.Fatalf("Validate accepted empty topology without %s", name)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsOmittedOrNullTopologyMaps(t *testing.T) {
+	for name, replacement := range map[string]string{
+		"omitted servers": "",
+		"null postgres":   "postgres: null\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := emptyTopologyConfig
+			if name == "omitted servers" {
+				input = strings.Replace(input, "servers: {}\n", replacement, 1)
+			} else {
+				input = strings.Replace(input, "postgres: {}\n", replacement, 1)
+			}
+			if _, err := Validate(mustParseConfig(t, input), mustParseSecrets(t, emptyTopologySecrets)); err == nil {
+				t.Fatalf("Validate accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsPartiallyEmptyTopology(t *testing.T) {
+	input := strings.Replace(emptyTopologyConfig, "servers: {}", "servers:\n  edge: {}", 1)
+	if _, err := Validate(mustParseConfig(t, input), mustParseSecrets(t, emptyTopologySecrets)); err == nil {
+		t.Fatal("Validate accepted topology with only servers configured")
 	}
 }
 
@@ -196,6 +260,63 @@ func TestValidateAllowsEmptyPlacementWithoutDockerServiceInternalAddress(t *test
 	app := validated.Apps["web-app"]
 	if app.Postgres.Name != "main-db" || app.Redis.Name != "main-cache" {
 		t.Fatalf("maintenance placement lost data links: %#v", app)
+	}
+}
+
+func TestValidateCanonicalizesAndRequiresACommonInternalAddressFamilyForRemoteDockerData(t *testing.T) {
+	config := strings.Replace(validConfig, "postgres:\n", "  Worker:\n    addresses:\n      internal:\n        ipv6: 2001:0db8::2\npostgres:\n", 1)
+	config = strings.Replace(config, "ipv4: 10.0.0.10", "ipv4: 10.0.0.1\n        ipv6: 2001:0db8::1", 1)
+	config = strings.Replace(config, "servers: [Edge_Box]", "servers: [Worker]", 1)
+	validated, err := Validate(mustParseConfig(t, config), mustParseSecrets(t, validSecrets))
+	if err != nil {
+		t.Fatalf("Validate rejected remote Docker data relation: %v", err)
+	}
+	if got, want := validated.Servers["Edge_Box"].Addresses.Internal.IPv6, "2001:db8::1"; got != want {
+		t.Fatalf("owner IPv6 = %q, want %q", got, want)
+	}
+	owner, client, err := CommonInternalAddress(validated.Config, "Edge_Box", "Worker")
+	if err != nil || owner != "2001:db8::1" || client != "2001:db8::2" {
+		t.Fatalf("CommonInternalAddress = %q, %q, %v", owner, client, err)
+	}
+
+	noCommon := strings.Replace(config, "ipv6: 2001:0db8::1", "", 1)
+	if _, err := Validate(mustParseConfig(t, noCommon), mustParseSecrets(t, validSecrets)); err == nil {
+		t.Fatal("Validate accepted remote Docker data relation without a common address family")
+	}
+}
+
+func TestValidateRejectsUnsafeInternalAddressesUsedAcrossHosts(t *testing.T) {
+	for name, address := range map[string]string{"mapped IPv6": "::ffff:10.0.0.2", "unspecified": "::", "loopback": "::1", "multicast": "ff02::1", "link local": "fe80::1"} {
+		t.Run(name, func(t *testing.T) {
+			config := strings.Replace(validConfig, "postgres:\n", "  Worker:\n    addresses:\n      internal:\n        ipv6: \""+address+"\"\npostgres:\n", 1)
+			config = strings.Replace(config, "ipv4: 10.0.0.10", "ipv6: 2001:db8::1", 1)
+			config = strings.Replace(config, "servers: [Edge_Box]", "servers: [Worker]", 1)
+			if _, err := Validate(mustParseConfig(t, config), mustParseSecrets(t, validSecrets)); err == nil {
+				t.Fatal("accepted unsafe cross-host internal address")
+			}
+		})
+	}
+}
+
+func TestValidateRejectsUnsafePostgresClientCredentials(t *testing.T) {
+	for name, replace := range map[string][2]string{
+		"reserved Docker role": {"username: sub2api", "username: s2h_client"},
+		"invalid Docker role":  {"username: sub2api", "username: app-user"},
+		"reserved database":    {"database: sub2api", "database: postgres"},
+		"DSN newline":          {"password: postgres-placeholder", "password: postgres\\npassword"},
+		"DSN leading quote":    {"password: postgres-placeholder", "password: \"'quoted\""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config, secrets := validConfig, validSecrets
+			if name == "reserved database" {
+				config = strings.Replace(config, replace[0], replace[1], 1)
+			} else {
+				secrets = strings.Replace(secrets, replace[0], replace[1], 1)
+			}
+			if _, err := Validate(mustParseConfig(t, config), mustParseSecrets(t, secrets)); err == nil {
+				t.Fatal("accepted invalid PostgreSQL client contract")
+			}
+		})
 	}
 }
 

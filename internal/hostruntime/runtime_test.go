@@ -7,8 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -121,16 +121,22 @@ func TestBootstrapInitializedHostWithoutJournalAcceptsFirstReleaseChange(t *test
 	}
 	calls, mutations := len(runner.calls), runner.mutations()
 	retry, err := rt.Bootstrap(t.Context(), request)
-	if err != nil || !reflect.DeepEqual(retry, result) || len(runner.calls) != calls || runner.mutations() != mutations { t.Fatalf("initialized successor retry = %#v, %v", retry, err) }
+	if err != nil || !reflect.DeepEqual(retry, result) || len(runner.calls) != calls || runner.mutations() != mutations {
+		t.Fatalf("initialized successor retry = %#v, %v", retry, err)
+	}
 }
-
 
 func TestBootstrapRejectsUnsafeNextOperationWithoutMutation(t *testing.T) {
 	for _, scenario := range []func(*State, *hostprotocol.Request){
 		func(state *State, request *hostprotocol.Request) { request.Resource.ServerKey = "other" },
-		func(state *State, request *hostprotocol.Request) { state.Machine.Value = "mid1:other"; state.Observation.Machine = state.Machine },
+		func(state *State, request *hostprotocol.Request) {
+			state.Machine.Value = "mid1:other"
+			state.Observation.Machine = state.Machine
+		},
 		func(_ *State, request *hostprotocol.Request) { request.PriorAppliedRevision = revisionC() },
-		func(state *State, _ *hostprotocol.Request) { state.Journal = &Journal{Key: reconcileKey(*state, revision()), Status: journalPending} },
+		func(state *State, _ *hostprotocol.Request) {
+			state.Journal = &Journal{Key: reconcileKey(*state, revision()), Status: journalPending}
+		},
 	} {
 		rt, state := initialized(t)
 		key := reconcileKey(state, revisionB())
@@ -175,6 +181,54 @@ func TestBootstrapRejectsInvalidMachineBeforeStateOrMutationWithoutSecretLeak(t 
 	}
 	if _, err := os.Lstat(rt.root); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid machine bootstrap created state root: %v", err)
+	}
+}
+
+func TestBootstrapRejectsPureRuntimeInputsBeforeIdentityDiscoveryOrRootCreation(t *testing.T) {
+	for name, mutate := range map[string]func(*hostprotocol.Request){
+		"unsafe environment": func(q *hostprotocol.Request) {
+			q.Target.Apps[0].RuntimeSettings = map[string]string{"SAFE": "bad\nvalue"}
+		},
+		"malformed redis user": func(q *hostprotocol.Request) {
+			q.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "cache", Type: "redis", Port: 6379, Clients: []hostcontract.LocalDataClient{{AppID: "one", Username: "bad-user", Database: "0"}}}}
+			q.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"cache": {AdminPassword: "ADMIN_SECRET", ClientPasswords: map[string]string{"one": "CLIENT_SECRET"}}}
+		},
+		"default redis user": func(q *hostprotocol.Request) {
+			q.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "cache", Type: "redis", Port: 6379, Clients: []hostcontract.LocalDataClient{{AppID: "one", Username: "default", Database: "0"}}}}
+			q.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"cache": {AdminPassword: "ADMIN_SECRET", ClientPasswords: map[string]string{"one": "CLIENT_SECRET"}}}
+		},
+		"noncanonical redis database": func(q *hostprotocol.Request) {
+			q.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "cache", Type: "redis", Port: 6379, Clients: []hostcontract.LocalDataClient{{AppID: "one", Username: "app_one", Database: "01"}}}}
+			q.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"cache": {AdminPassword: "ADMIN_SECRET", ClientPasswords: map[string]string{"one": "CLIENT_SECRET"}}}
+		},
+		"redis database out of range": func(q *hostprotocol.Request) {
+			q.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "cache", Type: "redis", Port: 6379, Clients: []hostcontract.LocalDataClient{{AppID: "one", Username: "app_one", Database: "16"}}}}
+			q.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"cache": {AdminPassword: "ADMIN_SECRET", ClientPasswords: map[string]string{"one": "CLIENT_SECRET"}}}
+		},
+		"missing redis client password": func(q *hostprotocol.Request) {
+			q.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "cache", Type: "redis", Port: 6379, Clients: []hostcontract.LocalDataClient{{AppID: "one", Username: "app_one", Database: "0"}}}}
+			q.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"cache": {AdminPassword: "ADMIN_SECRET"}}
+		},
+		"malformed service ID": func(q *hostprotocol.Request) {
+			q.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "bad/service", Type: "redis", Port: 6379}}
+			q.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"bad/service": {AdminPassword: "ADMIN_SECRET"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt := testRuntime(t)
+			runner := &recordingRunner{}
+			rt.runner = runner
+			request := bootstrapRequest()
+			request.Target.Apps = []hostcontract.AppTarget{app("one", "image")}
+			request.Secrets.Apps = map[string]hostcontract.AppSecrets{"one": {JWTSecret: "BOOTSTRAP_SECRET_CANARY"}}
+			mutate(&request)
+			if _, err := rt.Bootstrap(t.Context(), request); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) || len(runner.calls) != 0 || runner.hasSecret("BOOTSTRAP_SECRET_CANARY") || runner.hasSecret("ADMIN_SECRET") || runner.hasSecret("CLIENT_SECRET") {
+				t.Fatalf("bootstrap=%v calls=%#v", err, runner.calls)
+			}
+			if _, err := os.Lstat(rt.root); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid request created root: %v", err)
+			}
+		})
 	}
 }
 
@@ -331,12 +385,12 @@ func bootstrapMutation(argv []string) bool {
 
 type bootstrapDiscoveryRunner struct {
 	recordingRunner
-	kind            string
-	evidence        bool
-	emptyLabel      bool
-	discoveryErr    error
-	afterNetwork    func() error
-	discovery       map[string]bool
+	kind         string
+	evidence     bool
+	emptyLabel   bool
+	discoveryErr error
+	afterNetwork func() error
+	discovery    map[string]bool
 }
 
 func (r *bootstrapDiscoveryRunner) Run(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
@@ -500,8 +554,12 @@ func TestInspectExposesOnlyMatchingReconcileJournalEvidence(t *testing.T) {
 	approval := hostcontract.ApprovalSubject{Kind: hostcontract.ApprovalDataLink, Environment: state.Resource.Environment, Resource: state.Resource, AppID: "api", DataKind: "postgres", OldData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "old", Endpoint: "old", Port: 5432, Database: "app", TLSServerName: "old"}, NewData: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "new", Endpoint: "new", Port: 5432, Database: "app", TLSServerName: "new"}, TargetRevision: key.TargetRevision}
 	state.Journal = &Journal{Key: key, Status: journalPending, Approval: &approval}
 	raw, err := json.Marshal(state)
-	if err != nil { t.Fatal(err) }
-	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
 	inspect := hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource, TargetRevision: key.TargetRevision}
 	result, err := rt.Handle(t.Context(), inspect)
 	if err != nil || result.Status != hostprotocol.ResultInspected || result.OperationEvidence == nil || result.OperationEvidence.Key != key || result.OperationEvidence.Status != hostprotocol.OperationPending || !reflect.DeepEqual(result.OperationEvidence.Approval, &approval) || result.Observation == nil || result.Observation.Ready {
@@ -509,9 +567,10 @@ func TestInspectExposesOnlyMatchingReconcileJournalEvidence(t *testing.T) {
 	}
 	inspect.TargetRevision = revisionC()
 	result, err = rt.Handle(t.Context(), inspect)
-	if err != nil || result.OperationEvidence != nil { t.Fatalf("mismatched inspect evidence = %#v, %v", result, err) }
+	if err != nil || result.OperationEvidence != nil {
+		t.Fatalf("mismatched inspect evidence = %#v, %v", result, err)
+	}
 }
-
 
 func TestInspectExposesCompleteCurrentReconcileEvidence(t *testing.T) {
 	rt, state := initialized(t)
@@ -521,8 +580,12 @@ func TestInspectExposesCompleteCurrentReconcileEvidence(t *testing.T) {
 	complete := applied(key, state)
 	state.Journal = &Journal{Key: key, Status: journalComplete, Result: &complete}
 	raw, err := json.Marshal(state)
-	if err != nil { t.Fatal(err) }
-	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
 	result, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource, TargetRevision: key.TargetRevision})
 	if err != nil || result.OperationEvidence == nil || result.OperationEvidence.Key != key || result.OperationEvidence.Status != hostprotocol.OperationComplete || result.OperationEvidence.Approval != nil {
 		t.Fatalf("current complete evidence = %#v, %v", result, err)
@@ -538,10 +601,16 @@ func TestInspectNeverUsesRetireJournalAsOperationEvidence(t *testing.T) {
 	state.Journal = &Journal{Key: key, Status: journalComplete, Approval: &approval, Result: &result}
 	state.Retirement = &Retirement{Machine: state.Machine, Ownership: state.Ownership, PreserveData: true}
 	raw, err := json.Marshal(state)
-	if err != nil { t.Fatal(err) }
-	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rt.statePath(), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
 	got, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource, TargetRevision: key.TargetRevision})
-	if err != nil || got.Status != hostprotocol.ResultRetired || got.OperationEvidence != nil { t.Fatalf("retire inspect evidence = %#v, %v", got, err) }
+	if err != nil || got.Status != hostprotocol.ResultRetired || got.OperationEvidence != nil {
+		t.Fatalf("retire inspect evidence = %#v, %v", got, err)
+	}
 }
 
 func TestNextOperationReplacesTerminalAndRetireIsDurable(t *testing.T) {
@@ -982,7 +1051,9 @@ func testRuntime(t *testing.T) *Runtime {
 	if err := os.WriteFile(machine, []byte(testMachineID+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return New(filepath.Join(root, "state"), machine)
+	runtime := New(filepath.Join(root, "state"), machine)
+	runtime.nft = &recordingNFTRunner{}
+	return runtime
 }
 func resource() hostcontract.ResourceIdentity {
 	return hostcontract.ResourceIdentity{Environment: "production", ServerKey: "edge"}

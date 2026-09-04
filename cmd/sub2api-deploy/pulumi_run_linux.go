@@ -134,6 +134,7 @@ func runPulumiPlan(ctx context.Context, plan pulumiPlan, workdir, cliPath string
 	if err != nil {
 		return errInvalidPulumiInputs
 	}
+	values.hostImportTarget = plan.importTarget
 	project, err := workspace.LoadProject(filepath.Join(resolvedWorkdir, "Pulumi.yaml"))
 	if err != nil || string(project.Name) != "sub2api-environment" {
 		return errInvalidPulumiInputs
@@ -143,7 +144,8 @@ func runPulumiPlan(ctx context.Context, plan pulumiPlan, workdir, cliPath string
 		return errInvalidPulumiInputs
 	}
 	err = withStagedStack(ctx, project, filepath.Join(resolvedWorkdir, "Pulumi."+plan.environment+".yaml"), passphrase, values, func(stagedPath string) error {
-		return runAttachedIn(ctx, executables, resolvedWorkdir, plan.arguments(stagedPath), childEnv, stdout, stderr, decide)
+		pulumiEnv := append(childEnv, "PULUMI_CONFIG_PASSPHRASE_FILE="+filepath.Join(filepath.Dir(stagedPath), "passphrase"))
+		return runAttachedIn(ctx, executables, resolvedWorkdir, plan.arguments(stagedPath), pulumiEnv, stdout, stderr, decide)
 	})
 	if err != nil && errors.Is(err, errInvalidStagedStack) {
 		return errInvalidPulumiInputs

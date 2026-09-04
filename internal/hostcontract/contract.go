@@ -6,8 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -40,6 +43,7 @@ type DataIdentity struct {
 	Endpoint      string `json:"endpoint,omitempty"`
 	Port          int    `json:"port,omitempty"`
 	Database      string `json:"database,omitempty"`
+	TLSMode       string `json:"tlsMode"`
 	TLSServerName string `json:"tlsServerName,omitempty"`
 }
 type DataLink struct {
@@ -47,20 +51,32 @@ type DataLink struct {
 	Identity DataIdentity `json:"identity"`
 }
 type AppTarget struct {
-	ID               string            `json:"id"`
-	Image            string            `json:"image"`
-	Hostname         string            `json:"hostname"`
-	ReadinessPath    string            `json:"readinessPath"`
-	DrainTimeout     string            `json:"drainTimeout,omitempty"`
-	InitialBootstrap bool              `json:"initialBootstrap,omitempty"`
-	RuntimeSettings  map[string]string `json:"runtimeSettings,omitempty"`
-	DataLinks        []DataLink        `json:"dataLinks,omitempty"`
+	ID                string            `json:"id"`
+	Image             string            `json:"image"`
+	Hostname          string            `json:"hostname"`
+	ReadinessPath     string            `json:"readinessPath"`
+	DrainTimeout      string            `json:"drainTimeout,omitempty"`
+	InitialBootstrap  bool              `json:"initialBootstrap,omitempty"`
+	InitialAdminEmail string            `json:"initialAdminEmail"`
+	RuntimeSettings   map[string]string `json:"runtimeSettings,omitempty"`
+	DataLinks         []DataLink        `json:"dataLinks,omitempty"`
 }
 type LocalDataServiceTarget struct {
-	ID          string `json:"id"`
-	Type        string `json:"type"`
-	Port        int    `json:"port"`
-	Persistence bool   `json:"persistence,omitempty"`
+	ID          string             `json:"id"`
+	Type        string             `json:"type"`
+	Port        int                `json:"port"`
+	Persistence bool               `json:"persistence,omitempty"`
+	Bindings    []LocalDataBinding `json:"bindings,omitempty"`
+	Clients     []LocalDataClient  `json:"clients,omitempty"`
+}
+type LocalDataBinding struct {
+	Address        string   `json:"address"`
+	AllowedSources []string `json:"allowedSources,omitempty"`
+}
+type LocalDataClient struct {
+	AppID    string `json:"appId"`
+	Username string `json:"username"`
+	Database string `json:"database"`
 }
 type ReverseProxyTarget struct {
 	Image     string `json:"image"`
@@ -101,7 +117,8 @@ type AppSecrets struct {
 	Redis                *DataCredentials  `json:"redis,omitempty"`
 }
 type LocalDataServiceSecrets struct {
-	AdminPassword string `json:"adminPassword"`
+	AdminPassword   string            `json:"adminPassword"`
+	ClientPasswords map[string]string `json:"clientPasswords,omitempty"`
 }
 type ReverseProxySecrets struct {
 	DNSChallengeToken string `json:"dnsChallengeToken"`
@@ -284,6 +301,15 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 	for i := range target.Apps {
 		target.Apps[i].RuntimeSettings = copyStrings(target.Apps[i].RuntimeSettings)
 		target.Apps[i].DataLinks = append([]DataLink(nil), target.Apps[i].DataLinks...)
+		for j := range target.Apps[i].DataLinks {
+			if target.Apps[i].DataLinks[j].Identity.TLSMode == "" {
+				if target.Apps[i].DataLinks[j].Identity.Kind == "postgres" {
+					target.Apps[i].DataLinks[j].Identity.TLSMode = "require"
+				} else {
+					target.Apps[i].DataLinks[j].Identity.TLSMode = "disable"
+				}
+			}
+		}
 		sort.Slice(target.Apps[i].DataLinks, func(a, b int) bool { return target.Apps[i].DataLinks[a].Name < target.Apps[i].DataLinks[b].Name })
 	}
 	if target.MicroSocks != nil {
@@ -304,6 +330,26 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 		}
 	}
 	target.DataServices = append([]LocalDataServiceTarget(nil), target.DataServices...)
+	for i := range target.DataServices {
+		service := &target.DataServices[i]
+		service.Bindings = append([]LocalDataBinding(nil), service.Bindings...)
+		for j := range service.Bindings {
+			service.Bindings[j].AllowedSources = append([]string(nil), service.Bindings[j].AllowedSources...)
+			sort.Strings(service.Bindings[j].AllowedSources)
+			if len(service.Bindings[j].AllowedSources) == 0 {
+				service.Bindings[j].AllowedSources = nil
+			}
+		}
+		sort.Slice(service.Bindings, func(a, b int) bool { return service.Bindings[a].Address < service.Bindings[b].Address })
+		service.Clients = append([]LocalDataClient(nil), service.Clients...)
+		sort.Slice(service.Clients, func(a, b int) bool { return service.Clients[a].AppID < service.Clients[b].AppID })
+		if len(service.Bindings) == 0 {
+			service.Bindings = nil
+		}
+		if len(service.Clients) == 0 {
+			service.Clients = nil
+		}
+	}
 	sort.Slice(target.DataServices, func(i, j int) bool { return target.DataServices[i].ID < target.DataServices[j].ID })
 	sort.Slice(target.Connectors, func(i, j int) bool { return target.Connectors[i].ID < target.Connectors[j].ID })
 	if len(target.Apps) == 0 {
@@ -339,6 +385,12 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 		target.MicroSocks = nil
 	}
 	return target, secrets
+}
+
+// NormalizeTargetSecrets returns the canonical target/secrets representation used
+// by TargetRevision. Callers that persist or authenticate Host inputs must use it.
+func NormalizeTargetSecrets(target Target, secrets Secrets) (Target, Secrets) {
+	return normalize(target, secrets)
 }
 func copyStrings(values map[string]string) map[string]string {
 	if len(values) == 0 {
@@ -377,6 +429,7 @@ func copyLocalDataSecrets(values map[string]LocalDataServiceSecrets) map[string]
 	}
 	copy := make(map[string]LocalDataServiceSecrets, len(values))
 	for k, v := range values {
+		v.ClientPasswords = copyStrings(v.ClientPasswords)
 		copy[k] = v
 	}
 	return copy
@@ -399,7 +452,7 @@ func validate(target Target, secrets Secrets) error {
 	services := map[string]bool{}
 	connectors := map[string]bool{}
 	for _, a := range target.Apps {
-		if a.ID == "" || a.Image == "" || a.Hostname == "" || a.ReadinessPath == "" || apps[a.ID] {
+		if a.ID == "" || a.Image == "" || a.Hostname == "" || a.ReadinessPath == "" || !validEnvironmentLine(a.InitialAdminEmail) || apps[a.ID] {
 			return fmt.Errorf("app")
 		}
 		apps[a.ID] = true
@@ -416,6 +469,37 @@ func validate(target Target, secrets Secrets) error {
 			return fmt.Errorf("service")
 		}
 		services[s.ID] = true
+		bindings := map[string]bool{}
+		for _, binding := range s.Bindings {
+			if !validInternalAddress(binding.Address) || bindings[binding.Address] || len(binding.AllowedSources) == 0 {
+				return fmt.Errorf("service binding")
+			}
+			bindings[binding.Address] = true
+			sources := map[string]bool{}
+			for _, source := range binding.AllowedSources {
+				if !validInternalAddress(source) || sources[source] || !sameAddressFamily(binding.Address, source) {
+					return fmt.Errorf("service binding")
+				}
+				sources[source] = true
+			}
+		}
+		if secrets.LocalDataServices[s.ID].AdminPassword == "" {
+			return fmt.Errorf("service secret")
+		}
+		clients, usernames := map[string]bool{}, map[string]struct{ database, password string }{}
+		for _, client := range s.Clients {
+			if client.AppID == "" || client.Username == "" || client.Database == "" || clients[client.AppID] {
+				return fmt.Errorf("service client")
+			}
+			password := secrets.LocalDataServices[s.ID].ClientPasswords[client.AppID]
+			if s.Type == "postgres" && (!validPostgresIdentifier(client.Username) || !validPostgresDatabase(client.Database) || !validPostgresDSNPassword(password)) {
+				return fmt.Errorf("service client")
+			}
+			if previous, exists := usernames[client.Username]; exists && previous != (struct{ database, password string }{client.Database, password}) {
+				return fmt.Errorf("service client")
+			}
+			clients[client.AppID], usernames[client.Username] = true, struct{ database, password string }{client.Database, password}
+		}
 	}
 	for _, c := range target.Connectors {
 		if c.ID == "" || c.TunnelID == "" || connectors[c.ID] {
@@ -435,9 +519,41 @@ func validate(target Target, secrets Secrets) error {
 			return fmt.Errorf("app secret")
 		}
 	}
+	for _, secret := range secrets.Apps {
+		if secret.Postgres != nil && !validPostgresDSNPassword(secret.Postgres.Password) {
+			return fmt.Errorf("app secret")
+		}
+	}
 	for id := range secrets.LocalDataServices {
 		if !services[id] {
 			return fmt.Errorf("service secret")
+		}
+	}
+	for _, service := range target.DataServices {
+		secret := secrets.LocalDataServices[service.ID]
+		clientIDs := map[string]bool{}
+		for _, client := range service.Clients {
+			clientIDs[client.AppID] = true
+		}
+		for appID, password := range secret.ClientPasswords {
+			if !clientIDs[appID] || password == "" {
+				return fmt.Errorf("service secret")
+			}
+		}
+		for _, client := range service.Clients {
+			if secret.ClientPasswords[client.AppID] == "" {
+				return fmt.Errorf("service secret")
+			}
+		}
+	}
+	sockets := map[string]bool{}
+	for _, service := range target.DataServices {
+		for _, binding := range service.Bindings {
+			key := binding.Address + ":" + fmt.Sprint(service.Port)
+			if sockets[key] {
+				return fmt.Errorf("service socket")
+			}
+			sockets[key] = true
 		}
 	}
 	for id := range secrets.Connectors {
@@ -475,14 +591,53 @@ func validate(target Target, secrets Secrets) error {
 	}
 	return nil
 }
+
+var postgresIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+
+func validPostgresIdentifier(value string) bool {
+	return postgresIdentifierPattern.MatchString(value) && !strings.HasPrefix(value, "s2h_")
+}
+func validPostgresDatabase(value string) bool {
+	return postgresIdentifierPattern.MatchString(value) && value != "postgres" && value != "template0" && value != "template1"
+}
+func validPostgresDSNPassword(value string) bool {
+	if value == "" || !utf8.ValidString(value) || strings.HasPrefix(value, "'") || strings.ContainsAny(value, "\x00\r\n\\") {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
 func validateData(d DataIdentity) error {
 	if (d.Kind != "postgres" && d.Kind != "redis") || d.ProviderID == "" || d.Endpoint == "" || d.Port < 1 || d.Port > 65535 || d.Database == "" {
 		return fmt.Errorf("identity")
 	}
-	if d.Kind == "postgres" && d.TLSServerName == "" {
+	if d.TLSMode == "" {
+		d.TLSMode = "require"
+	}
+	if d.Kind == "postgres" && d.TLSMode != "disable" && d.TLSMode != "require" && d.TLSMode != "verify-ca" && d.TLSMode != "verify-full" {
+		return fmt.Errorf("identity")
+	}
+	if d.Kind == "postgres" && (d.TLSMode == "verify-ca" || d.TLSMode == "verify-full") && d.TLSServerName == "" {
+		return fmt.Errorf("identity")
+	}
+	if d.Kind == "postgres" && d.TLSMode == "disable" && d.TLSServerName != "" {
+		return fmt.Errorf("identity")
+	}
+	if d.Kind == "redis" && d.TLSMode != "disable" && d.TLSMode != "require" {
 		return fmt.Errorf("identity")
 	}
 	return nil
+}
+func validInternalAddress(value string) bool {
+	ip := net.ParseIP(value)
+	return ip != nil && ip.String() == value && !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
+}
+func sameAddressFamily(a, b string) bool {
+	return (net.ParseIP(a).To4() != nil) == (net.ParseIP(b).To4() != nil)
 }
 func validResource(r ResourceIdentity) bool {
 	return r.Environment != "" && r.ServerKey != "" && utf8.ValidString(r.Environment) && utf8.ValidString(r.ServerKey)
@@ -516,7 +671,7 @@ func validTargetStrings(v Target) bool {
 		return false
 	}
 	for _, a := range v.Apps {
-		if !valid(a.ID) || !valid(a.Image) || !valid(a.Hostname) || !valid(a.ReadinessPath) || !valid(a.DrainTimeout) {
+		if !valid(a.ID) || !valid(a.Image) || !valid(a.Hostname) || !valid(a.ReadinessPath) || !valid(a.DrainTimeout) || !valid(a.InitialAdminEmail) {
 			return false
 		}
 		for k, x := range a.RuntimeSettings {
@@ -534,6 +689,21 @@ func validTargetStrings(v Target) bool {
 		if !valid(s.ID) || !valid(s.Type) {
 			return false
 		}
+		for _, binding := range s.Bindings {
+			if !valid(binding.Address) {
+				return false
+			}
+			for _, source := range binding.AllowedSources {
+				if !valid(source) {
+					return false
+				}
+			}
+		}
+		for _, client := range s.Clients {
+			if !valid(client.AppID) || !valid(client.Username) || !valid(client.Database) {
+				return false
+			}
+		}
 	}
 	if v.ReverseProxy != nil && (!valid(v.ReverseProxy.Image) || !valid(v.ReverseProxy.ACMEEmail)) {
 		return false
@@ -547,6 +717,17 @@ func validTargetStrings(v Target) bool {
 	}
 	for _, c := range v.Connectors {
 		if !valid(c.ID) || !valid(c.TunnelID) {
+			return false
+		}
+	}
+	return true
+}
+func validEnvironmentLine(value string) bool {
+	if value == "" || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
 			return false
 		}
 	}
@@ -574,6 +755,11 @@ func validSecretStrings(v Secrets) bool {
 		if !valid(id) || !valid(s.AdminPassword) {
 			return false
 		}
+		for appID, password := range s.ClientPasswords {
+			if !valid(appID) || !valid(password) {
+				return false
+			}
+		}
 	}
 	if v.ReverseProxy != nil && !valid(v.ReverseProxy.DNSChallengeToken) {
 		return false
@@ -596,7 +782,7 @@ func validSecretStrings(v Secrets) bool {
 	return true
 }
 func validDataStrings(v DataIdentity) bool {
-	return utf8.ValidString(v.Kind) && utf8.ValidString(v.ProviderID) && utf8.ValidString(v.Endpoint) && utf8.ValidString(v.Database) && utf8.ValidString(v.TLSServerName)
+	return utf8.ValidString(v.Kind) && utf8.ValidString(v.ProviderID) && utf8.ValidString(v.Endpoint) && utf8.ValidString(v.Database) && utf8.ValidString(v.TLSMode) && utf8.ValidString(v.TLSServerName)
 }
 func canonicalJSON(v any) ([]byte, error)       { return json.Marshal(v) }
 func decodeCanonicalJSON(b []byte, v any) error { return json.Unmarshal(b, v) }

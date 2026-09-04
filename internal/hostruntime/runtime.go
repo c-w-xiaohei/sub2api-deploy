@@ -49,6 +49,7 @@ type Runtime struct {
 	expectedUID     int
 	expectedRootUID int
 	runner          commandRunner
+	nft             nftRunner
 }
 
 func New(root, machinePath string) *Runtime {
@@ -58,7 +59,7 @@ func New(root, machinePath string) *Runtime {
 	if machinePath == "" {
 		machinePath = defaultMachineID
 	}
-	return &Runtime{root: root, machinePath: machinePath, expectedUID: os.Geteuid(), expectedRootUID: os.Geteuid(), runner: execRunner{}}
+	return &Runtime{root: root, machinePath: machinePath, expectedUID: os.Geteuid(), expectedRootUID: os.Geteuid(), runner: execRunner{}, nft: execNFTRunner{}}
 }
 
 type State struct {
@@ -206,6 +207,9 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 		return hostprotocol.Result{}, operationFailed()
 	}
 	if _, err := hostcontract.ParseRevision(q.PriorAppliedRevision); err != nil {
+		return hostprotocol.Result{}, operationFailed()
+	}
+	if validateReconcileRequest(q) != nil {
 		return hostprotocol.Result{}, operationFailed()
 	}
 	machine, err := r.MachineIdentity()

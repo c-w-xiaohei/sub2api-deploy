@@ -1,18 +1,23 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
 )
 
 var errInvalidPulumiPlan = errors.New("invalid Pulumi command")
 
 type pulumiPlan struct {
-	operation   string
-	environment string
-	userArgs    []string
+	operation    string
+	environment  string
+	userArgs     []string
+	importTarget string
 }
 
 func (p pulumiPlan) arguments(configPath string) []string {
@@ -32,49 +37,104 @@ func parsePulumiPlan(argv []string) (pulumiPlan, error) {
 	}
 
 	plan := pulumiPlan{operation: argv[2], environment: argv[1], userArgs: append([]string(nil), argv[3:]...)}
-	afterSeparator, hasFileOption, positionalCount := false, false, 0
+	afterSeparator, positionalCount := false, 0
+	positionals := make([]string, 0, 3)
+	safeArgs := make([]string, 0, len(plan.userArgs))
 	for _, argument := range plan.userArgs {
 		if afterSeparator {
 			positionalCount++
+			positionals = append(positionals, argument)
 			continue
 		}
 		if argument == "--" {
 			afterSeparator = true
-			continue
+			continue // Separators are not needed after managed import positionals are removed.
 		}
 		if strings.HasPrefix(argument, "--") {
-			name, value, hasValue := strings.Cut(argument[2:], "=")
+			name, _, hasValue := strings.Cut(argument[2:], "=")
 			if pulumiUnsafeLongOption(name) {
 				return pulumiPlan{}, errInvalidPulumiPlan
 			}
 			if name == "file" {
-				if plan.operation != "import" || !hasValue || value == "" || hasFileOption {
-					return pulumiPlan{}, errInvalidPulumiPlan
-				}
-				hasFileOption = true
-				continue
+				return pulumiPlan{}, errInvalidPulumiPlan
 			}
 			if (name == "message" || name == "parallel" || name == "target") && !hasValue {
 				return pulumiPlan{}, errInvalidPulumiPlan
 			}
+			if name == "target" && !documentedPulumiTarget(argv[1], strings.TrimPrefix(argument, "--target=")) {
+				return pulumiPlan{}, errInvalidPulumiPlan
+			}
+			safeArgs = append(safeArgs, argument)
 			continue
 		}
 		if strings.HasPrefix(argument, "-") {
 			if !pulumiSafeShortOption(argument) {
 				return pulumiPlan{}, errInvalidPulumiPlan
 			}
+			safeArgs = append(safeArgs, argument)
 			continue
 		}
 		positionalCount++
+		positionals = append(positionals, argument)
 	}
 	if plan.operation == "import" {
-		if (hasFileOption && positionalCount != 0) || (!hasFileOption && positionalCount != 3) {
+		if positionalCount != 3 || positionals[0] != hostresource.HostToken || !strings.HasPrefix(positionals[1], "host-") {
 			return pulumiPlan{}, errInvalidPulumiPlan
 		}
+		target := strings.TrimPrefix(positionals[1], "host-")
+		if !environment.ValidID(target) || (positionals[2] != target && positionals[2] != hostStableID(plan.environment, target)) {
+			return pulumiPlan{}, errInvalidPulumiPlan
+		}
+		for _, argument := range safeArgs {
+			if strings.HasPrefix(argument, "--target=") {
+				return pulumiPlan{}, errInvalidPulumiPlan
+			}
+		}
+		plan.operation, plan.importTarget, plan.userArgs = "up", target, safeArgs
 	} else if positionalCount != 0 {
 		return pulumiPlan{}, errInvalidPulumiPlan
+	} else {
+		plan.userArgs = safeArgs
 	}
 	return plan, nil
+}
+
+// documentedPulumiTarget accepts safe current-stack URNs without owning Pulumi resource selection.
+func documentedPulumiTarget(environmentName, target string) bool {
+	parts := strings.Split(target, "::")
+	if len(parts) != 4 || parts[0] != "urn:pulumi:"+environmentName || parts[1] != "sub2api-environment" {
+		return false
+	}
+	for _, part := range parts[2:] {
+		if part == "" || containsControl(part) {
+			return false
+		}
+	}
+	typeParts := strings.Split(parts[2], ":")
+	if len(typeParts) != 3 {
+		return false
+	}
+	for _, part := range typeParts {
+		if part == "" || containsControl(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsControl(value string) bool {
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func hostStableID(environment, server string) string {
+	payload := "sub2api-host-resource-id-v1:" + strconv.Itoa(len(environment)) + ":" + environment + strconv.Itoa(len(server)) + ":" + server
+	sum := sha256.Sum256([]byte(payload))
+	return "host-" + hex.EncodeToString(sum[:])
 }
 
 func pulumiOperation(value string) bool {

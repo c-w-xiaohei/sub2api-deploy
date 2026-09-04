@@ -86,7 +86,7 @@ func (m *callerMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, erro
 	return nil, fmt.Errorf("unexpected Pulumi Call %q", args.Token)
 }
 
-func TestRegisterReadsConfigAndReleaseFromExecutableBundle(t *testing.T) {
+func TestProgramAcceptsSecretEnvironmentSecretsAndPublicEnvironmentConfig(t *testing.T) {
 	executable := writeBundle(t, validManifest(bundleRelease))
 	mocks := &callerMocks{}
 	err := runCaller(t, mocks, executable, map[string]string{

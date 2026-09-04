@@ -544,6 +544,34 @@ func TestBootstrapReceiverLockContentionAndFixedProductionPaths(t *testing.T) {
 	}
 }
 
+func TestBootstrapReceiverReusesUnlockedPersistentLockAndRejectsHeldLock(t *testing.T) {
+	dir := t.TempDir()
+	stage, final, lock := filepath.Join(dir, "stage"), filepath.Join(dir, "final"), filepath.Join(dir, "stage.lock")
+	if err := os.WriteFile(lock, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := attestedCandidate(t, "")
+	stdout, stderr, err := runBootstrapReceiver(stage, final, candidate, nil)
+	if err != nil || !bytes.Equal(stdout, successResponse(t)) || len(stderr) != 0 {
+		t.Fatalf("stale lock recovery = stdout %q stderr %q err %v", stdout, stderr, err)
+	}
+	info, err := os.Lstat(lock)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		t.Fatalf("persistent lock = %v, %v", info, err)
+	}
+	file, err := os.OpenFile(lock, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runBootstrapReceiver(stage, final, candidate, nil); err == nil {
+		t.Fatal("held install lock was accepted")
+	}
+}
+
 func runBootstrapReceiver(stage, final string, candidate []byte, request []byte) ([]byte, []byte, error) {
 	return runBootstrapReceiverWithEnv(stage, final, candidate, request, nil)
 }
@@ -618,11 +646,25 @@ func assertFinalCandidate(t *testing.T, final string, candidate []byte) {
 
 func assertReceiverCleanup(t *testing.T, stage string) {
 	t.Helper()
-	for _, path := range []string{stage, stage + ".lock", stage + ".ok"} {
+	for _, path := range []string{stage, stage + ".ok"} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("receiver retained %s: %v", path, err)
 		}
 	}
+	lock := stage + ".lock"
+	info, err := os.Lstat(lock)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		t.Fatalf("receiver lock = %v, %v", info, err)
+	}
+	file, err := os.OpenFile(lock, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open receiver lock: %v", err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("receiver retained lock: %v", err)
+	}
+	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
 
 func validRemoteError(t *testing.T) []byte {

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/sshcheck"
 	"gopkg.in/yaml.v3"
@@ -567,7 +569,9 @@ func Validate(config Config, secrets Secrets) (ValidatedConfig, error) {
 	if config.ReverseProxy.Image == "" || config.ReverseProxy.AcmeEmail == "" {
 		return ValidatedConfig{}, fmt.Errorf("reverseProxy.image and reverseProxy.acmeEmail are required")
 	}
-	if len(config.Servers) == 0 || len(config.Apps) == 0 || len(config.Postgres) == 0 || len(config.Redis) == 0 {
+	if config.Servers == nil || config.Postgres == nil || config.Redis == nil || config.Apps == nil ||
+		(len(config.Servers) > 0 || len(config.Postgres) > 0 || len(config.Redis) > 0 || len(config.Apps) > 0) &&
+			(len(config.Servers) == 0 || len(config.Postgres) == 0 || len(config.Redis) == 0 || len(config.Apps) == 0) {
 		return ValidatedConfig{}, fmt.Errorf("servers, postgres, redis, and apps are required")
 	}
 	for id := range config.Servers {
@@ -584,6 +588,7 @@ func Validate(config Config, secrets Secrets) (ValidatedConfig, error) {
 		if err := validateServer(server); err != nil {
 			return ValidatedConfig{}, fmt.Errorf("servers.%s: %w", id, err)
 		}
+		canonicalizeServerAddresses(&server)
 		config.Servers[id] = server
 	}
 	for id := range config.Postgres {
@@ -656,10 +661,10 @@ func validateServer(server Server) error {
 			if set.IPv4 == "" && set.IPv6 == "" {
 				return fmt.Errorf("addresses.%s must contain an address", name)
 			}
-			if set.IPv4 != "" && (net.ParseIP(set.IPv4) == nil || strings.Contains(set.IPv4, ":")) {
+			if set.IPv4 != "" && !validAddress(set.IPv4, true, name == "internal") {
 				return fmt.Errorf("addresses.%s.ipv4 is invalid", name)
 			}
-			if set.IPv6 != "" && (net.ParseIP(set.IPv6) == nil || !strings.Contains(set.IPv6, ":")) {
+			if set.IPv6 != "" && !validAddress(set.IPv6, false, name == "internal") {
 				return fmt.Errorf("addresses.%s.ipv6 is invalid", name)
 			}
 		}
@@ -673,6 +678,17 @@ func validateServer(server Server) error {
 		}
 	}
 	return nil
+}
+
+func validAddress(value string, ipv4, internal bool) bool {
+	ip := net.ParseIP(value)
+	if ip == nil || (ipv4 && (ip.To4() == nil || strings.Contains(value, ":"))) || (!ipv4 && (ip.To4() != nil || !strings.Contains(value, ":"))) {
+		return false
+	}
+	if !internal {
+		return true
+	}
+	return !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
 }
 
 func validateServices(config Config) error {
@@ -706,6 +722,10 @@ func validateServices(config Config) error {
 			}
 			if service.TLS != nil && service.TLS.Mode != "disable" && service.TLS.Mode != "require" && service.TLS.Mode != "verify-ca" && service.TLS.Mode != "verify-full" {
 				return fmt.Errorf("%s.tls.mode is invalid", name)
+			}
+			if service.TLS == nil {
+				service.TLS = &TLSConfig{Mode: "require"}
+				config.Postgres[id] = service
 			}
 			if service.Port == nil {
 				port := 5432
@@ -783,6 +803,11 @@ func validateServices(config Config) error {
 			if service.Port == nil {
 				port := 6379
 				service.Port = &port
+				config.Redis[id] = service
+			}
+			if service.TLS == nil {
+				value := false
+				service.TLS = &value
 				config.Redis[id] = service
 			}
 		case "upstash":
@@ -926,35 +951,26 @@ func validateCloudflareAccess(name string, access *CloudflareAccess) error {
 }
 
 func validateCrossServerAddresses(appID string, app App, config Config) error {
-	if len(app.Servers) == 0 {
-		return nil
-	}
-	servers := map[string]bool{}
-	for _, server := range app.Servers {
-		servers[server] = true
-	}
 	if service := config.Postgres[app.Postgres.Name]; service.Type == "docker" {
-		servers[service.Server] = true
-		if len(app.Servers) > 1 || !contains(app.Servers, service.Server) {
-			if err := requireInternalAddresses(servers, config); err != nil {
-				return fmt.Errorf("apps.%s PostgreSQL: %w", appID, err)
+		for _, server := range app.Servers {
+			if server != service.Server {
+				if _, _, err := CommonInternalAddress(config, service.Server, server); err != nil {
+					return fmt.Errorf("apps.%s PostgreSQL: %w", appID, err)
+				}
 			}
 		}
 	}
-	servers = map[string]bool{}
-	for _, server := range app.Servers {
-		servers[server] = true
-	}
 	if service := config.Redis[app.Redis.Name]; service.Type == "docker" {
-		servers[service.Server] = true
-		if len(app.Servers) > 1 || !contains(app.Servers, service.Server) {
-			if err := requireInternalAddresses(servers, config); err != nil {
-				return fmt.Errorf("apps.%s Redis: %w", appID, err)
+		for _, server := range app.Servers {
+			if server != service.Server {
+				if _, _, err := CommonInternalAddress(config, service.Server, server); err != nil {
+					return fmt.Errorf("apps.%s Redis: %w", appID, err)
+				}
 			}
 		}
 	}
 	if app.OutboundProxy != nil && app.OutboundProxy.Enabled {
-		servers = map[string]bool{}
+		servers := map[string]bool{}
 		for _, server := range app.Servers {
 			servers[server] = true
 		}
@@ -968,6 +984,46 @@ func validateCrossServerAddresses(appID string, app App, config Config) error {
 		}
 	}
 	return nil
+}
+
+// CommonInternalAddress selects the preferred shared address family for a
+// remote relation and returns owner then client addresses in canonical form.
+func CommonInternalAddress(config Config, owner, client string) (string, string, error) {
+	ownerAddresses := internalAddresses(config.Servers[owner])
+	clientAddresses := internalAddresses(config.Servers[client])
+	if ownerAddresses.ipv4 != "" && clientAddresses.ipv4 != "" {
+		return ownerAddresses.ipv4, clientAddresses.ipv4, nil
+	}
+	if ownerAddresses.ipv6 != "" && clientAddresses.ipv6 != "" {
+		return ownerAddresses.ipv6, clientAddresses.ipv6, nil
+	}
+	return "", "", fmt.Errorf("servers %q and %q require a common internal address family for cross-server connectivity", owner, client)
+}
+
+type internalAddressPair struct{ ipv4, ipv6 string }
+
+func internalAddresses(server Server) internalAddressPair {
+	if server.Addresses == nil || server.Addresses.Internal == nil {
+		return internalAddressPair{}
+	}
+	return internalAddressPair{server.Addresses.Internal.IPv4, server.Addresses.Internal.IPv6}
+}
+
+func canonicalizeServerAddresses(server *Server) {
+	if server.Addresses == nil {
+		return
+	}
+	for _, set := range []*AddressSet{server.Addresses.Public, server.Addresses.Internal} {
+		if set == nil {
+			continue
+		}
+		if set.IPv4 != "" {
+			set.IPv4 = net.ParseIP(set.IPv4).String()
+		}
+		if set.IPv6 != "" {
+			set.IPv6 = net.ParseIP(set.IPv6).String()
+		}
+	}
 }
 
 func requireInternalAddresses(servers map[string]bool, config Config) error {
@@ -1022,6 +1078,12 @@ func validateSecrets(config Config, secrets Secrets) error {
 			}
 		} else if secret.postgresSet {
 			return fmt.Errorf("apps.%s.postgres is forbidden for neon", id)
+		}
+		if secret.Postgres != nil && !validPostgresDSNPassword(secret.Postgres.Password) {
+			return fmt.Errorf("apps.%s.postgres.password is invalid for upstream DSN", id)
+		}
+		if pg.Type == "docker" && (!validPostgresIdentifier(secret.Postgres.Username) || !validPostgresDatabase(app.Postgres.Database)) {
+			return fmt.Errorf("apps.%s PostgreSQL Docker client identity is invalid", id)
 		}
 		redis := config.Redis[app.Redis.Name]
 		if redis.Type != "upstash" {
@@ -1086,6 +1148,26 @@ func validateSecrets(config Config, secrets Secrets) error {
 		}
 	}
 	return nil
+}
+
+var postgresIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+
+func validPostgresIdentifier(value string) bool {
+	return postgresIdentifierPattern.MatchString(value) && !strings.HasPrefix(value, "s2h_")
+}
+func validPostgresDatabase(value string) bool {
+	return postgresIdentifierPattern.MatchString(value) && value != "postgres" && value != "template0" && value != "template1"
+}
+func validPostgresDSNPassword(value string) bool {
+	if value == "" || !utf8.ValidString(value) || strings.HasPrefix(value, "'") || strings.ContainsAny(value, "\x00\r\n\\") {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateEnv(name string, values map[string]string, ordinary map[string]string) error {

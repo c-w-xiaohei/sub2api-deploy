@@ -1,230 +1,164 @@
-# Sub2API VPS Deployment
+# Sub2API Environment Controller
 
-This deployment manages one Host per Pulumi Stack. A Host has one shared Edge
-and an arbitrary map of isolated Sites. The Pulumi program is Go and is loaded
-from the prebuilt `bin/pulumi-program`; `pulumi preview` and `pulumi up` run on
-the VPS itself, use `command.local.Command`, and invoke the local Docker Compose
-CLI. This project does not use SST, a remote Docker daemon, the Pulumi Docker
-provider, a Tunnel, Kubernetes, weighted canaries, or a hosted deployment
-bridge.
+`sub2api-deploy` is a controller-side thin wrapper around standard Pulumi
+operations. Pulumi remains the only graph, checkpoint, retry, and state engine:
+the CLI does not store a plan or run a removal workflow for you.
 
-## Release Bundle
+## Capability Boundary
 
-Download the release bundle for the VPS architecture. Each release contains
-the matching Linux `pulumi-program` binary, the bundled Pulumi runtime helpers,
-and the complete Edge/Site/host lifecycle files:
+Cross-Host Docker PostgreSQL and Redis are implementation-present and
+CI-evidence-pending: a data Host derives its admission policy from App
+placement, and the Program orders data admission, App readiness, then
+Cloudflare publication. Use the workflow below, but do not treat this as
+production-proven until the Task 4 exact-SHA gates pass. Local data remains
+supported too. Neon, MicroSocks, Tunnel Connector, production migration/cutover,
+and a published production release remain separate gaps. This does not claim
+that the original 001 product is complete.
 
-```bash
-VERSION=v0.2.0
-ARCH=amd64 # use arm64 for an ARM VPS
-gh release download "$VERSION" \
-  --pattern "sub2api-vps-deploy-${VERSION}-linux-${ARCH}.tar.gz" \
-  --dir /tmp
-tar -xzf "/tmp/sub2api-vps-deploy-${VERSION}-linux-${ARCH}.tar.gz"
-cd "sub2api-vps-deploy-${VERSION}-linux-${ARCH}"
-npm ci
-cp Pulumi.production.example.yaml Pulumi.production.yaml
-${EDITOR:-vi} Pulumi.production.yaml
-./bin/pulumi stack init production
+## Environment Input
+
+Keep plaintext desired configuration in `environments/production/config.yaml`.
+Keep `environments/production/secrets.yaml` encrypted with SOPS; it contains
+the Pulumi passphrase, revision key, service admin passwords, and only each
+App's scoped credentials. Do not put a firewall or allowlist field in either
+file: the data Host derives source admission from data ownership and App
+placement.
+
+```yaml
+# environments/production/config.yaml
+version: 1
+reverseProxy:
+  image: traefik@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  acmeEmail: ops@example.com
+servers:
+  data-one:
+    sshAlias: production-data-one
+    addresses:
+      internal: {ipv4: 10.42.0.10}
+  api-one:
+    sshAlias: production-api-one
+    addresses:
+      public: {ipv4: 203.0.113.21}
+      internal: {ipv4: 10.42.0.21}
+  api-two:
+    sshAlias: production-api-two
+    addresses:
+      public: {ipv4: 203.0.113.22}
+      internal: {ipv4: 10.42.0.22}
+postgres:
+  primary: {type: docker, server: data-one}
+redis:
+  primary: {type: docker, server: data-one}
+apps:
+  api:
+    hostname: api.example.com
+    image: ghcr.io/example/sub2api@sha256:2222222222222222222222222222222222222222222222222222222222
+    initialAdminEmail: admin@example.com
+    readinessPath: /healthz
+    drainTimeout: 30s
+    servers: [api-one, api-two]
+    postgres: {name: primary, database: sub2api}
+    redis: {name: primary, database: 0}
+    publicAccess:
+      type: cloudflare
+      servers: [api-one, api-two]
+      cloudflare: {mode: dns, connectBy: publicAddress}
+cloudflare:
+  zoneId: replace-with-zone-id
 ```
 
-The released archive names are
-`sub2api-vps-deploy-${VERSION}-linux-amd64.tar.gz` and
-`sub2api-vps-deploy-${VERSION}-linux-arm64.tar.gz`. Their checksum files are
-the corresponding `.tar.gz.sha256` files. The bundle includes `bin/go`, a
-metadata-only compatibility shim used by Pulumi's Go language host, and
-`bin/pulumi`, which invokes the installed Pulumi CLI with the bundle on
-`PATH`. Go itself is not required on the VPS.
+The App refers to the ordinary `primary` service names, not IP addresses. The
+derived runtime uses the data Host's internal address. A corresponding SOPS
+plaintext editing shape is:
 
-Before using a real Stack, run the offline checks on a build machine. They are
-not production operations:
-
-```bash
-go test ./...
-go vet ./...
-go build -o /tmp/sub2api-pulumi-go ./infra
-npm test
-npm run build
+```yaml
+# environments/production/secrets.yaml, encrypt this file with SOPS
+pulumiPassphrase: replace-before-encrypting
+revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+apps:
+  api:
+    initialAdminPassword: replace-before-encrypting
+    jwtSecret: replace-before-encrypting
+    totpEncryptionKey: replace-before-encrypting
+    postgres: {username: sub2api, password: replace-before-encrypting}
+    redis: {username: default, password: replace-before-encrypting}
+postgres:
+  primary: {adminPassword: replace-before-encrypting}
+redis:
+  primary: {adminPassword: replace-before-encrypting}
+reverseProxy: {dnsChallengeToken: replace-before-encrypting}
+cloudflare: {apiToken: replace-before-encrypting}
 ```
 
-## Host And Sites
+Encrypt that file with the repository's approved SOPS recipient policy, then
+run `sub2api-deploy validate production`. The CLI decrypts it only for the
+short-lived staged Pulumi stack; do not commit plaintext secrets.
 
-The public Pulumi configuration exposes exactly four structured objects:
+## Addition And Removal
 
-| Object | Purpose |
-| --- | --- |
-| `edge` | The shared public edge for this Host |
-| `sites` | The map of independent Site declarations |
-| `edgeSecrets` | Encrypted credentials used only by the shared Edge |
-| `siteSecrets` | Encrypted credentials keyed by Site ID |
-
-Do not add flat top-level keys. Runtime directories, Compose project names,
-network names, route paths, blue/green slots, and network aliases are derived
-from the Host/Site declarations and are not configuration inputs. `resourcePrefix`
-is also omitted from the ordinary example so the Site ID remains the naming
-boundary by default.
-
-One Stack is one Host. The shared Edge owns public ports `80` and `443`, ACME,
-the `sub2api-edge` Compose project, Cloudflare Edge resources, and sing-box TCP
-passthrough. Each Site owns its application, data-mode wiring, runtime, and
-route in an isolated layout. A Site's domain must be unique on the Host.
-
-Traefik is the sole public listener on ports `80` and `443`. HTTPS requests for
-each configured Site domain terminate at Traefik and route to that Site's
-active blue/green slot. TLS with SNI `www.cloudflare.com` passes through
-unchanged to sing-box at `host.docker.internal:8443`.
-
-Before the first `pulumi up`, migrate the existing sing-box listener from
-`0.0.0.0:443` to host port `8443` and verify it is listening there. This is an
-explicit host operation outside Pulumi; the deployment does not edit, stop, or
-restart sing-box. Do not start the Edge while sing-box still owns public `443`.
-
-## Structured Configuration
-
-Copy `Pulumi.production.example.yaml` and edit ordinary values in its `edge`
-and `sites` objects. Every Site requires `domain`, an immutable `image` in the
-form `name@sha256:<64 lowercase hexadecimal characters>`, `adminEmail`, and an
-application `appProbePath` other than `/health`. Site images must remain
-immutable digests. The shared Edge Traefik image is the intentional exception:
-`edge.traefikImage` may use a stable version tag such as `traefik:v3.3.3`.
-Database and Redis modes are selected inside each Site. The current host
-remains resource-constrained even for two low-traffic Sites.
-
-Optional application settings belong in the encrypted `siteSecrets.<site>.appEnv`
-object. Keys may be arbitrary valid application dotenv names, including
-provider-specific settings, but deployment, Compose control, data-service,
-slot, path, probe, and image keys are rejected. Values are rendered only to
-that Site's `app.env`; they are not part of `runtime.env` or public Stack data.
-
-The `edge` object contains `originIp`, `cloudflareZoneId`, `acmeEmail`,
-`traefikImage`, and `singBox.serverName`/`target`. A Site may contain
-`database.mode` (`docker` or `neon`), `database.resourceMode`, and for managed
-Neon `database.region` and the `database.compute` fields. Neon defaults are
-`aws-us-east-1`, `minCU=0.25`, `maxCU=0.25`, and
-`suspendTimeoutSeconds=300`; explicit values override them. Managed Neon
-creates or finds the deterministic project through the local command API
-resource and sends Neon API `region_id` on creation. Existing projects with a
-mismatched region fail closed without a POST. Legacy code2 continues to use
-the retained native provider project and validates its region. Redis uses
-`redis.mode` (`docker` or `upstash`), `redis.resourceMode`, and the ordinary
-connection fields required by the selected external mode. Do not configure generated runtime, project, network,
-route, slot, or alias values.
-
-Managed Neon state contains only project ID, name, region, and the authoritative
-endpoint host. The API-backed command revalidates persisted IDs against Neon on
-every invocation and writes state atomically under a restrictive lock. Connection
-credentials are fetched separately through Neon’s `connection_uri` API as a
-secret command output; they are never written to project state or logged.
-Removing a managed Site has no delete workflow and intentionally leaves the
-protected Neon project orphaned; ordinary reconciliation never deletes it.
-
-Do not put credentials, tokens, DSNs, or passwords in YAML. Set the encrypted
-secret objects as JSON supplied by a protected shell environment or secure
-input. Do not print those JSON values in shell history or logs:
+For an addition, change `config.yaml` to its final additive placement and run:
 
 ```bash
-./bin/pulumi config set --secret edgeSecrets "$EDGE_SECRETS_JSON"
-./bin/pulumi config set --secret siteSecrets "$SITE_SECRETS_JSON"
+sub2api-deploy pulumi production preview
+sub2api-deploy pulumi production up --yes
 ```
 
-`edgeSecrets` requires `cloudflareApiToken`. Every `siteSecrets.<siteId>`
-requires `adminPassword`, `jwtSecret`, and `totpEncryptionKey`. Add only the
-mode-specific fields below:
+This is one normal Pulumi update: it adds data-source admission before App
+readiness and publication. A mixed move is also additive first: write an
+intermediate configuration with the old and destination App Hosts, run the
+full `preview` and `up`, then write the final configuration and perform the
+removal checkpoints below.
 
-| Site mode | Ordinary Site fields | Encrypted `siteSecrets.<siteId>` field |
-| --- | --- | --- |
-| PostgreSQL `docker` | `database.mode: docker` | `database.password` |
-| Neon `existing` | `database.mode: neon`, `database.resourceMode: existing` | `database.dsn` |
-| Neon `create` | `database.mode: neon`, `database.resourceMode: create` | `database.apiToken` |
-| Redis `docker` | `redis.mode: docker` | `redis.password` |
-| Upstash `existing` | `redis.mode: upstash`, `redis.resourceMode: existing`, `redis.endpoint` | `redis.password` |
-| Upstash `create` | `redis.mode: upstash`, `redis.resourceMode: create`, optional `redis.region` | `redis.apiKey` |
-
-For `neon` and `upstash`, `resourceMode: existing` does not manage the
-provider resource lifecycle. `create` lets Pulumi manage the selected
-namespaced resource. Managed Neon and Upstash resources are protected and
-retained when a Site is removed or renamed. Such changes fail closed; do not
-unprotect or manually delete provider resources as a workaround. Use a
-separately approved retirement workflow if data retirement is actually needed.
-
-Inspect state without `--show-secrets`, then review the complete change before
-applying it:
+For a pure removal, first write the final canonical config. Complete each
+command before starting the next; every command is safely rerunnable through
+Pulumi checkpoints and the existing Host journal.
 
 ```bash
-./bin/pulumi stack export > /tmp/sub2api-stack.json
-./bin/pulumi preview
-./bin/pulumi up
+# 1. Detach each affected publication record.
+sub2api-deploy pulumi production up --target=urn:pulumi:production::sub2api-environment::cloudflare:index/dnsRecord:DnsRecord::dns-api-api-one-A --yes
+sub2api-deploy pulumi production up --target=urn:pulumi:production::sub2api-environment::cloudflare:index/dnsRecord:DnsRecord::dns-api-api-two-A --yes
+
+# 2. Stop each old consumer in reverse data/App DAG order.
+sub2api-deploy pulumi production up --target=urn:pulumi:production::sub2api-environment::sub2api-host:index:Host::host-api-two --yes
+sub2api-deploy pulumi production up --target=urn:pulumi:production::sub2api-environment::sub2api-host:index:Host::host-api-one --yes
+
+# 3. Reconcile the remaining graph; the data Host can now revoke old sources.
+sub2api-deploy pulumi production up --yes
 ```
 
-## Adding A Site
+The wrapper preserves generic safe `--target` support, but each target must be
+an exact current-stack/current-project URN:
+`urn:pulumi:production::sub2api-environment::<package>:<module>:<member>::<logical-name>`.
+Malformed, empty, control-character, other-stack, and other-project targets
+fail closed. This removal path documents only the actual Program resources:
+Cloudflare DNS `A`/`AAAA` records named `dns-<app>-<server>-A|AAAA` and Host
+resources named `host-<server-key>`. Do not use `--target` as a substitute for
+the full final checkpoint. These stages are not atomic cross-Host transactions;
+inspect the checkpoint and retry the same normal command after a failure.
 
-Adding a Site is one Stack configuration change. Add the new Site entry to the
-existing `sites` object, add its matching `siteSecrets` entry with an encrypted
-object command, and review one preview before applying one update:
+To retire a server, keep it configured while detaching its publication and
+removing its Apps by the sequence above. Only after its target is drained,
+remove the server from `config.yaml`, run a full `up`, and complete the
+existing preserve-data retirement approval. Do not remove a data Host while
+any consumer still refers to its service.
+
+## Production Prerequisites
+
+Production operators must provide root or non-interactive `sudo` access needed
+by the Host lifecycle, rootful Docker, and nftables support. Internal Host
+addresses must be genuine routed private connectivity between the Hosts.
+The implementation installs an owned nftables policy before Docker DNAT and
+uses internal-network anti-spoofing assumptions to admit only derived consumer
+sources. These are deployment prerequisites, not inferred guarantees: verify
+routing, source-address integrity, Docker behavior, nftables availability, and
+least-privilege sudo policy in the production environment before cutover.
+
+## Managed Import
 
 ```bash
-${EDITOR:-vi} Pulumi.production.yaml
-./bin/pulumi config set --secret siteSecrets "$SITE_SECRETS_JSON"
-./bin/pulumi preview
-./bin/pulumi up
+sub2api-deploy pulumi production import sub2api-host:index:Host host-edge edge
 ```
 
-Do not duplicate or edit the release bundle for each Site. The shared Edge and
-Site templates/scripts are assembled once and the Stack derives the additional
-Site runtime, project, route, slot, and alias values. Site bootstrap and release
-mutations are serialized: do not initiate bootstrap or release for multiple
-Sites concurrently. Sites with the same image digest share Docker layers, but
-two low-traffic Sites on the current Host are still resource-constrained.
-
-## Code2 Adoption Boundary
-
-Adopting the existing single-Site layout into the Host/Site architecture is a
-distinct, separately approved maintenance-window operation. Follow
-`docs/migrations/single-site-to-multi-site.md`; it is not ordinary Pulumi
-configuration and does not migrate Cloudflare, Neon, Upstash, PostgreSQL,
-Redis, volumes, or runtime data.
-
-Do not add `code3` until code2 adoption has completed and its state preview,
-reviewed update, direct-origin/public health, sing-box passthrough evidence,
-and journal retirement are complete. Keep the code2 application image digest
-unchanged throughout architecture adoption. Application image updates are a
-later, separately reviewed operation after adoption evidence is complete.
-
-## Image Updates And Rollback
-
-Change the relevant Site's `image` to another immutable `@sha256:` digest and
-run a reviewed `pulumi preview` followed by `pulumi up`. Pulumi starts the
-inactive blue/green slot, waits for container health and the configured
-application probe, atomically updates that Site's route, validates public
-HTTPS, drains briefly, and stops the old slot. This is simple slot switching,
-not weighted canary deployment. `scripts/rollback-slot.sh` uses the recorded
-prior digest and slot; it does not roll back database migrations or Redis
-state.
-
-Changing a database or Redis mode after first deployment does not migrate data.
-It fails before runtime rewrite, local service mutation, slot start, or route
-change. Perform an explicit, approved data migration outside ordinary `pulumi
-up`.
-
-`pulumi destroy` is not a production data recovery operation. Do not use it
-against retained database resources, volumes, or a production Stack without an
-explicit backup and recovery plan. This documentation provides no manual
-deletion procedure for Host state, Docker objects, volumes, databases, Redis,
-or provider resources.
-
-## Offline Verification
-
-The project can be checked without contacting Cloudflare, Neon, Upstash, a VPS,
-or creating cloud resources:
-
-```bash
-go test ./...
-go vet ./...
-go build -o /tmp/sub2api-pulumi-go ./infra
-npm test
-npm run build
-bash -n scripts/*.sh
-bash scripts/validate-compose.sh
-```
-
-Do not run `pulumi up` against a real Stack as part of offline verification.
+The release inventory is `bin/sub2api-deploy`, `bin/pulumi-program`,
+`bin/pulumi-resource-sub2api-host`, Pulumi wrappers, Host Runtime artifacts for
+Linux amd64 and arm64, and public Pulumi and Go metadata files.
