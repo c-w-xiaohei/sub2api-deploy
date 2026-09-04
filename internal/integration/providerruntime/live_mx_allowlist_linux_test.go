@@ -75,31 +75,39 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 		t.Fatal("isolated live root is required")
 	}
 	t.Cleanup(func() { fixture.cleanupNamespace(t) })
+	reportLiveStage("namespace-prerequisites")
 	fixture.requireImages(t)
 	fixture.addForeignSentinel(t)
 	foreignBefore := fixture.nftDigest(t, fixture.foreignTable)
 
+	reportLiveStage("provider-start")
 	provider := startLiveProvider(t, artifacts.provider)
 	t.Cleanup(func() { provider.close(t) })
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
+	reportLiveStage("provider-configure")
 	if _, err := provider.client.Configure(ctx, &pulumirpc.ConfigureRequest{Args: rpcProperties(t, property.NewMap(map[string]property.Value{"revisionKey": property.New(ciKey).WithSecret(true)}))}); err != nil {
 		t.Fatal("released Provider configure failed")
 	}
 	dataInput := liveDataInputs(artifacts.release, fixture.dataIP, fixture.appIP)
+	reportLiveStage("data-create")
 	dataCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::data", Properties: rpcProperties(t, dataInput)})
 	if err != nil || dataCreated == nil || dataCreated.Id == "" {
 		t.Fatal("released Provider Create failed")
 	}
+	reportLiveStage("data-ready-check")
 	dataHostPass := fixture.createReady(t, dataCreated, dataInput, liveMachineIdentity("data"), artifacts.release, []hostcontract.AppObservation{}, true)
 	fixture.recordOwnedTable(t, "data")
 	appInput := liveAppInputs(artifacts.release, fixture.dataIP)
+	reportLiveStage("app-create")
 	appCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::app", Properties: rpcProperties(t, appInput)})
 	if err != nil || appCreated == nil || appCreated.Id == "" {
 		t.Fatal("released App Host Create failed")
 	}
+	reportLiveStage("app-ready-check")
 	appHostPass := fixture.createReady(t, appCreated, appInput, liveMachineIdentity("app"), artifacts.release, []hostcontract.AppObservation{{ID: "api", ActiveImage: "sub2api-live-app:mx-allowlist", Ready: true}}, false)
 
+	reportLiveStage("post-create-assertions")
 	postgresPass := fixture.postgresClient(t, fixture.appNS, "LivePgClient_123")
 	postgresWrongPasswordDenied := fixture.postgresClientFails(t, fixture.appNS, "wrong-password")
 	postgresCatalog := fixture.postgresCatalog(t)
@@ -149,6 +157,7 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	if !allChecksPass {
 		t.Fatal("live MX-ALLOWLIST-01 assertion failed")
 	}
+	reportLiveStage("complete")
 }
 
 type liveArtifacts struct {
@@ -906,8 +915,70 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 	if ctx.Err() != nil {
 		return "timeout"
 	}
+	knownStages := map[string]bool{
+		"network-setup":           true,
+		"sandbox-start":           true,
+		"data-mount-setup":        true,
+		"data-docker-start":       true,
+		"data-image-load":         true,
+		"data-sshd-start":         true,
+		"app-mount-setup":         true,
+		"app-docker-start":        true,
+		"app-image-load":          true,
+		"app-sshd-start":          true,
+		"sandboxes-ready":         true,
+		"namespace-prerequisites": true,
+		"provider-start":          true,
+		"provider-configure":      true,
+		"data-create":             true,
+		"data-ready-check":        true,
+		"app-create":              true,
+		"app-ready-check":         true,
+		"post-create-assertions":  true,
+		"complete":                true,
+	}
+	lastStage := ""
+	for _, line := range strings.Split(string(output), "\n") {
+		stage, found := strings.CutPrefix(line, "SUB2API_LIVE_STAGE=")
+		if found && knownStages[stage] {
+			lastStage = stage
+		}
+	}
+	if lastStage != "" {
+		return lastStage
+	}
 	if len(output) == 0 {
 		return "exit"
 	}
 	return "isolated-fixture-exit"
+}
+
+func reportLiveStage(stage string) {
+	_, _ = os.Stderr.WriteString("SUB2API_LIVE_STAGE=" + stage + "\n")
+}
+
+func TestLiveFailureCategoryReportsOnlyKnownLastStage(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{name: "empty", want: "exit"},
+		{name: "unknown marker", output: "SUB2API_LIVE_STAGE=credential-canary\n", want: "isolated-fixture-exit"},
+		{name: "known marker", output: "SUB2API_LIVE_STAGE=data-create\n", want: "data-create"},
+		{name: "last known marker", output: "SUB2API_LIVE_STAGE=network-setup\nSUB2API_LIVE_STAGE=app-ready-check\n", want: "app-ready-check"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := liveFailureCategory(context.Background(), []byte(test.output)); got != test.want {
+				t.Fatalf("liveFailureCategory() = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := liveFailureCategory(canceled, []byte("SUB2API_LIVE_STAGE=data-create\n")); got != "timeout" {
+		t.Fatalf("liveFailureCategory(canceled) = %q, want timeout", got)
+	}
 }

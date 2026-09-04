@@ -263,7 +263,55 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "TestProviderRuntimeCrossHostDataAdmissionLive: go-test-exit-$status"
-          node -e 'const fs=require("node:fs"),test="TestProviderRuntimeCrossHostDataAdmissionLive";let terminal;for(const line of fs.readFileSync(process.argv[1],"utf8").split("\n")){if(!line)continue;const event=JSON.parse(line);if(event.Test===test&&["pass","fail","skip"].includes(event.Action))terminal=event.Action}console.log(test+": "+(terminal??"absent"))' "$raw"
+          node - "$raw" <<'NODE'
+          const fs = require('node:fs');
+          const test = 'TestProviderRuntimeCrossHostDataAdmissionLive';
+          const allowedLiveStages = new Set([
+            'network-setup',
+            'sandbox-start',
+            'data-mount-setup',
+            'data-docker-start',
+            'data-image-load',
+            'data-sshd-start',
+            'app-mount-setup',
+            'app-docker-start',
+            'app-image-load',
+            'app-sshd-start',
+            'sandboxes-ready',
+            'namespace-prerequisites',
+            'provider-start',
+            'provider-configure',
+            'data-create',
+            'data-ready-check',
+            'app-create',
+            'app-ready-check',
+            'post-create-assertions',
+            'complete',
+          ]);
+          let terminal;
+          let stage;
+
+          for (const line of fs.readFileSync(process.argv[2], 'utf8').split('\n')) {
+            if (!line) continue;
+
+            const event = JSON.parse(line);
+            if (event.Test === test && ['pass', 'fail', 'skip'].includes(event.Action)) {
+              terminal = event.Action;
+            }
+
+            const match = event.Test === test && typeof event.Output === 'string'
+              ? event.Output.match(/live namespace fixture failed: ([a-z-]+)/)
+              : null;
+            if (match && allowedLiveStages.has(match[1])) {
+              stage = match[1];
+            }
+          }
+
+          console.log(`${test}: ${terminal ?? 'absent'}`);
+          if (stage) {
+            console.log(`${test} stage: ${stage}`);
+          }
+          NODE
           sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<'NODE'
           const fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe,consumerTrace]=process.argv.slice(2), test='TestProviderRuntimeCrossHostDataAdmissionLive'; let terminal; for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(e.Test===test&&['pass','fail','skip'].includes(e.Action))terminal=e.Action} if(terminal!=='pass')throw Error('live test did not pass'); const files=fs.readdirSync(trace); if(JSON.stringify(files)!==JSON.stringify(['mx-allowlist-live.json']))throw Error('unexpected live evidence inventory'); const p=path.join(trace,files[0]),stat=fs.lstatSync(p),e=JSON.parse(fs.readFileSync(p,'utf8')); const keys=['appDataEnvironmentAuthenticated','appHostPass','appReadyAfterData','dataHostPass','foreignTableSHA256','foreignTableUnchanged','hostAMD64SHA256','postgresCatalog','postgresDrop','postgresPass','postgresWrongPasswordDenied','providerSHA256','redisACL','redisDefaultDenied','redisDrop','redisPass','redisWrongPasswordDenied','releasedBoundary','test']; if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600||JSON.stringify(Object.keys(e).sort())!==JSON.stringify(keys.sort())||e.test!==test||e.releasedBoundary!==process.env.TARGET_SHA||e.providerSHA256!==process.env.PROVIDER_SHA||!Object.values(e).every(v=>typeof v!=='boolean'||v)||!['providerSHA256','hostAMD64SHA256','foreignTableSHA256'].every(k=>/^[0-9a-f]{64}$/.test(e[k]))||/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |CrossHost.*(?:Password|Secret)|(?:\d{1,3}\.){3}\d{1,3}/i.test(JSON.stringify(e)))throw Error('invalid live evidence'); fs.rmSync(path.join(safe,'metadata.json')); fs.copyFileSync(p,path.join(safe,files[0])); fs.chmodSync(path.join(safe,files[0]),0o600); fs.writeFileSync(path.join(safe,'live.jsonl'),JSON.stringify({Action:'pass',Test:test})+'\n',{mode:0o600}); fs.writeFileSync(consumerTrace,JSON.stringify({sha:process.env.TARGET_SHA,providerRuntimeCrossHostAppLive:'data-then-app-pass',providerSHA256:e.providerSHA256,hostAMD64SHA256:e.hostAMD64SHA256})+'\n',{mode:0o600});
           NODE

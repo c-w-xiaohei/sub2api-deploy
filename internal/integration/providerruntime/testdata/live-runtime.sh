@@ -47,6 +47,7 @@ for binary in bash dockerd docker sshd ssh sudo nft ip psql redis-cli openssl un
   command -v "$binary" >/dev/null 2>&1 || exit 1
 done
 
+printf '%s\n' 'SUB2API_LIVE_STAGE=network-setup' >&2
 ip link add "${LIVE_BRIDGE:?}" type bridge
 ip addr add 10.252.0.1/24 dev "$LIVE_BRIDGE"
 ip link set "$LIVE_BRIDGE" up
@@ -74,17 +75,21 @@ ip link set "$LIVE_BAD_VETH_OUT" up
 ip -n "$LIVE_UNAUTHORIZED_NS" addr add "$LIVE_BAD_IP/24" dev "$LIVE_BAD_VETH_IN"
 ip -n "$LIVE_UNAUTHORIZED_NS" link set lo up
 ip -n "$LIVE_UNAUTHORIZED_NS" link set "$LIVE_BAD_VETH_IN" up
+printf '%s\n' 'SUB2API_LIVE_STAGE=sandbox-start' >&2
 setsid ip netns exec "$LIVE_DATA_NS" unshare --mount --propagation private "$root/host-sandbox.sh" data &
 data_pid=$!
 setsid ip netns exec "$LIVE_APP_NS" unshare --mount --propagation private "$root/host-sandbox.sh" app &
 app_pid=$!
 i=0
 until [ -f "$root/data.ready" ] && [ -f "$root/app.ready" ]; do
+  kill -0 "$data_pid" 2>/dev/null || exit 1
+  kill -0 "$app_pid" 2>/dev/null || exit 1
   i=$((i + 1))
   [ "$i" -lt 60 ] || exit 1
   sleep 1
 done
 
+printf '%s\n' 'SUB2API_LIVE_STAGE=sandboxes-ready' >&2
 "$test_binary" "$@"
 status=$?
 exit "$status"

@@ -8,18 +8,14 @@ root=${LIVE_ROOT:?}
 host=${LIVE_HOST_BINARY:?}
 images=${LIVE_IMAGE_ARCHIVE:?}
 log="$root/$name.private.log"
-mkdir -p "$root/$name" "$root/$name/run" "$root/$name/docker" "$root/$name/mount"
-mount --bind "$root/$name.machine-id" /etc/machine-id
-mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
-mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
-mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
-mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
-printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
-setsid dockerd --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
-dockerd=$!
+stage=mount-setup
+dockerd=
 sshd=
 cleanup() {
   status=$?
+  if [ "$status" -ne 0 ] && [ "$stage" != running ]; then
+    printf '%s\n' "SUB2API_LIVE_STAGE=$name-$stage" >&2
+  fi
   for pid in "$sshd" "$dockerd"; do
     [ -n "$pid" ] || continue
     kill -TERM "-$pid" 2>/dev/null || true
@@ -35,14 +31,26 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT INT TERM
+mkdir -p "$root/$name" "$root/$name/run" "$root/$name/docker" "$root/$name/mount"
+mount --bind "$root/$name.machine-id" /etc/machine-id
+mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
+mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
+mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
+mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
+printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
+stage=docker-start
+setsid dockerd --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
+dockerd=$!
 i=0
 until docker info >/dev/null 2>&1; do
   i=$((i + 1))
   [ "$i" -lt 45 ] || exit 1
   sleep 1
 done
+stage=image-load
 docker load --input "$images" >/dev/null 2>&1
 docker image inspect postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist >/dev/null 2>&1
+stage=sshd-start
 setsid /usr/sbin/sshd -D -e -f "$root/$name/sshd_config" >>"$log" 2>&1 &
 sshd=$!
 i=0
@@ -51,5 +59,8 @@ until kill -0 "$sshd" 2>/dev/null; do
   [ "$i" -lt 15 ] || exit 1
   sleep 1
 done
+sleep 1
+kill -0 "$sshd" 2>/dev/null
+stage=running
 touch "$root/$name.ready"
 wait "$sshd"

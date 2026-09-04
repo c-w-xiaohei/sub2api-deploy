@@ -118,6 +118,11 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("if: always()\n        uses: actions/upload-artifact@v4");
     expect(workflow).toContain("- name: Upload exact-SHA intermediate candidate\n        if: success()");
     expect(workflow).toContain("invalid live evidence");
+    expect(workflow).toContain("const allowedLiveStages = new Set([");
+    expect(workflow).toContain("event.Test === test && typeof event.Output === 'string'");
+    expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
+    expect(workflow).toContain("console.log(`${test} stage: ${stage}`)");
+    expect(workflow).not.toContain("console.log(event.Output)");
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).not.toContain("-race -json -count=1 -timeout=15m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$");
   });
