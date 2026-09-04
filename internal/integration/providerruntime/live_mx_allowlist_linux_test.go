@@ -331,7 +331,7 @@ func prepareLiveSSH(t *testing.T, f *liveFixture) {
 		{"data", f.dataIP},
 		{"app", f.appIP},
 	} {
-		host := strings.TrimSpace(commandOutput(t, 10*time.Second, "ssh-keygen", "-y", "-f", filepath.Join(root, item.name+".host-key")))
+		host := strings.TrimSpace(string(commandOutput(t, 10*time.Second, "ssh-keygen", "-y", "-f", filepath.Join(root, item.name+".host-key"))))
 		writePrivate(t, filepath.Join(root, item.name, "authorized_keys"), []byte(pub+"\n"))
 		writePrivate(t, filepath.Join(root, item.name, "sshd_config"), []byte("Port 2222\nListenAddress "+item.ip+"\nHostKey "+filepath.Join(root, item.name+".host-key")+"\nAuthorizedKeysFile "+filepath.Join(root, item.name, "authorized_keys")+"\nPidFile /var/run/sshd.pid\nUsePAM no\nPasswordAuthentication no\nChallengeResponseAuthentication no\nPermitRootLogin prohibit-password\nStrictModes yes\nLogLevel QUIET\n"))
 		config.WriteString("Host live-" + item.name + "\n HostName " + item.ip + "\n Port 2222\n User root\n IdentityFile " + filepath.Join(root, "client-key") + "\n IdentitiesOnly yes\n UserKnownHostsFile " + filepath.Join(root, "home", ".ssh", "known_hosts") + "\n")
@@ -519,7 +519,7 @@ func (f *liveFixture) cleanupOuter(t *testing.T) {
 
 func (f *liveFixture) netnsOK(t *testing.T, timeout time.Duration, ns, name string, args ...string) bool {
 	t.Helper()
-	return f.commandOK(t, timeout, append([]string{"ip", "netns", "exec", ns, name}, args...)...)
+	return f.commandOK(t, timeout, "ip", append([]string{"netns", "exec", ns, name}, args...)...)
 }
 func (f *liveFixture) netnsShellOK(t *testing.T, timeout time.Duration, ns, script string) bool {
 	t.Helper()

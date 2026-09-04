@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
 const gateSymbols = {
   verify: ["test/environment-program-target.test.ts::targets the environment program without an infra fallback"],
   "host-controller": ["TestRegisterFoundationGraph", "TestRegisterPreservesComputedUpstashOutputs", "TestConfigAndHostCheckPreservePropertyClassesWithoutEffects", "TestRunUsesFixedSSHArgvAndFramedStdin", "TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry", "TestStdioProcessExitsAfterOneFrameAndRejectsTwo", "TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi"],
@@ -12,19 +13,19 @@ const gateSymbols = {
 };
 
 function selectorFor(job: string): string[] {
-  const jobs = [...workflow.matchAll(/^  ([a-z-]+):$/gm)];
-  const index = jobs.findIndex((match) => match[1] === job);
-  const start = jobs[index]?.index;
-  const next = jobs[index + 1]?.index;
+  const matches = [...jobs.matchAll(/^  ([a-z-]+):$/gm)];
+  const index = matches.findIndex((match) => match[1] === job);
+  const start = matches[index]?.index;
+  const next = matches[index + 1]?.index;
   if (start === undefined) return [];
-  const section = workflow.slice(start, next < 0 ? undefined : next);
+  const section = jobs.slice(start, next);
   const match = section.match(/tests='\^\(([^']+)\)\$'/);
   return match?.[1].split("|") ?? [];
 }
 
 describe("Task4 CI contracts", () => {
   it("keeps exactly the eight required gates and exact checkout binding", () => {
-    expect([...workflow.matchAll(/^  ([a-z-]+):$/gm)].map((match) => match[1])).toEqual(["verify", "host-controller", "engine-graph", "provider-ssh", "provider-runtime", "provider-import", "target-release"]);
+    expect([...jobs.matchAll(/^  ([a-z-]+):$/gm)].map((match) => match[1])).toEqual(["verify", "host-controller", "engine-graph", "provider-ssh", "provider-runtime", "provider-import", "target-release"]);
     expect(workflow).toContain('name: Host Controller (${{ matrix.arch }})');
     expect(workflow.match(/ref: \$\{\{ env\.TARGET_SHA \}\}/g)).toHaveLength(7);
     expect(workflow).toContain("needs: [verify, host-controller, engine-graph, provider-ssh, provider-runtime, provider-import]");
@@ -64,7 +65,9 @@ describe("Task4 CI contracts", () => {
   it("keeps scoped JSON no-skip evidence and baseline full checks for every required Go gate", () => {
     expect(workflow).toContain("host-controller-${TARGET_SHA}-${{ matrix.arch }}.jsonl");
     expect(workflow).toContain("host-controller-safe-${TARGET_SHA}-${{ matrix.arch }}");
-    for (const gate of ["provider-ssh", "provider-runtime", "provider-import"]) expect(workflow).toContain(`${gate}-safe-$TARGET_SHA`);
+    expect(workflow).toContain("provider-ssh-safe-${TARGET_SHA}");
+    expect(workflow).toContain("provider-runtime-safe-$TARGET_SHA");
+    expect(workflow).toContain("provider-import-safe-${TARGET_SHA}");
     expect(workflow).toContain("console.log(`${test}: ${action}`)");
     expect(workflow).toContain("console.log(`${t}: ${action}`)");
     expect(workflow).toContain('test "$status" -eq 0');

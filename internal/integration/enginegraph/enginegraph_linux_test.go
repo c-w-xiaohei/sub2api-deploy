@@ -25,6 +25,7 @@ import (
 	"github.com/pulumi/pulumi/pkg/v3/backend/display"
 	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
 	"github.com/pulumi/pulumi/pkg/v3/engine"
+	pkgresource "github.com/pulumi/pulumi/pkg/v3/resource"
 	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
 	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/deploytest"
 	"github.com/pulumi/pulumi/pkg/v3/resource/plugin"
@@ -1403,7 +1404,7 @@ func assertCrossHostTargets(t *testing.T, snapshot *deploy.Snapshot, bravoHasApp
 	if err := snapshot.VerifyIntegrity(); err != nil {
 		t.Fatalf("cross-Host checkpoint is invalid: %v", err)
 	}
-	var alpha, bravo *resource.State
+	var alpha, bravo *pkgresource.State
 	dnsRecords := 0
 	for _, state := range snapshot.Resources {
 		switch state.Type {

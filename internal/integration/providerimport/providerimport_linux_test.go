@@ -1310,7 +1310,7 @@ func (h *harness) assertNoCanaryLeak(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() {
+			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 				return nil
 			}
 			b, readErr := os.ReadFile(path)
@@ -1323,7 +1323,7 @@ func (h *harness) assertNoCanaryLeak(t *testing.T) {
 			}
 			return nil
 		}); err != nil {
-			t.Fatal("secret canary scan failed")
+			t.Fatalf("secret canary scan failed: %v", err)
 		}
 	}
 }
