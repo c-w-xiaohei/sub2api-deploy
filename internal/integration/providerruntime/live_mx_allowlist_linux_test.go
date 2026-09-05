@@ -1018,6 +1018,7 @@ func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *tes
 		{name: "permission before storage", log: "overlay operation not permitted", fallback: "unknown", want: "permission"},
 		{name: "resource before containerd", log: "containerd: no space left", fallback: "unknown", want: "resource"},
 		{name: "conflict before network", log: "network controller address already in use", fallback: "unknown", want: "conflict"},
+		{name: "flag and config conflict before storage", log: "the following directives are specified both as a flag and in the configuration file: storage-driver", fallback: "unknown", want: "conflict"},
 		{name: "network", log: "failed to create network controller", fallback: "unknown", want: "network"},
 		{name: "storage", log: "failed to initialize storage driver overlay", fallback: "unknown", want: "storage"},
 		{name: "containerd", log: "failed to connect to containerd", fallback: "unknown", want: "containerd"},

@@ -12,7 +12,7 @@ docker_failure_reason() {
     printf '%s' permission
   elif grep -Eqi 'no space left|cannot allocate memory|out of memory|resource temporarily unavailable|too many open files' "$log"; then
     printf '%s' resource
-  elif grep -Eqi 'already running|address already in use|resource busy|pid file' "$log"; then
+  elif grep -Eqi 'already running|address already in use|resource busy|pid file|specified both as a flag and in the configuration file' "$log"; then
     printf '%s' conflict
   elif grep -Eqi 'network controller|iptables|ip6tables|bridge driver' "$log"; then
     printf '%s' network
@@ -66,8 +66,9 @@ mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
 mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
 mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
 printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
+printf '%s\n' '{}' >"$root/$name/daemon.json"
 stage=docker-start
-setsid dockerd --storage-driver vfs --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
+setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
 dockerd=$!
 i=0
 until docker_cli info >/dev/null 2>&1; do

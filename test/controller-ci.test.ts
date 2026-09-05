@@ -117,7 +117,8 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("for _ in $(seq 1 45)");
     expect(workflow).toContain("provider-runtime-dockerd-${TARGET_SHA}.pid");
     expect(workflow).toContain("provider-runtime-dockerd-${TARGET_SHA}.log");
-    expect(liveHostSandbox).toContain('dockerd --storage-driver vfs --data-root "$root/$name/docker"');
+    expect(liveHostSandbox).toContain('printf \'%s\\n\' \'{}\' >"$root/$name/daemon.json"');
+    expect(liveHostSandbox).toContain('dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker"');
     expect(liveHostSandbox).not.toContain("--storage-driver overlay");
     expect(liveHostSandbox).toContain('docker -H unix:///var/run/docker.sock "$@"');
     expect(liveHostSandbox).toContain("until docker_cli info >/dev/null 2>&1; do");
