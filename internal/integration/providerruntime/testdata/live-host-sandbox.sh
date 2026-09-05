@@ -154,7 +154,7 @@ setsid containerd --config "$root/$name/containerd.toml" --root "$root/$name/con
 containerd=$!
 i=0
 until ctr_cli version >/dev/null 2>&1; do
-  if ! kill -0 "$containerd" 2>/dev/null; then
+  if ! process_alive "$containerd"; then
     stage=docker-containerd-exit
     exit 1
   fi
