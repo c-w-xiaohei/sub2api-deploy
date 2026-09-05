@@ -18,7 +18,7 @@ docker_failure_reason() {
     printf '%s' network
   elif grep -Eqi 'failed.*(storage driver|graphdriver|overlay|volume store|filesystem)|error (initializing|mounting).*(graphdriver|overlay|filesystem)' "$log"; then
     printf '%s' storage
-  elif grep -Eqi '(failed|error|unable|invalid|not found|not mounted).*(cgroup|cgroups)|(cgroup|cgroups).*(failed|error|unable|invalid|not found|not mounted)' "$log"; then
+  elif grep -Eqi 'failed to start daemon:.*(cgroup|cgroups)|devices cgroup (isn.t|is not) mounted' "$log"; then
     printf '%s' cgroup
   elif grep -Eqi 'docker-proxy|docker-init|executable file not found|not found in.*PATH' "$log"; then
     printf '%s' helper
