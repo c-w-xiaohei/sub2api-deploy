@@ -38,8 +38,10 @@ const (
 )
 
 const (
-	postgresImage = "postgres:18-alpine"
-	redisImage    = "redis:8-alpine"
+	postgresImage              = "postgres:18-alpine"
+	redisImage                 = "redis:8-alpine"
+	localDataReadinessBudget   = time.Minute
+	localDataReadinessInterval = time.Second
 )
 
 var routeWriteHook func() error
@@ -1069,6 +1071,16 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 
 func localDataToken(id string) string { return token("local-data", id) }
 func (r *Runtime) reconcileLocal(ctx context.Context, s State, inv inventory, q hostprotocol.Request) ([]managedObject, managedObject, error) {
+	return r.reconcileLocalWithReadiness(ctx, s, inv, q, localDataReadinessBudget, localDataReadinessInterval, context.WithTimeout)
+}
+
+func (r *Runtime) reconcileLocalWithReadiness(ctx context.Context, s State, inv inventory, q hostprotocol.Request, budget, interval time.Duration, newReadinessContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)) ([]managedObject, managedObject, error) {
+	readyCtx := ctx
+	cancelReady := func() {}
+	if len(q.Target.DataServices) != 0 {
+		readyCtx, cancelReady = newReadinessContext(ctx, budget)
+	}
+	defer cancelReady()
 	kept := make([]managedObject, 0, len(q.Target.DataServices))
 	for _, old := range inv.Objects {
 		if old.Role == "local-data-meta" {
@@ -1108,7 +1120,10 @@ func (r *Runtime) reconcileLocal(ctx context.Context, s State, inv inventory, q 
 		if old.Type == "redis" {
 			sameShell = sameShell && r.redisConfigMatches(old, t, (*q.Secrets).LocalDataServices[t.ID])
 		}
-		if sameShell && r.inspectOwned(ctx, inv, old) == nil && r.exactLocalPublications(ctx, old) == nil && r.localSecurityArtifactsValid(old) && r.localReady(ctx, old) == nil {
+		if sameShell && r.inspectOwned(ctx, inv, old) == nil && r.exactLocalPublications(ctx, old) == nil && r.localSecurityArtifactsValid(old) {
+			if err := r.waitLocalReady(readyCtx, old, interval); err != nil {
+				return nil, managedObject{}, operationFailed()
+			}
 			changed := false
 			if old.Type == "postgres" {
 				var err error
@@ -1191,7 +1206,7 @@ func (r *Runtime) reconcileLocal(ctx context.Context, s State, inv inventory, q 
 				return nil, managedObject{}, operationFailed()
 			}
 		}
-		if err := r.localReady(ctx, o); err != nil {
+		if err := r.waitLocalReady(readyCtx, o, interval); err != nil {
 			return nil, managedObject{}, operationFailed()
 		}
 		if err := r.exactLocalPublications(ctx, o); err != nil {
@@ -1679,6 +1694,39 @@ func (r *Runtime) localReady(ctx context.Context, o managedObject) error {
 		return operationFailed()
 	}
 	return nil
+}
+
+// waitLocalReady retries only the fixed local readiness probes while the one
+// reconciliation-wide data readiness context remains active.
+func (r *Runtime) waitLocalReady(ctx context.Context, o managedObject, interval time.Duration) error {
+	return r.waitLocalReadyWithTimer(ctx, o, interval, func(interval time.Duration) (<-chan time.Time, func()) {
+		timer := time.NewTimer(interval)
+		return timer.C, func() { timer.Stop() }
+	})
+}
+
+func (r *Runtime) waitLocalReadyWithTimer(ctx context.Context, o managedObject, interval time.Duration, newTimer func(time.Duration) (<-chan time.Time, func())) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.localReady(ctx, o); err == nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		timer, stopTimer := newTimer(interval)
+		select {
+		case <-ctx.Done():
+			stopTimer()
+			return ctx.Err()
+		case <-timer:
+		}
+	}
 }
 
 // exactDockerPublications accepts only the fixed `docker container inspect

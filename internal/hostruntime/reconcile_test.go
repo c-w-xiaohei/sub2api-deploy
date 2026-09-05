@@ -926,6 +926,240 @@ func TestRedisReadinessUsesProtectedAuthAndRequiresExactPONG(t *testing.T) {
 	}
 }
 
+func TestWaitLocalReadyRetriesPostgresUntilFixedProbeSucceeds(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	attempts := 0
+	runner.fail = func(argv []string) error {
+		if len(argv) > 2 && argv[0] == "exec" && argv[2] == "psql" {
+			attempts++
+			if attempts < 3 {
+				return errors.New("not ready")
+			}
+		}
+		return nil
+	}
+	rt.runner = runner
+	o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}, revisionB())
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := rt.waitLocalReady(ctx, o, time.Millisecond); err != nil || attempts != 3 {
+		t.Fatalf("wait=%v attempts=%d calls=%#v", err, attempts, runner.calls)
+	}
+	if runner.hasSecret("POSTGRES_CANARY") || !runner.hasCall([]string{"exec", o.Name, "psql", "-X", "-U", "s2h_admin", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1"}) {
+		t.Fatalf("postgres probe changed or leaked: %#v", runner.calls)
+	}
+}
+
+func TestWaitLocalReadyRetriesRedisUntilExactPONG(t *testing.T) {
+	rt, state := initialized(t)
+	attempts := 0
+	rt.runner = readinessRunner(func(_ context.Context, argv []string, _ []byte) ([]byte, error) {
+		if len(argv) > 2 && argv[0] == "exec" && argv[2] == "redis-cli" {
+			attempts++
+			if attempts == 1 {
+				return []byte("PONG\r\n"), nil
+			}
+			if attempts == 2 {
+				return nil, errors.New("not ready")
+			}
+			return []byte("PONG\n"), nil
+		}
+		return nil, nil
+	})
+	o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "cache", Type: "redis", Port: 6380}, revisionB())
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := rt.waitLocalReady(ctx, o, time.Millisecond); err != nil || attempts != 3 {
+		t.Fatalf("wait=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestWaitLocalReadyStopsOnDeadlineAndCancellation(t *testing.T) {
+	t.Run("deadline", func(t *testing.T) {
+		rt, state := initialized(t)
+		attempts := 0
+		rt.runner = readinessRunner(func(context.Context, []string, []byte) ([]byte, error) {
+			attempts++
+			return nil, errors.New("not ready")
+		})
+		o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}, revisionB())
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
+		defer cancel()
+		if err := rt.waitLocalReady(ctx, o, time.Millisecond); !errors.Is(err, context.DeadlineExceeded) || attempts < 1 {
+			t.Fatalf("wait=%v attempts=%d", err, attempts)
+		}
+	})
+	t.Run("cancellation during probe", func(t *testing.T) {
+		rt, state := initialized(t)
+		started := make(chan struct{})
+		attempts := 0
+		rt.runner = readinessRunner(func(ctx context.Context, _ []string, _ []byte) ([]byte, error) {
+			attempts++
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+		o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}, revisionB())
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- rt.waitLocalReady(ctx, o, time.Millisecond) }()
+		<-started
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) || attempts != 1 {
+			t.Fatalf("wait=%v attempts=%d", err, attempts)
+		}
+	})
+}
+
+func TestWaitLocalReadyRejectsProbeSuccessAfterContextCancellation(t *testing.T) {
+	rt, state := initialized(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	rt.runner = readinessRunner(func(context.Context, []string, []byte) ([]byte, error) {
+		cancel()
+		return nil, nil
+	})
+	o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}, revisionB())
+	if err := rt.waitLocalReady(ctx, o, time.Millisecond); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait accepted readiness after cancellation: %v", err)
+	}
+}
+
+func TestWaitLocalReadyReturnsWhenContextWinsExpiredTimer(t *testing.T) {
+	rt, state := initialized(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	started := make(chan struct{})
+	rt.runner = readinessRunner(func(context.Context, []string, []byte) ([]byte, error) {
+		close(started)
+		return nil, errors.New("not ready")
+	})
+	o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}, revisionB())
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.waitLocalReadyWithTimer(ctx, o, time.Second, func(time.Duration) (<-chan time.Time, func()) {
+			return make(chan time.Time), func() {}
+		})
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wait blocked draining expired timer")
+	}
+}
+
+func TestReconcileLocalUsesOneReadinessDeadlineForAllDataServices(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	var ready *expiringReadinessContext
+	contexts, postgresProbes, redisProbes := 0, 0, 0
+	rt.runner = readinessRunner(func(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+		if len(argv) > 2 && argv[0] == "exec" && argv[2] == "psql" && argv[len(argv)-1] == "SELECT 1" {
+			postgresProbes++
+			return nil, nil
+		}
+		if len(argv) > 2 && argv[0] == "container" && argv[1] == "inspect" {
+			ready.expire()
+		}
+		if len(argv) > 2 && argv[0] == "exec" && argv[2] == "redis-cli" {
+			redisProbes++
+			return []byte("PONG\n"), nil
+		}
+		return runner.Run(ctx, argv, stdin)
+	})
+	request := requestFor(state, revisionB())
+	request.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432}, {ID: "cache", Type: "redis", Port: 6380}}
+	request.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "safe"}, "cache": {AdminPassword: "safe"}}
+	if _, _, err := rt.reconcileLocalWithReadiness(t.Context(), state, inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, AppliedRevision: state.AppliedRevision}, request, time.Second, time.Millisecond, func(ctx context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+		contexts++
+		ready = newExpiringReadinessContext(ctx, budget)
+		return ready, func() {}
+	}); err == nil {
+		t.Fatal("reconcile succeeded after the first service exhausted the readiness budget")
+	}
+	if !errors.Is(ready.Err(), context.DeadlineExceeded) || contexts != 1 || postgresProbes != 1 || redisProbes != 0 {
+		t.Fatalf("contexts=%d postgres=%d redis=%d", contexts, postgresProbes, redisProbes)
+	}
+}
+
+func TestReconcileLocalWithoutDataDoesNotCreateReadinessContext(t *testing.T) {
+	rt, state := initialized(t)
+	request := requestFor(state, revisionB())
+	contexts := 0
+	if _, _, err := rt.reconcileLocalWithReadiness(t.Context(), state, inventory{Version: inventoryVersion, Resource: state.Resource, Ownership: state.Ownership, AppliedRevision: state.AppliedRevision}, request, time.Second, time.Millisecond, func(ctx context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+		contexts++
+		return context.WithTimeout(ctx, budget)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if contexts != 0 {
+		t.Fatalf("readiness contexts=%d", contexts)
+	}
+}
+
+func TestInspectLocalDataReadinessRemainsOneShot(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	request := requestFor(state, revisionB())
+	request.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "cache", Type: "redis", Port: 6380}}
+	request.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"cache": {AdminPassword: "safe"}}
+	if _, err := rt.Reconcile(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	attempts := 0
+	rt.runner = readinessRunner(func(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+		if len(argv) > 2 && argv[0] == "exec" && argv[2] == "redis-cli" {
+			attempts++
+			return nil, errors.New("not ready")
+		}
+		return runner.Run(ctx, argv, stdin)
+	})
+	observation, err := rt.Inspect(state.Resource)
+	if err != nil || observation.Ready || !observation.Drifted || attempts != 1 {
+		t.Fatalf("inspect=%#v err=%v attempts=%d", observation, err, attempts)
+	}
+}
+
+func TestReconcileReadinessDeadlineKeepsPendingJournalAndReusesContainer(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	attempts := 0
+	runner.fail = func(argv []string) error {
+		if len(argv) > 2 && argv[0] == "exec" && argv[2] == "psql" {
+			attempts++
+			return errors.New("not ready")
+		}
+		return nil
+	}
+	rt.runner = runner
+	request := requestFor(state, revisionB())
+	request.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: "primary", Type: "postgres", Port: 5432}}
+	request.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{"primary": {AdminPassword: "safe"}}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, err := rt.Reconcile(ctx, request); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) || attempts < 1 || runner.mutations("run") != 1 {
+		t.Fatalf("first=%v attempts=%d calls=%#v", err, attempts, runner.calls)
+	}
+	if mustState(t, rt).Journal.Status != journalPending {
+		t.Fatal("readiness deadline completed journal")
+	}
+	if _, err := rt.readInventory(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("readiness deadline advanced inventory: %v", err)
+	}
+	runner.fail = nil
+	if result, err := rt.Reconcile(t.Context(), request); err != nil || result.Status != hostprotocol.ResultApplied || runner.mutations("run") != 1 {
+		t.Fatalf("retry=%#v %v calls=%#v", result, err, runner.calls)
+	}
+}
+
 func TestReconcileRejectsInvalidLocalPasswordsBeforeBegin(t *testing.T) {
 	for name, password := range map[string]string{"empty": "", "newline": "bad\nvalue", "nul": "bad\x00value", "control": "bad\x1fvalue"} {
 		t.Run(name, func(t *testing.T) {
@@ -3199,6 +3433,35 @@ type recordingRunner struct {
 type stdoutRunner struct{ output []byte }
 
 func (r stdoutRunner) Run(context.Context, []string, []byte) ([]byte, error) { return r.output, nil }
+
+type readinessRunner func(context.Context, []string, []byte) ([]byte, error)
+
+func (run readinessRunner) Run(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+	return run(ctx, argv, stdin)
+}
+
+type expiringReadinessContext struct {
+	context.Context
+	done     chan struct{}
+	err      error
+	deadline time.Time
+}
+
+func newExpiringReadinessContext(parent context.Context, budget time.Duration) *expiringReadinessContext {
+	return &expiringReadinessContext{Context: parent, done: make(chan struct{}), deadline: time.Now().Add(budget)}
+}
+
+func (c *expiringReadinessContext) Done() <-chan struct{} { return c.done }
+func (c *expiringReadinessContext) Err() error            { return c.err }
+func (c *expiringReadinessContext) Deadline() (time.Time, bool) {
+	return c.deadline, true
+}
+func (c *expiringReadinessContext) expire() {
+	if c.err == nil {
+		c.err = context.DeadlineExceeded
+		close(c.done)
+	}
+}
 
 type recordingNFTRunner struct {
 	calls           [][]string
