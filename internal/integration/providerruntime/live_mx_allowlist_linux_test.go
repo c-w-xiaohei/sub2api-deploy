@@ -1047,6 +1047,7 @@ func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *tes
 		{name: "containerd socket", log: "containerd socket connection refused", fallback: "unknown", want: "containerd-socket"},
 		{name: "containerd exit", log: "containerd exited with exit status 1", fallback: "unknown", want: "containerd-exit"},
 		{name: "benign containerd signal handler", log: `level=info msg="containerd signal handler registered"`, fallback: "unknown", want: "unknown"},
+		{name: "benign containerd client timeout field", log: `level=info msg="Creating a containerd client" address=/run/containerd/containerd.sock timeout=1m0s`, fallback: "unknown", want: "unknown"},
 		{name: "benign storage text during early exit", log: `time="2026-09-05T00:00:00Z" level=info msg="using storage driver vfs"`, fallback: "unknown", want: "unknown"},
 		{name: "benign containerd text during early exit", log: `time="2026-09-05T00:00:00Z" level=info msg="starting containerd"`, fallback: "unknown", want: "unknown"},
 		{name: "fatal graphdriver after benign storage text", log: "level=info msg=\"using storage driver vfs\"\nfailed to start daemon: error initializing graphdriver", fallback: "unknown", want: "storage"},
