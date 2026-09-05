@@ -47,6 +47,7 @@ const (
 var routeWriteHook func() error
 var routeRestoreHook func() error
 var artifactRemoveHook func(string) error
+var artifactRemoveSyncHook func(int) error
 var routeRemoveHook func(string) error
 
 type commandError struct{ ExitCode int }
@@ -1176,7 +1177,7 @@ func (r *Runtime) reconcileLocalWithReadiness(ctx context.Context, s State, inv 
 				if err != nil {
 					return nil, managedObject{}, recovery()
 				}
-				if _, err = r.runner.Run(ctx, []string{"exec", "-i", old.Name, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "s2h_admin", "-d", "postgres"}, sql); err != nil {
+				if _, err = r.runner.Run(ctx, postgresPSQLArgs(old), sql); err != nil {
 					return nil, managedObject{}, operationFailed()
 				}
 			}
@@ -1221,17 +1222,17 @@ func (r *Runtime) reconcileLocalWithReadiness(ctx context.Context, s State, inv 
 			}
 		}
 		if old.Name != "" && old.Config != "" && old.Config != o.Config {
-			if err := r.removeEnv(old.Config); err != nil {
+			if err := r.removeLocalArtifact(old, old.Config); err != nil {
 				return nil, managedObject{}, recovery()
 			}
 		}
 		if old.Name != "" && old.HBA != "" && old.HBA != o.HBA {
-			if err := r.removeEnv(old.HBA); err != nil {
+			if err := r.removeLocalArtifact(old, old.HBA); err != nil {
 				return nil, managedObject{}, recovery()
 			}
 		}
 		if old.Name != "" && old.Ident != "" && old.Ident != o.Ident {
-			if err := r.removeEnv(old.Ident); err != nil {
+			if err := r.removeLocalArtifact(old, old.Ident); err != nil {
 				return nil, managedObject{}, recovery()
 			}
 		}
@@ -1254,17 +1255,17 @@ func (r *Runtime) reconcileLocalWithReadiness(ctx context.Context, s State, inv 
 				return nil, managedObject{}, recovery()
 			}
 			if old.Config != "" {
-				if err := r.removeEnv(old.Config); err != nil {
+				if err := r.removeLocalArtifact(old, old.Config); err != nil {
 					return nil, managedObject{}, recovery()
 				}
 			}
 			if old.HBA != "" {
-				if err := r.removeEnv(old.HBA); err != nil {
+				if err := r.removeLocalArtifact(old, old.HBA); err != nil {
 					return nil, managedObject{}, recovery()
 				}
 			}
 			if old.Ident != "" {
-				if err := r.removeEnv(old.Ident); err != nil {
+				if err := r.removeLocalArtifact(old, old.Ident); err != nil {
 					return nil, managedObject{}, recovery()
 				}
 			}
@@ -1533,17 +1534,17 @@ func (r *Runtime) Retire(ctx context.Context, q hostprotocol.Request) (hostproto
 						}
 					}
 					if o.Config != "" {
-						if e = r.removeEnv(o.Config); e != nil {
+						if e = r.removeLocalArtifact(o, o.Config); e != nil {
 							return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
 						}
 					}
 					if o.HBA != "" {
-						if e = r.removeEnv(o.HBA); e != nil {
+						if e = r.removeLocalArtifact(o, o.HBA); e != nil {
 							return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
 						}
 					}
 					if o.Ident != "" {
-						if e = r.removeEnv(o.Ident); e != nil {
+						if e = r.removeLocalArtifact(o, o.Ident); e != nil {
 							return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
 						}
 					}
@@ -1685,7 +1686,7 @@ func (r *Runtime) postRouteReady(ctx context.Context, proxy, candidate managedOb
 }
 func (r *Runtime) localReady(ctx context.Context, o managedObject) error {
 	if o.Type == "postgres" {
-		return r.docker(ctx, "exec", o.Name, "psql", "-X", "-U", "s2h_admin", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1")
+		return r.docker(ctx, "exec", o.Name, "psql", "-X", "-U", "s2h_admin", "-d", "postgres", "-p", strconv.Itoa(o.Port), "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1")
 	}
 	// REDISCLI_AUTH is loaded by docker run's --env-file; never route it through
 	// a shell, URI, option, or command argument.
@@ -1787,7 +1788,7 @@ func (r *Runtime) writeLocalSecrets(ctx context.Context, s State, o managedObjec
 		if err := r.writeArtifact(o.Env, []byte(secret.AdminPassword+"\n"), 0600); err != nil {
 			return err
 		}
-		if err := r.writeArtifact(o.Config, []byte("listen_addresses = '*'\npassword_encryption = 'scram-sha-256'\nhba_file = '/etc/sub2api/pg_hba.conf'\nident_file = '/etc/sub2api/pg_ident.conf'\n"), 0600); err != nil {
+		if err := r.writePostgresArtifact(o, o.Config, []byte("listen_addresses = '*'\npassword_encryption = 'scram-sha-256'\nhba_file = '/etc/sub2api/pg_hba.conf'\nident_file = '/etc/sub2api/pg_ident.conf'\n")); err != nil {
 			return err
 		}
 		var hba strings.Builder
@@ -1799,10 +1800,10 @@ func (r *Runtime) writeLocalSecrets(ctx context.Context, s State, o managedObjec
 			hba.WriteString("host " + client.Database + " " + client.Username + " all scram-sha-256\n")
 		}
 		hba.WriteString("local all all reject\nhost all all all reject\n")
-		if err := r.writeArtifact(o.HBA, []byte(hba.String()), 0600); err != nil {
+		if err := r.writePostgresArtifact(o, o.HBA, []byte(hba.String())); err != nil {
 			return err
 		}
-		return r.writeArtifact(o.Ident, []byte("s2h_admin root s2h_admin\ns2h_admin postgres s2h_admin\n"), 0600)
+		return r.writePostgresArtifact(o, o.Ident, []byte("s2h_admin root s2h_admin\ns2h_admin postgres s2h_admin\n"))
 	}
 	config, err := redisConfig(t, secret)
 	if err != nil {
@@ -1840,13 +1841,16 @@ func (r *Runtime) redisConfigMatches(old managedObject, target hostcontract.Loca
 	return err == nil && string(got) == want
 }
 func (r *Runtime) localSecurityArtifactsValid(o managedObject) bool {
+	if err := r.validateArtifactMetadata(o.Env); err != nil {
+		return false
+	}
 	if o.Type == "redis" {
 		_, err := r.readArtifactBytes(o.Config)
 		return err == nil
 	}
-	config, configErr := r.readArtifactBytes(o.Config)
-	hba, hbaErr := r.readArtifactBytes(o.HBA)
-	ident, identErr := r.readArtifactBytes(o.Ident)
+	config, configErr := r.readArtifactBytesMode(o.Config, 0644)
+	hba, hbaErr := r.readArtifactBytesMode(o.HBA, 0644)
+	ident, identErr := r.readArtifactBytesMode(o.Ident, 0644)
 	if configErr != nil || hbaErr != nil || identErr != nil {
 		return false
 	}
@@ -2098,8 +2102,10 @@ func (r *Runtime) reconcileDataClients(ctx context.Context, s State, inv invento
 	}
 	return r.reconcilePostgres(ctx, s, o, expected, secret)
 }
-func postgresPSQLArgs(name string) []string {
-	return []string{"exec", "-i", name, "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "s2h_admin", "-d", "postgres"}
+func postgresPSQLArgs(o managedObject, options ...string) []string {
+	args := []string{"exec", "-i", o.Name, "psql", "-X"}
+	args = append(args, options...)
+	return append(args, "-v", "ON_ERROR_STOP=1", "-U", "s2h_admin", "-d", "postgres", "-p", strconv.Itoa(o.Port))
 }
 
 func postgresCatalogExpected(s State, inv inventory, target hostcontract.LocalDataServiceTarget, revision string) (postgresCatalogProtocolExpected, error) {
@@ -2112,7 +2118,7 @@ func postgresCatalogExpected(s State, inv inventory, target hostcontract.LocalDa
 }
 
 func (r *Runtime) observePostgresCatalog(ctx context.Context, o managedObject, e postgresCatalogProtocolExpected) (postgresCatalogProtocolRoleObservation, []postgresCatalogProtocolDatabaseObservation, error) {
-	out, err := r.runner.Run(ctx, postgresPSQLArgs(o.Name), []byte(postgresCatalogProtocolRolesSQL(e)))
+	out, err := r.runner.Run(ctx, postgresPSQLArgs(o, "-qAt"), []byte(postgresCatalogProtocolRolesSQL(e)))
 	if err != nil {
 		return postgresCatalogProtocolRoleObservation{}, nil, err
 	}
@@ -2122,7 +2128,7 @@ func (r *Runtime) observePostgresCatalog(ctx context.Context, o managedObject, e
 	}
 	var dbs []postgresCatalogProtocolDatabaseObservation
 	for _, db := range postgresCatalogProtocolDatabases(e.Desired) {
-		refBytes, err := r.runner.Run(ctx, postgresPSQLArgs(o.Name), []byte(postgresCatalogProtocolDatabaseReferenceSQL(e, db)))
+		refBytes, err := r.runner.Run(ctx, postgresPSQLArgs(o, "-qAt"), []byte(postgresCatalogProtocolDatabaseReferenceSQL(e, db)))
 		if err != nil {
 			return postgresCatalogProtocolRoleObservation{}, nil, err
 		}
@@ -2134,7 +2140,7 @@ func (r *Runtime) observePostgresCatalog(ctx context.Context, o managedObject, e
 		if ref.State == postgresCatalogProtocolAbsent {
 			detail, err = postgresCatalogProtocolAbsentDetail(ref)
 		} else {
-			detailBytes, detailErr := r.runner.Run(ctx, append(postgresPSQLArgs(o.Name), "-d", db), []byte(postgresCatalogProtocolDatabaseDetailSQL(e, db)))
+			detailBytes, detailErr := r.runner.Run(ctx, append(postgresPSQLArgs(o, "-qAt"), "-d", db), []byte(postgresCatalogProtocolDatabaseDetailSQL(e, db)))
 			if detailErr != nil {
 				return postgresCatalogProtocolRoleObservation{}, nil, detailErr
 			}
@@ -2248,7 +2254,7 @@ func (r *Runtime) reconcilePostgres(ctx context.Context, s State, o managedObjec
 		if err != nil {
 			return operationFailed()
 		}
-		if _, err = r.runner.Run(ctx, postgresPSQLArgs(o.Name), []byte(sql)); err != nil {
+		if _, err = r.runner.Run(ctx, postgresPSQLArgs(o, "-qAt"), []byte(sql)); err != nil {
 			after, observeErr := r.postgresClassification(ctx, s, o, e)
 			if observeErr != nil || after.State != postgresCatalogProtocolPartial && after.State != postgresCatalogProtocolExact {
 				return operationFailed()
@@ -2282,7 +2288,7 @@ func (r *Runtime) reconcilePostgres(ctx context.Context, s State, o managedObjec
 			}
 		}
 		if current.Reference.State == postgresCatalogProtocolAbsent {
-			if _, err = r.runner.Run(ctx, postgresPSQLArgs(o.Name), []byte(postgresProtocolCreateSQL(e, db))); err != nil {
+			if _, err = r.runner.Run(ctx, postgresPSQLArgs(o, "-qAt"), []byte(postgresProtocolCreateSQL(e, db))); err != nil {
 				after, observeErr := r.postgresClassification(ctx, s, o, e)
 				if observeErr != nil || after.State != postgresCatalogProtocolPartial {
 					return operationFailed()
@@ -2290,7 +2296,7 @@ func (r *Runtime) reconcilePostgres(ctx context.Context, s State, o managedObjec
 				return operationFailed()
 			}
 		}
-		if _, err = r.runner.Run(ctx, append(postgresPSQLArgs(o.Name), "-d", db), []byte(postgresProtocolFinalizeSQL(e, db))); err != nil {
+		if _, err = r.runner.Run(ctx, append(postgresPSQLArgs(o, "-qAt"), "-d", db), []byte(postgresProtocolFinalizeSQL(e, db))); err != nil {
 			after, observeErr := r.postgresClassification(ctx, s, o, e)
 			if observeErr != nil || after.State != postgresCatalogProtocolPartial && after.State != postgresCatalogProtocolExact {
 				return operationFailed()
@@ -2309,7 +2315,7 @@ func (r *Runtime) reconcilePostgresAdmin(ctx context.Context, o managedObject, p
 	if err != nil {
 		return operationFailed()
 	}
-	if _, err = r.runner.Run(ctx, []string{"exec", "-i", o.Name, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "s2h_admin", "-d", "postgres"}, sql); err != nil {
+	if _, err = r.runner.Run(ctx, postgresPSQLArgs(o), sql); err != nil {
 		return operationFailed()
 	}
 	return nil
@@ -2343,7 +2349,7 @@ func (r *Runtime) runLocal(ctx context.Context, s State, o managedObject, target
 	args = append(args, "-v", r.dataPath(o.DataToken)+":")
 	if o.Type == "postgres" {
 		args[len(args)-1] += "/var/lib/postgresql/data"
-		args = append(args, "-v", r.artifactPath(o.Env)+":/run/secrets/postgres-admin:ro", "-v", r.artifactPath(o.Config)+":/etc/sub2api/postgresql.conf:ro", "-v", r.artifactPath(o.HBA)+":/etc/sub2api/pg_hba.conf:ro", "-v", r.artifactPath(o.Ident)+":/etc/sub2api/pg_ident.conf:ro", "-e", "POSTGRES_USER=s2h_admin", "-e", "POSTGRES_DB=postgres", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-admin", "-e", "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer", o.Image, "-c", "config_file=/etc/sub2api/postgresql.conf", "-p", strconv.Itoa(o.Port))
+		args = append(args, "-v", r.artifactPath(o.Env)+":/run/secrets/postgres-admin:ro", "-v", r.artifactPath(o.Config)+":/etc/sub2api/postgresql.conf:ro", "-v", r.artifactPath(o.HBA)+":/etc/sub2api/pg_hba.conf:ro", "-v", r.artifactPath(o.Ident)+":/etc/sub2api/pg_ident.conf:ro", "-e", "POSTGRES_USER=s2h_admin", "-e", "POSTGRES_DB=postgres", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-admin", "-e", "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer", "-e", "PGDATA=/var/lib/postgresql/data", o.Image, "-c", "config_file=/etc/sub2api/postgresql.conf", "-p", strconv.Itoa(o.Port))
 	} else {
 		args[len(args)-1] += "/data"
 		args = append(args, "--env-file", r.artifactPath(o.Env), "-v", r.artifactPath(o.Config)+":/usr/local/etc/redis/redis.conf:ro", o.Image, "redis-server", "/usr/local/etc/redis/redis.conf")
@@ -2807,6 +2813,22 @@ func (r *Runtime) removeRouteProgress(inv inventory, o managedObject, allowAbsen
 	return recovery()
 }
 func (r *Runtime) removeArtifact(name string) error {
+	return r.removeArtifactMode(name, 0600)
+}
+
+type artifactModeMismatchError struct{ mode uint32 }
+
+func (artifactModeMismatchError) Error() string { return "artifact mode" }
+
+type artifactPostUnlinkError struct{ err error }
+
+func (e artifactPostUnlinkError) Error() string { return e.err.Error() }
+func (e artifactPostUnlinkError) Unwrap() error { return e.err }
+
+func (r *Runtime) removeArtifactMode(name string, mode uint32) error {
+	if mode != 0600 && mode != 0644 {
+		return errors.New("artifact")
+	}
 	if !validArtifactName(name) {
 		return errors.New("artifact")
 	}
@@ -2820,19 +2842,30 @@ func (r *Runtime) removeArtifact(name string) error {
 		return err
 	}
 	var st syscall.Stat_t
-	if syscall.Fstat(fd, &st) != nil || st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Mode&0077 != 0 || int(st.Uid) != r.expectedUID || st.Nlink != 1 {
+	if syscall.Fstat(fd, &st) != nil || st.Mode&syscall.S_IFMT != syscall.S_IFREG || int(st.Uid) != r.expectedUID || st.Nlink != 1 {
 		syscall.Close(fd)
 		return errors.New("unsafe artifact")
+	}
+	if st.Mode&07777 != mode {
+		syscall.Close(fd)
+		return artifactModeMismatchError{mode: st.Mode & 07777}
 	}
 	syscall.Close(fd)
 	if err = syscall.Unlinkat(dir, name); err != nil {
 		return err
 	}
-	if err = syscall.Fsync(dir); err != nil {
-		return err
+	if artifactRemoveSyncHook != nil {
+		err = artifactRemoveSyncHook(dir)
+	} else {
+		err = syscall.Fsync(dir)
+	}
+	if err != nil {
+		return artifactPostUnlinkError{err: err}
 	}
 	if artifactRemoveHook != nil {
-		return artifactRemoveHook(name)
+		if err := artifactRemoveHook(name); err != nil {
+			return artifactPostUnlinkError{err: err}
+		}
 	}
 	return nil
 }
@@ -2842,6 +2875,37 @@ func (r *Runtime) removeEnv(name string) error {
 		return nil
 	}
 	return err
+}
+func (r *Runtime) removeLocalArtifact(o managedObject, name string) error {
+	mode := uint32(0600)
+	if isPostgresStartupArtifact(o, name) {
+		mode = 0644
+	}
+	err := r.removeArtifactMode(name, mode)
+	if err == nil || artifactMissingBeforeUnlink(err) {
+		return nil
+	}
+	if mode == 0600 {
+		return err
+	}
+	var mismatch artifactModeMismatchError
+	if !errors.As(err, &mismatch) || mismatch.mode != 0600 {
+		return err
+	}
+	err = r.removeArtifactMode(name, 0600)
+	if artifactMissingBeforeUnlink(err) {
+		return nil
+	}
+	return err
+}
+
+func artifactMissingBeforeUnlink(err error) bool {
+	var postUnlink artifactPostUnlinkError
+	return errors.Is(err, os.ErrNotExist) && !errors.As(err, &postUnlink)
+}
+
+func isPostgresStartupArtifact(o managedObject, name string) bool {
+	return o.Role == "local-data" && o.Type == "postgres" && (name == o.Config || name == o.HBA || name == o.Ident)
 }
 
 type artifactDir uint8
@@ -2858,7 +2922,19 @@ func artifactDirectory(name string) artifactDir {
 	return managedDir
 }
 func (r *Runtime) writeArtifact(name string, b []byte, mode uint32) error {
-	if !validArtifactName(name) || mode != 0600 || len(b) > maxArtifactSize {
+	if mode != 0600 {
+		return errors.New("artifact")
+	}
+	return r.writeArtifactMode(name, b, mode)
+}
+func (r *Runtime) writePostgresArtifact(o managedObject, name string, b []byte) error {
+	if !isPostgresStartupArtifact(o, name) {
+		return errors.New("artifact")
+	}
+	return r.writeArtifactMode(name, b, 0644)
+}
+func (r *Runtime) writeArtifactMode(name string, b []byte, mode uint32) error {
+	if !validArtifactName(name) || mode != 0600 && mode != 0644 || len(b) > maxArtifactSize {
 		return errors.New("artifact")
 	}
 	dir, e := r.runtimeDir(true, artifactParts(artifactDirectory(name))...)
@@ -2879,7 +2955,7 @@ func (r *Runtime) writeArtifact(name string, b []byte, mode uint32) error {
 		if x != nil {
 			return x
 		}
-		x = syscall.Fchmod(fd, 0600)
+		x = syscall.Fchmod(fd, mode)
 		for off := 0; x == nil && off < len(b); {
 			n, w := syscall.Write(fd, b[off:])
 			if w != nil {
@@ -2907,7 +2983,33 @@ func (r *Runtime) writeArtifact(name string, b []byte, mode uint32) error {
 	return errors.New("artifact collision")
 }
 func (r *Runtime) readArtifactBytes(name string) ([]byte, error) {
+	return r.readArtifactBytesMode(name, 0600)
+}
+func (r *Runtime) validateArtifactMetadata(name string) error {
 	if !validArtifactName(name) {
+		return errors.New("artifact")
+	}
+	dir, err := r.runtimeDir(false, artifactParts(artifactDirectory(name))...)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(dir)
+	fd, err := syscall.Openat(dir, name, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	return r.validateArtifactFD(fd, 0600)
+}
+func (r *Runtime) validateArtifactFD(fd int, mode uint32) error {
+	var st syscall.Stat_t
+	if syscall.Fstat(fd, &st) != nil || st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Mode&07777 != mode || int(st.Uid) != r.expectedUID || st.Nlink != 1 || st.Size > maxArtifactSize {
+		return errors.New("unsafe artifact")
+	}
+	return nil
+}
+func (r *Runtime) readArtifactBytesMode(name string, mode uint32) ([]byte, error) {
+	if !validArtifactName(name) || mode != 0600 && mode != 0644 {
 		return nil, errors.New("artifact")
 	}
 	dir, e := r.runtimeDir(false, artifactParts(artifactDirectory(name))...)
@@ -2919,10 +3021,9 @@ func (r *Runtime) readArtifactBytes(name string) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-	var st syscall.Stat_t
-	if syscall.Fstat(fd, &st) != nil || st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Mode&0077 != 0 || int(st.Uid) != r.expectedUID || st.Nlink != 1 || st.Size > maxArtifactSize {
+	if err := r.validateArtifactFD(fd, mode); err != nil {
 		syscall.Close(fd)
-		return nil, errors.New("unsafe artifact")
+		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()

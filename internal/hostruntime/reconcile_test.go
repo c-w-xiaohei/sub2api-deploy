@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -82,6 +83,13 @@ func TestReconcileProjectsLocalDataBeforeAppsAndTraefikRoute(t *testing.T) {
 	}
 	if !runner.beforeRun(pg.Name, objectName(state, "app", appToken("one"), "green")) || !runner.beforeRun(cache.Name, objectName(state, "app", appToken("one"), "green")) {
 		t.Fatalf("data was not ready before app: %#v", runner.calls)
+	}
+	for _, call := range runner.calls {
+		for i, arg := range call {
+			if arg == "psql" && !containsPair(call[i+1:], "-p", "5433") {
+				t.Fatalf("PostgreSQL command omitted configured port: %#v", call)
+			}
+		}
 	}
 	appName := objectName(state, "app", appToken("one"), "green")
 	proxyName := objectName(state, "proxy", "proxy", "live")
@@ -398,7 +406,7 @@ func TestLocalDataRunBindsExactlyAndUsesStableAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := runner.calls[len(runner.calls)-1]
-	if !containsPair(call, "--network-alias", "primary") || !containsPair(call, "-p", "10.0.0.8:5432:5432/tcp") || !containsPair(call, "-p", "[2001:db8::8]:5432:5432/tcp") || containsPair(call, "-p", "5432:5432") || containsPair(call, "-p", "0.0.0.0:5432:5432") {
+	if !containsPair(call, "--network-alias", "primary") || !containsPair(call, "-p", "10.0.0.8:5432:5432/tcp") || !containsPair(call, "-p", "[2001:db8::8]:5432:5432/tcp") || containsPair(call, "-p", "5432:5432") || containsPair(call, "-p", "0.0.0.0:5432:5432") || !containsPair(call, "-e", "PGDATA=/var/lib/postgresql/data") {
 		t.Fatalf("docker argv=%#v", call)
 	}
 	runner.calls = nil
@@ -874,7 +882,7 @@ func TestInspectPostgresSecurityArtifactDriftIsReadOnly(t *testing.T) {
 				name = pg.Ident
 			}
 			beforeState, beforeInventory := mustFile(t, rt.statePath()), mustArtifact(t, rt, artifactInventory)
-			if err := rt.removeArtifact(name); err != nil {
+			if err := rt.removeArtifactMode(name, 0644); err != nil {
 				t.Fatal(err)
 			}
 			runner.calls = nil
@@ -940,13 +948,13 @@ func TestWaitLocalReadyRetriesPostgresUntilFixedProbeSucceeds(t *testing.T) {
 		return nil
 	}
 	rt.runner = runner
-	o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}, revisionB())
+	o := localObject(state, hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5433}, revisionB())
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := rt.waitLocalReady(ctx, o, time.Millisecond); err != nil || attempts != 3 {
 		t.Fatalf("wait=%v attempts=%d calls=%#v", err, attempts, runner.calls)
 	}
-	if runner.hasSecret("POSTGRES_CANARY") || !runner.hasCall([]string{"exec", o.Name, "psql", "-X", "-U", "s2h_admin", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1"}) {
+	if runner.hasSecret("POSTGRES_CANARY") || !runner.hasCall([]string{"exec", o.Name, "psql", "-X", "-U", "s2h_admin", "-d", "postgres", "-p", "5433", "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1"}) {
 		t.Fatalf("postgres probe changed or leaked: %#v", runner.calls)
 	}
 }
@@ -1274,6 +1282,11 @@ func TestLocalDataRemovalRestoresMetadataAndRejectsDifferentTypeBeforeMutation(t
 	if err := os.WriteFile(filepath.Join(rt.dataPath(pg.DataToken), "sentinel"), []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	for _, artifact := range []string{pg.Config, pg.HBA, pg.Ident} {
+		if err := os.Chmod(rt.artifactPath(artifact), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	state, _ = rt.readState()
 	if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionC())); err != nil {
 		t.Fatal(err)
@@ -1392,7 +1405,7 @@ func TestPostgresHasExplicitScramConfigAndHBAArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	pg := findLocalData(mustInventory(t, rt), localDataToken("primary"))
-	config, hba := string(mustArtifact(t, rt, pg.Config)), string(mustArtifact(t, rt, pg.HBA))
+	config, hba := string(mustArtifactMode(t, rt, pg.Config, 0644)), string(mustArtifactMode(t, rt, pg.HBA, 0644))
 	if !strings.Contains(config, "listen_addresses = '*'\npassword_encryption = 'scram-sha-256'\n") || strings.Contains(hba, "trust") || !strings.Contains(hba, "host app_db app_one all scram-sha-256") || strings.Contains(hba, "172.30.") || !strings.Contains(hba, "host all all all reject") || !runner.anyArg("-v", rt.artifactPath(pg.Config)+":/etc/sub2api/postgresql.conf:ro") || !runner.anyArg("-v", rt.artifactPath(pg.HBA)+":/etc/sub2api/pg_hba.conf:ro") || runner.hasSecret("safe") || runner.hasSecret("CLIENT_SECRET") {
 		t.Fatalf("config=%q hba=%q calls=%#v", config, hba, runner.calls)
 	}
@@ -1434,6 +1447,11 @@ func TestReconcilePostgresClientChangeReplacesShellAndPreservesData(t *testing.T
 	if err := os.WriteFile(filepath.Join(rt.dataPath(old.DataToken), "sentinel"), []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	for _, artifact := range []string{old.Config, old.HBA, old.Ident} {
+		if err := os.Chmod(rt.artifactPath(artifact), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	state = mustState(t, rt)
 	runner := rt.runner.(*statefulCatalogRunner)
 	runner.calls = nil
@@ -1461,7 +1479,7 @@ func TestReconcilePostgresClientChangeReplacesShellAndPreservesData(t *testing.T
 	if database := runner.catalog.databases["new_db"]; !database.finalized || database.operation != targetOperation {
 		t.Fatalf("new database catalog=%#v", runner.catalog.databases)
 	}
-	hba := string(mustArtifact(t, rt, next.HBA))
+	hba := string(mustArtifactMode(t, rt, next.HBA, 0644))
 	if !strings.Contains(hba, "host new_db new_user all scram-sha-256\n") || strings.Contains(hba, "old_db") || strings.Contains(hba, "old_user") || strings.Contains(hba, "10.0.0.9") || strings.Contains(hba, "trust") {
 		t.Fatalf("HBA=%q", hba)
 	}
@@ -1474,7 +1492,11 @@ func TestReconcilePostgresClientChangeReplacesShellAndPreservesData(t *testing.T
 		}
 	}
 	for _, artifact := range []string{next.Env, next.Config, next.HBA, next.Ident} {
-		if _, err := rt.readArtifactBytes(artifact); err != nil {
+		mode := uint32(0600)
+		if artifact != next.Env {
+			mode = 0644
+		}
+		if _, err := rt.readArtifactBytesMode(artifact, mode); err != nil {
 			t.Fatalf("new artifact %q: %v", artifact, err)
 		}
 	}
@@ -1492,9 +1514,189 @@ func TestPostgresUsesFixedPeerAdminAndPasswordFile(t *testing.T) {
 	if err := rt.writeLocalSecrets(context.Background(), state, o, target, hostcontract.LocalDataServiceSecrets{AdminPassword: "a$$;=mid'quote", ClientPasswords: map[string]string{"api-blue": "c$$;=mid'quote"}}); err != nil {
 		t.Fatal(err)
 	}
-	env, config, hba, ident := string(mustArtifact(t, rt, o.Env)), string(mustArtifact(t, rt, o.Config)), string(mustArtifact(t, rt, o.HBA)), string(mustArtifact(t, rt, o.Ident))
+	env, config, hba, ident := string(mustArtifact(t, rt, o.Env)), string(mustArtifactMode(t, rt, o.Config, 0644)), string(mustArtifactMode(t, rt, o.HBA, 0644)), string(mustArtifactMode(t, rt, o.Ident, 0644))
 	if env != "a$$;=mid'quote\n" || !strings.Contains(config, "ident_file = '/etc/sub2api/pg_ident.conf'\n") || !strings.Contains(hba, "local all all peer map=s2h_admin\n") || !strings.Contains(hba, "host app_db api_blue all scram-sha-256\n") || strings.Contains(hba, "10.0.0.9") || !strings.Contains(hba, "local all all reject\n") || !strings.Contains(ident, "s2h_admin root s2h_admin\n") || strings.Contains(hba, "trust") {
 		t.Fatalf("env=%q config=%q hba=%q ident=%q", env, config, hba, ident)
+	}
+}
+
+func TestPostgresStartupArtifactsUseExactModesAndRejectModeDrift(t *testing.T) {
+	rt, state := initialized(t)
+	target := hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}
+	o := localObject(state, target, revisionB())
+	if err := rt.writeLocalSecrets(t.Context(), state, o, target, hostcontract.LocalDataServiceSecrets{AdminPassword: "safe"}); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := []struct {
+		name string
+		mode uint32
+	}{
+		{o.Env, 0600},
+		{o.Config, 0644},
+		{o.HBA, 0644},
+		{o.Ident, 0644},
+	}
+	for _, artifact := range artifacts {
+		info, err := os.Lstat(rt.artifactPath(artifact.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.Mode().IsRegular() || st.Nlink != 1 || int(st.Uid) != rt.expectedUID {
+			t.Fatalf("unsafe artifact %q: %#v", artifact.name, info)
+		}
+		if mode := st.Mode & 07777; mode != artifact.mode {
+			t.Fatalf("%q mode=%#o want=%#o", artifact.name, mode, artifact.mode)
+		}
+	}
+	if !rt.localSecurityArtifactsValid(o) {
+		t.Fatal("generated PostgreSQL security artifacts rejected")
+	}
+	if err := os.Chmod(rt.artifactPath(o.Config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if rt.localSecurityArtifactsValid(o) {
+		t.Fatal("PostgreSQL config wrong mode accepted")
+	}
+	if _, err := rt.readArtifactBytesMode(o.Config, 0644); err == nil {
+		t.Fatal("PostgreSQL config reader accepted wrong mode")
+	}
+	if err := os.Chmod(rt.artifactPath(o.Env), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.readArtifactBytes(o.Env); err == nil {
+		t.Fatal("password artifact wrong mode accepted")
+	}
+	if err := os.Chmod(rt.artifactPath(o.HBA), 0644|os.ModeSetuid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.readArtifactBytesMode(o.HBA, 0644); err == nil {
+		t.Fatal("PostgreSQL config special mode accepted")
+	}
+	redis := localObject(state, hostcontract.LocalDataServiceTarget{ID: "cache", Type: "redis", Port: 6380}, revisionB())
+	if err := rt.writePostgresArtifact(redis, redis.Config, []byte("must not widen")); err == nil {
+		t.Fatal("Redis config accepted PostgreSQL container-readable writer")
+	}
+	if err := rt.writePostgresArtifact(o, o.Env, []byte("must not widen")); err == nil {
+		t.Fatal("PostgreSQL password accepted container-readable writer")
+	}
+	proxy := managedObject{Role: "proxy", Type: "postgres", Config: o.Config}
+	if err := rt.writePostgresArtifact(proxy, proxy.Config, []byte("must not widen")); err == nil {
+		t.Fatal("proxy config accepted PostgreSQL container-readable writer")
+	}
+}
+
+func TestInspectLocalDataSecretArtifactModeDriftIsReadOnly(t *testing.T) {
+	for _, service := range []struct {
+		kind string
+		port int
+	}{
+		{"postgres", 5432},
+		{"redis", 6380},
+	} {
+		for _, mutation := range []struct {
+			name  string
+			apply func(string) error
+		}{
+			{"missing", os.Remove},
+			{"widened", func(name string) error { return os.Chmod(name, 0644) }},
+			{"special", func(name string) error { return os.Chmod(name, 0600|os.ModeSetuid) }},
+			{"oversized", func(name string) error { return os.Truncate(name, maxArtifactSize+1) }},
+		} {
+			t.Run(service.kind+"/"+mutation.name, func(t *testing.T) {
+				rt, state := initialized(t)
+				runner := &recordingRunner{}
+				rt.runner = runner
+				req := requestFor(state, revisionB())
+				req.Target.DataServices = []hostcontract.LocalDataServiceTarget{{ID: service.kind, Type: service.kind, Port: service.port}}
+				req.Secrets.LocalDataServices = map[string]hostcontract.LocalDataServiceSecrets{service.kind: {AdminPassword: "safe"}}
+				if _, err := rt.Reconcile(t.Context(), req); err != nil {
+					t.Fatal(err)
+				}
+				o := findLocalData(mustInventory(t, rt), localDataToken(service.kind))
+				if err := mutation.apply(rt.artifactPath(o.Env)); err != nil {
+					t.Fatal(err)
+				}
+				beforeState, beforeInventory := mustFile(t, rt.statePath()), mustArtifact(t, rt, artifactInventory)
+				runner.calls = nil
+				observed, err := rt.Inspect(state.Resource)
+				if err != nil || !observed.Drifted || observed.Ready || runner.dockerMutations() != 0 || !bytes.Equal(beforeState, mustFile(t, rt.statePath())) || !bytes.Equal(beforeInventory, mustArtifact(t, rt, artifactInventory)) {
+					t.Fatalf("inspect=%#v err=%v calls=%#v", observed, err, runner.calls)
+				}
+			})
+		}
+	}
+}
+
+func TestPostgresLegacyArtifactCleanupFallsBackOnlyForPreUnlinkModeMismatch(t *testing.T) {
+	rt, state := initialized(t)
+	target := hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}
+	o := localObject(state, target, revisionB())
+	if err := rt.writeLocalSecrets(t.Context(), state, o, target, hostcontract.LocalDataServiceSecrets{AdminPassword: "safe"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(rt.artifactPath(o.Config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.removeLocalArtifact(o, o.Config); err != nil {
+		t.Fatalf("legacy mode cleanup = %v", err)
+	}
+	if _, err := os.Lstat(rt.artifactPath(o.Config)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy config remains: %v", err)
+	}
+	for _, fail := range []struct {
+		name       string
+		legacyMode bool
+		set        func()
+	}{
+		{name: "sync", set: func() { artifactRemoveSyncHook = func(int) error { return errors.New("sync failed") } }},
+		{name: "hook", set: func() { artifactRemoveHook = func(string) error { return errors.New("hook failed") } }},
+		{name: "not-exist hook", set: func() { artifactRemoveHook = func(string) error { return os.ErrNotExist } }},
+		{name: "legacy not-exist hook", legacyMode: true, set: func() { artifactRemoveHook = func(string) error { return os.ErrNotExist } }},
+	} {
+		t.Run(fail.name, func(t *testing.T) {
+			if err := rt.writePostgresArtifact(o, o.Config, []byte("config")); err != nil {
+				t.Fatal(err)
+			}
+			if fail.legacyMode {
+				if err := os.Chmod(rt.artifactPath(o.Config), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fail.set()
+			t.Cleanup(func() { artifactRemoveSyncHook, artifactRemoveHook = nil, nil })
+			if err := rt.removeLocalArtifact(o, o.Config); err == nil {
+				t.Fatal("post-unlink failure was masked")
+			}
+			if _, err := os.Lstat(rt.artifactPath(o.Config)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("removed config unexpectedly remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestSecretArtifactMetadataValidationRejectsUnsafeMetadata(t *testing.T) {
+	rt, state := initialized(t)
+	target := hostcontract.LocalDataServiceTarget{ID: "primary", Type: "postgres", Port: 5432}
+	o := localObject(state, target, revisionB())
+	if err := rt.writeLocalSecrets(t.Context(), state, o, target, hostcontract.LocalDataServiceSecrets{AdminPassword: "SECRET"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(string) error{
+		func(name string) error { return os.Remove(name) },
+		func(name string) error { return os.Chmod(name, 0644) },
+		func(name string) error { return os.Chmod(name, 0600|os.ModeSetgid) },
+		func(name string) error { return os.Truncate(name, maxArtifactSize+1) },
+	} {
+		if err := rt.writeArtifact(o.Env, []byte("SECRET\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := mutate(rt.artifactPath(o.Env)); err != nil {
+			t.Fatal(err)
+		}
+		if err := rt.validateArtifactMetadata(o.Env); err == nil {
+			t.Fatal("unsafe secret metadata accepted")
+		}
 	}
 }
 
@@ -3980,7 +4182,7 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 	if len(argv) > 1 && argv[0] == "network" && argv[1] == "rm" && r.networks != nil {
 		delete(r.networks, argv[len(argv)-1])
 	}
-	if len(argv) == 12 && argv[0] == "exec" && argv[1] == "-i" && argv[3] == "psql" && argv[4] == "-X" && argv[5] == "-qAt" && argv[6] == "-v" && argv[7] == "ON_ERROR_STOP=1" && argv[8] == "-U" && argv[9] == "s2h_admin" && argv[10] == "-d" && argv[11] == "postgres" && strings.Contains(string(stdin), "ALTER ROLE %I PASSWORD %L") {
+	if len(argv) == 14 && argv[0] == "exec" && argv[1] == "-i" && argv[3] == "psql" && argv[4] == "-X" && argv[5] == "-qAt" && argv[6] == "-v" && argv[7] == "ON_ERROR_STOP=1" && argv[8] == "-U" && argv[9] == "s2h_admin" && argv[10] == "-d" && argv[11] == "postgres" && argv[12] == "-p" && argv[13] != "" && strings.Contains(string(stdin), "ALTER ROLE %I PASSWORD %L") {
 		password, ok := postgresPasswordFromSQL(string(stdin))
 		if !ok {
 			return nil, errors.New("invalid postgres sql")
@@ -4366,6 +4568,14 @@ func retireRequest(key hostcontract.OperationKey, approval hostcontract.Approval
 func mustArtifact(t *testing.T, rt *Runtime, name string) []byte {
 	t.Helper()
 	b, e := rt.readArtifactBytes(name)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return b
+}
+func mustArtifactMode(t *testing.T, rt *Runtime, name string, mode uint32) []byte {
+	t.Helper()
+	b, e := rt.readArtifactBytesMode(name, mode)
 	if e != nil {
 		t.Fatal(e)
 	}
