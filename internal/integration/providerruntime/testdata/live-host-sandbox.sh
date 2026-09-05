@@ -6,7 +6,7 @@ set -eu
 docker_failure_reason() {
   log=${1:?}
   fallback=${2:?}
-  if [ ! -s "$log" ]; then
+  if [ "$fallback" = timeout ] || [ ! -s "$log" ]; then
     printf '%s' "$fallback"
   elif grep -Eqi 'permission denied|operation not permitted' "$log"; then
     printf '%s' permission
@@ -23,6 +23,9 @@ docker_failure_reason() {
   else
     printf '%s' "$fallback"
   fi
+}
+docker_cli() {
+  docker -H unix:///var/run/docker.sock "$@"
 }
 if [ "${1:-}" = --classify-docker-log ]; then
   docker_failure_reason "${2:?}" "${3:?}"
@@ -67,21 +70,21 @@ stage=docker-start
 setsid dockerd --storage-driver vfs --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
 dockerd=$!
 i=0
-until docker info >/dev/null 2>&1; do
+until docker_cli info >/dev/null 2>&1; do
   if ! kill -0 "$dockerd" 2>/dev/null; then
     stage="docker-$(docker_failure_reason "$log" unknown)"
     exit 1
   fi
   i=$((i + 1))
   if [ "$i" -ge 45 ]; then
-    stage="docker-$(docker_failure_reason "$log" timeout)"
+    stage=docker-timeout
     exit 1
   fi
   sleep 1
 done
 stage=image-load
-docker load --input "$images" >/dev/null 2>&1
-docker image inspect postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist >/dev/null 2>&1
+docker_cli load --input "$images" >/dev/null 2>&1
+docker_cli image inspect postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist >/dev/null 2>&1
 stage=sshd-start
 setsid /usr/sbin/sshd -D -e -f "$root/$name/sshd_config" >>"$log" 2>&1 &
 sshd=$!

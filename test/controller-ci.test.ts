@@ -119,6 +119,11 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("provider-runtime-dockerd-${TARGET_SHA}.log");
     expect(liveHostSandbox).toContain('dockerd --storage-driver vfs --data-root "$root/$name/docker"');
     expect(liveHostSandbox).not.toContain("--storage-driver overlay");
+    expect(liveHostSandbox).toContain('docker -H unix:///var/run/docker.sock "$@"');
+    expect(liveHostSandbox).toContain("until docker_cli info >/dev/null 2>&1; do");
+    expect(liveHostSandbox).toContain('docker_cli load --input "$images" >/dev/null 2>&1');
+    expect(liveHostSandbox).toContain("docker_cli image inspect postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist >/dev/null 2>&1");
+    expect(liveHostSandbox).toContain("stage=docker-timeout\n    exit 1");
     const dataWait = 'wait_ready data "$data_pid"';
     const appStart = '"$root/host-sandbox.sh" app &';
     const appWait = 'wait_ready app "$app_pid" "$data_pid"';

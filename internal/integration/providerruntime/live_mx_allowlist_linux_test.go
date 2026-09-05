@@ -1022,6 +1022,7 @@ func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *tes
 		{name: "storage", log: "failed to initialize storage driver overlay", fallback: "unknown", want: "storage"},
 		{name: "containerd", log: "failed to connect to containerd", fallback: "unknown", want: "containerd"},
 		{name: "unrecognized timeout", log: "daemon still starting", fallback: "timeout", want: "timeout"},
+		{name: "benign storage text during timeout", log: "using storage driver vfs", fallback: "timeout", want: "timeout"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
