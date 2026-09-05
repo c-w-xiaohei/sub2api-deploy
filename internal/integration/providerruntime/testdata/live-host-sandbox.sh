@@ -59,7 +59,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT INT TERM
-mkdir -p "$root/$name" "$root/$name/run" "$root/$name/docker" "$root/$name/mount"
+mkdir -p "$root/$name" "$root/$name/docker" "$root/$name/mount"
 mount --bind "$root/$name.machine-id" /etc/machine-id
 mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
 mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
@@ -68,7 +68,7 @@ mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
 printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
 printf '%s\n' '{}' >"$root/$name/daemon.json"
 stage=docker-start
-setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root "$root/$name/run" --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
+setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root /var/run/sub2api-docker --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
 dockerd=$!
 i=0
 until docker_cli info >/dev/null 2>&1; do
