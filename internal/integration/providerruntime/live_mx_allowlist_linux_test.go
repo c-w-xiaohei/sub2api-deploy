@@ -1052,6 +1052,7 @@ func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *tes
 		{name: "network", log: "failed to create network controller", fallback: "unknown", want: "network"},
 		{name: "storage", log: "failed to initialize storage driver overlay", fallback: "unknown", want: "storage"},
 		{name: "cgroup", log: "failed to start daemon: unable to find cpu cgroup mount", fallback: "unknown", want: "cgroup"},
+		{name: "benign cgroup warning", log: `level=warning msg="Your kernel does not support cgroup blkio weight"`, fallback: "unknown", want: "unknown"},
 		{name: "runtime helper", log: "failed to start daemon: docker-proxy executable file not found in PATH", fallback: "unknown", want: "helper"},
 		{name: "configuration", log: "failed to start daemon: invalid configuration", fallback: "unknown", want: "config"},
 		{name: "filesystem state", log: "failed to start daemon: error creating daemon root", fallback: "unknown", want: "filesystem"},
