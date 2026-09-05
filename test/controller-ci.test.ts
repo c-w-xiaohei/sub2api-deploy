@@ -170,6 +170,8 @@ describe("Task4 CI contracts", () => {
     const dataWait = 'wait_ready data "$data_pid"';
     const appStart = '"$root/host-sandbox.sh" app &';
     const appWait = 'wait_ready app "$app_pid" "$data_pid"';
+    expect(liveRuntime).toContain("ip link set lo up");
+    expect(liveRuntime.indexOf("ip link set lo up")).toBeLessThan(liveRuntime.indexOf(dataWait));
     for (const command of [dataWait, appStart, appWait]) expect(liveRuntime).toContain(command);
     expect(liveRuntime.indexOf(dataWait)).toBeLessThan(liveRuntime.indexOf(appStart));
     expect(liveRuntime.indexOf(appStart)).toBeLessThan(liveRuntime.indexOf(appWait));
