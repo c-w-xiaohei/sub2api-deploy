@@ -18,6 +18,14 @@ docker_failure_reason() {
     printf '%s' network
   elif grep -Eqi 'failed.*(storage driver|graphdriver|overlay|volume store|filesystem)|error (initializing|mounting).*(graphdriver|overlay|filesystem)' "$log"; then
     printf '%s' storage
+  elif grep -Eqi '(containerd|unix|socket).*(file name too long|path too long|invalid argument)|(file name too long|path too long).*(containerd|unix|socket)' "$log"; then
+    printf '%s' containerd-path
+  elif grep -Eqi '(containerd).*(timeout|timed out)|(timeout|timed out).*(containerd)' "$log"; then
+    printf '%s' containerd-timeout
+  elif grep -Eqi '(containerd).*(connection refused|no such file|unavailable)|(connection refused|no such file|unavailable).*(containerd)' "$log"; then
+    printf '%s' containerd-socket
+  elif grep -Eqi '(containerd).*(exited|exit status|killed|terminated)|(exited|exit status|killed|terminated).*(containerd)' "$log"; then
+    printf '%s' containerd-exit
   elif grep -Eqi '(failed|error|timeout|timed out).*(containerd)|(containerd).*(failed|error|timeout|timed out)' "$log"; then
     printf '%s' containerd
   else
