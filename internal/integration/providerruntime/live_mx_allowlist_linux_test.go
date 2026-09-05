@@ -1022,6 +1022,9 @@ func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *tes
 		{name: "network", log: "failed to create network controller", fallback: "unknown", want: "network"},
 		{name: "storage", log: "failed to initialize storage driver overlay", fallback: "unknown", want: "storage"},
 		{name: "containerd", log: "failed to connect to containerd", fallback: "unknown", want: "containerd"},
+		{name: "benign storage text during early exit", log: `time="2026-09-05T00:00:00Z" level=info msg="using storage driver vfs"`, fallback: "unknown", want: "unknown"},
+		{name: "benign containerd text during early exit", log: `time="2026-09-05T00:00:00Z" level=info msg="starting containerd"`, fallback: "unknown", want: "unknown"},
+		{name: "fatal graphdriver after benign storage text", log: "level=info msg=\"using storage driver vfs\"\nfailed to start daemon: error initializing graphdriver", fallback: "unknown", want: "storage"},
 		{name: "unrecognized timeout", log: "daemon still starting", fallback: "timeout", want: "timeout"},
 		{name: "benign storage text during timeout", log: "using storage driver vfs", fallback: "timeout", want: "timeout"},
 	}

@@ -16,9 +16,9 @@ docker_failure_reason() {
     printf '%s' conflict
   elif grep -Eqi 'network controller|iptables|ip6tables|bridge driver' "$log"; then
     printf '%s' network
-  elif grep -Eqi 'storage driver|overlay|volume store|filesystem' "$log"; then
+  elif grep -Eqi 'failed.*(storage driver|graphdriver|overlay|volume store|filesystem)|error (initializing|mounting).*(graphdriver|overlay|filesystem)' "$log"; then
     printf '%s' storage
-  elif grep -Eqi 'containerd' "$log"; then
+  elif grep -Eqi '(failed|error|timeout|timed out).*(containerd)|(containerd).*(failed|error|timeout|timed out)' "$log"; then
     printf '%s' containerd
   else
     printf '%s' "$fallback"
