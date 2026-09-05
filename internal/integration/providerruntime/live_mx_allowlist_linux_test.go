@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"google.golang.org/grpc"
@@ -95,6 +97,11 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 		t.Fatal("released Provider configure failed")
 	}
 	dataInput := liveDataInputs(artifacts.release, fixture.dataIP, fixture.appIP)
+	reportLiveStage("data-ssh-probe")
+	if _, err := openssh.New().Probe(ctx, "live-data"); err != nil {
+		reportLiveStage(liveSSHProbeFailureStage(err))
+		t.Fatal("live data SSH probe failed")
+	}
 	reportLiveStage("data-create")
 	dataCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::data", Properties: rpcProperties(t, dataInput)})
 	if err != nil || dataCreated == nil || dataCreated.Id == "" {
@@ -982,6 +989,12 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"namespace-prerequisites":           true,
 		"provider-start":                    true,
 		"provider-configure":                true,
+		"data-ssh-probe":                    true,
+		"data-ssh-probe-host-key":           true,
+		"data-ssh-probe-protocol":           true,
+		"data-ssh-probe-timeout":            true,
+		"data-ssh-probe-transport":          true,
+		"data-ssh-probe-unknown":            true,
 		"data-create":                       true,
 		"data-create-artifact":              true,
 		"data-create-bootstrap":             true,
@@ -1041,6 +1054,22 @@ func liveDataCreateFailureStage(err error) string {
 	}
 }
 
+func liveSSHProbeFailureStage(err error) string {
+	const prefix = "data-ssh-probe-"
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return prefix + "timeout"
+	case errors.Is(err, openssh.ErrHostKey):
+		return prefix + "host-key"
+	case errors.Is(err, openssh.ErrProtocol):
+		return prefix + "protocol"
+	case errors.Is(err, openssh.ErrTransport):
+		return prefix + "transport"
+	default:
+		return prefix + "unknown"
+	}
+}
+
 func TestLiveFailureCategoryReportsOnlyKnownLastStage(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1088,6 +1117,27 @@ func TestLiveDataCreateFailureStageReportsOnlyFixedClasses(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := liveDataCreateFailureStage(test.err); got != test.want {
 				t.Fatalf("liveDataCreateFailureStage() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLiveSSHProbeFailureStageReportsOnlyFixedClasses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "timeout", err: context.DeadlineExceeded, want: "data-ssh-probe-timeout"},
+		{name: "host key", err: fmt.Errorf("wrapped: %w", openssh.ErrHostKey), want: "data-ssh-probe-host-key"},
+		{name: "protocol", err: fmt.Errorf("wrapped: %w", openssh.ErrProtocol), want: "data-ssh-probe-protocol"},
+		{name: "transport", err: fmt.Errorf("wrapped: %w", openssh.ErrTransport), want: "data-ssh-probe-transport"},
+		{name: "unknown", err: errors.New("credential canary"), want: "data-ssh-probe-unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := liveSSHProbeFailureStage(test.err); got != test.want {
+				t.Fatalf("liveSSHProbeFailureStage() = %q, want %q", got, test.want)
 			}
 		})
 	}
