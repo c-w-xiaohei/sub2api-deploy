@@ -348,14 +348,14 @@ func prepareLiveSSH(t *testing.T, f *liveFixture) {
 		writePrivate(t, filepath.Join(root, host+".machine-id"), []byte(liveMachineID(host)+"\n"))
 	}
 	pub := strings.TrimSpace(string(mustRead(t, filepath.Join(root, "client-key.pub"))))
+	writePrivate(t, filepath.Join(root, "home", ".ssh", "authorized_keys"), []byte(pub+"\n"))
 	var config, known strings.Builder
 	for _, item := range []struct{ name, ip string }{
 		{"data", f.dataIP},
 		{"app", f.appIP},
 	} {
 		host := strings.TrimSpace(string(commandOutput(t, 10*time.Second, "ssh-keygen", "-y", "-f", filepath.Join(root, item.name+".host-key"))))
-		writePrivate(t, filepath.Join(root, item.name, "authorized_keys"), []byte(pub+"\n"))
-		writePrivate(t, filepath.Join(root, item.name, "sshd_config"), []byte("Port 2222\nListenAddress "+item.ip+"\nHostKey "+filepath.Join(root, item.name+".host-key")+"\nAuthorizedKeysFile "+filepath.Join(root, item.name, "authorized_keys")+"\nPidFile /var/run/sshd.pid\nUsePAM no\nPasswordAuthentication no\nChallengeResponseAuthentication no\nPermitRootLogin prohibit-password\nStrictModes yes\nLogLevel QUIET\n"))
+		writePrivate(t, filepath.Join(root, item.name, "sshd_config"), []byte("Port 2222\nListenAddress "+item.ip+"\nHostKey "+filepath.Join(root, item.name+".host-key")+"\nAuthorizedKeysFile /root/.ssh/authorized_keys\nPidFile /var/run/sshd.pid\nUsePAM no\nPasswordAuthentication no\nChallengeResponseAuthentication no\nPermitRootLogin prohibit-password\nStrictModes yes\nLogLevel QUIET\n"))
 		config.WriteString("Host live-" + item.name + "\n HostName " + item.ip + "\n Port 2222\n User root\n IdentityFile " + filepath.Join(root, "client-key") + "\n IdentitiesOnly yes\n UserKnownHostsFile " + filepath.Join(root, "home", ".ssh", "known_hosts") + "\n")
 		known.WriteString("[" + item.ip + "]:2222 " + host + "\n")
 	}

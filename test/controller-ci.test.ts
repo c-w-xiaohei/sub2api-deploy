@@ -138,6 +138,9 @@ describe("Task4 CI contracts", () => {
     const mountSSHHome = 'mount --bind "$root/home" /root';
     expect(liveRuntime).toContain(saveHostCgroupMount);
     expect(liveRuntime).toContain(mountSSHHome);
+    expect(liveRuntimeTest).toContain('writePrivate(t, filepath.Join(root, "home", ".ssh", "authorized_keys"), []byte(pub+"\\n"))');
+    expect(liveRuntimeTest).toContain('AuthorizedKeysFile /root/.ssh/authorized_keys');
+    expect(liveRuntimeTest).not.toContain('AuthorizedKeysFile "+filepath.Join(root, item.name, "authorized_keys")');
     expect(liveRuntime.indexOf(mountSSHHome)).toBeLessThan(liveRuntime.indexOf("ip link set lo up"));
     expect(liveHostSandbox).toContain(restoreHostCgroupMount);
     expect(liveHostSandbox.indexOf(restoreHostCgroupMount)).toBeLessThan(liveHostSandbox.indexOf("setsid containerd"));
