@@ -931,6 +931,12 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"data-docker-containerd-path":       true,
 		"data-docker-containerd-socket":     true,
 		"data-docker-containerd-exit":       true,
+		"data-docker-containerd-booted":     true,
+		"data-docker-containerd-listener":   true,
+		"data-docker-containerd-permission": true,
+		"data-docker-containerd-resource":   true,
+		"data-docker-containerd-plugin":     true,
+		"data-docker-containerd-startup":    true,
 		"data-docker-conflict":              true,
 		"data-docker-resource":              true,
 		"data-docker-permission":            true,
@@ -947,6 +953,12 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"app-docker-containerd-path":        true,
 		"app-docker-containerd-socket":      true,
 		"app-docker-containerd-exit":        true,
+		"app-docker-containerd-booted":      true,
+		"app-docker-containerd-listener":    true,
+		"app-docker-containerd-permission":  true,
+		"app-docker-containerd-resource":    true,
+		"app-docker-containerd-plugin":      true,
+		"app-docker-containerd-startup":     true,
 		"app-docker-conflict":               true,
 		"app-docker-resource":               true,
 		"app-docker-permission":             true,
@@ -1054,6 +1066,37 @@ func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *tes
 			}
 			if got := string(output); got != test.want {
 				t.Fatalf("Docker failure reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLiveContainerdStartupReasonReportsOnlyFixedMilestones(t *testing.T) {
+	script := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "live-host-sandbox.sh")
+	tests := []struct {
+		name, log, want string
+	}{
+		{name: "booted after plugins", log: "loading plugin id=io.containerd.nri.v1.nri\ncontainerd successfully booted", want: "containerd-booted"},
+		{name: "listener", log: "failed to get listener for main ttrpc endpoint", want: "containerd-listener"},
+		{name: "permission", log: "failed to get listener: operation not permitted", want: "containerd-permission"},
+		{name: "resource", log: "failed to load plugin: no space left on device", want: "containerd-resource"},
+		{name: "plugin failure", log: "failed to load plugin io.containerd.metadata.v1.bolt", want: "containerd-plugin"},
+		{name: "plugin loading stalled", log: "loading plugin id=io.containerd.nri.v1.nri", want: "containerd-plugin"},
+		{name: "startup only", log: "starting containerd", want: "containerd-startup"},
+		{name: "empty", want: "containerd-timeout"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "containerd.log")
+			if err := os.WriteFile(log, []byte(test.log), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command("sh", script, "--classify-containerd-log", log).Output()
+			if err != nil {
+				t.Fatalf("classify containerd startup: %v", err)
+			}
+			if got := string(output); got != test.want {
+				t.Fatalf("containerd startup reason = %q, want %q", got, test.want)
 			}
 		})
 	}

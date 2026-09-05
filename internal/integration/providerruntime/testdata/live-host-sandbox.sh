@@ -32,6 +32,24 @@ docker_failure_reason() {
     printf '%s' "$fallback"
   fi
 }
+containerd_startup_reason() {
+  log=${1:?}
+  if grep -Eqi 'successfully booted' "$log"; then
+    printf '%s' containerd-booted
+  elif grep -Eqi 'permission denied|operation not permitted' "$log"; then
+    printf '%s' containerd-permission
+  elif grep -Eqi 'no space left|cannot allocate memory|out of memory|resource temporarily unavailable|too many open files' "$log"; then
+    printf '%s' containerd-resource
+  elif grep -Eqi 'failed to get listener|failed to serve|listen unix|address already in use' "$log"; then
+    printf '%s' containerd-listener
+  elif grep -Eqi '(failed to load|loading) plugin' "$log"; then
+    printf '%s' containerd-plugin
+  elif grep -Eqi 'starting containerd' "$log"; then
+    printf '%s' containerd-startup
+  else
+    printf '%s' containerd-timeout
+  fi
+}
 docker_cli() {
   docker -H unix:///var/run/docker.sock "$@"
 }
@@ -43,6 +61,10 @@ ctr_cleanup() {
 }
 if [ "${1:-}" = --classify-docker-log ]; then
   docker_failure_reason "${2:?}" "${3:?}"
+  exit 0
+fi
+if [ "${1:-}" = --classify-containerd-log ]; then
+  containerd_startup_reason "${2:?}"
   exit 0
 fi
 name=${1:?}
@@ -171,7 +193,11 @@ dockerd=$!
 i=0
 until docker_cli info >/dev/null 2>&1; do
   if ! kill -0 "$dockerd" 2>/dev/null; then
-    stage="docker-$(docker_failure_reason "$log" unknown)"
+    reason=$(docker_failure_reason "$log" unknown)
+    if [ "$reason" = containerd-timeout ]; then
+      reason=$(containerd_startup_reason "$containerd_log")
+    fi
+    stage="docker-$reason"
     exit 1
   fi
   i=$((i + 1))

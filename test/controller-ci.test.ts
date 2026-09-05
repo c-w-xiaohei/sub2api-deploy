@@ -135,6 +135,7 @@ describe("Task4 CI contracts", () => {
     expect(liveHostSandbox).toContain('if ! process_alive "$containerd"; then\n    stage=docker-containerd-exit\n    exit 1');
     expect(liveHostSandbox).toContain('until [ -S /var/run/sub2api-containerd/containerd.sock ]; do');
     expect(liveHostSandbox).not.toContain('ctr_cli version');
+    expect(liveHostSandbox).toContain('if [ "$reason" = containerd-timeout ]; then\n      reason=$(containerd_startup_reason "$containerd_log")');
     const privateConfig = 'mount --bind "$root/$name/etc-containerd" /etc/containerd';
     const containerdStart = "setsid containerd";
     expect(liveHostSandbox.indexOf(privateConfig)).toBeLessThan(liveHostSandbox.indexOf(containerdStart));
@@ -195,6 +196,8 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("'data-docker-timeout'");
     expect(workflow).toContain("'data-docker-containerd-timeout'");
     expect(workflow).toContain("'app-docker-containerd-exit'");
+    expect(workflow).toContain("'data-docker-containerd-booted'");
+    expect(workflow).toContain("'app-docker-containerd-plugin'");
     expect(workflow).toContain("event.Test === test && typeof event.Output === 'string'");
     expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
     expect(workflow).toContain("console.log(`${test} stage: ${stage}`)");
