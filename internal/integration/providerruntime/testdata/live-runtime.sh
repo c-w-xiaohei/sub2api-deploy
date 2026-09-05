@@ -76,6 +76,7 @@ done
 
 mkdir -p "$root/cgroup-host"
 mount --bind /sys/fs/cgroup "$root/cgroup-host"
+mount --bind "$root/home" /root
 printf '%s\n' 'SUB2API_LIVE_STAGE=network-setup' >&2
 ip link set lo up
 ip link add "${LIVE_BRIDGE:?}" type bridge

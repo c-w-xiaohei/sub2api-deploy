@@ -130,7 +130,10 @@ describe("Task4 CI contracts", () => {
     expect(liveHostSandbox).toContain('mount --bind "$root/$name/etc-containerd" /etc/containerd');
     const saveHostCgroupMount = 'mount --bind /sys/fs/cgroup "$root/cgroup-host"';
     const restoreHostCgroupMount = 'mount --bind "$root/cgroup-host" /sys/fs/cgroup';
+    const mountSSHHome = 'mount --bind "$root/home" /root';
     expect(liveRuntime).toContain(saveHostCgroupMount);
+    expect(liveRuntime).toContain(mountSSHHome);
+    expect(liveRuntime.indexOf(mountSSHHome)).toBeLessThan(liveRuntime.indexOf("ip link set lo up"));
     expect(liveHostSandbox).toContain(restoreHostCgroupMount);
     expect(liveHostSandbox.indexOf(restoreHostCgroupMount)).toBeLessThan(liveHostSandbox.indexOf("setsid containerd"));
     expect(liveHostSandbox).toContain('setsid containerd --config "$root/$name/containerd.toml" --root "$root/$name/containerd" --state /var/run/sub2api-containerd --address /var/run/sub2api-containerd/containerd.sock');
