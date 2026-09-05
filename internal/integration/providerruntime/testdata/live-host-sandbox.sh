@@ -18,6 +18,14 @@ docker_failure_reason() {
     printf '%s' network
   elif grep -Eqi 'failed.*(storage driver|graphdriver|overlay|volume store|filesystem)|error (initializing|mounting).*(graphdriver|overlay|filesystem)' "$log"; then
     printf '%s' storage
+  elif grep -Eqi 'cgroup|cgroups' "$log"; then
+    printf '%s' cgroup
+  elif grep -Eqi 'docker-proxy|docker-init|executable file not found|not found in.*PATH' "$log"; then
+    printf '%s' helper
+  elif grep -Eqi 'invalid configuration|configuration.*(failed|error|invalid)|failed to decode.*config' "$log"; then
+    printf '%s' config
+  elif grep -Eqi 'daemon root|data root|exec root|state directory|mkdir|read-only file system' "$log"; then
+    printf '%s' filesystem
   elif grep -Eqi '(containerd|unix|socket).*(file name too long|path too long|invalid argument)|(file name too long|path too long).*(containerd|unix|socket)' "$log"; then
     printf '%s' containerd-path
   elif grep -Eqi '(failed|error).*(containerd).*(timeout|timed out)|(failed|error).*(timeout|timed out).*(containerd)|(containerd).*(timeout|timed out).*(failed|error)' "$log"; then
@@ -28,6 +36,8 @@ docker_failure_reason() {
     printf '%s' containerd-exit
   elif grep -Eqi '(failed|error).*(containerd)|(containerd).*(failed|error)' "$log"; then
     printf '%s' containerd
+  elif grep -Eqi 'failed to start daemon|error initializing' "$log"; then
+    printf '%s' initialization
   else
     printf '%s' "$fallback"
   fi

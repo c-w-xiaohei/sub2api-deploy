@@ -193,6 +193,8 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("invalid live evidence");
     expect(workflow).toContain("const allowedLiveStages = new Set([");
     expect(workflow).toContain("'app-docker-network'");
+    expect(workflow).toContain("'data-docker-cgroup'");
+    expect(workflow).toContain("'app-docker-helper'");
     expect(workflow).toContain("'data-docker-timeout'");
     expect(workflow).toContain("'data-docker-containerd-timeout'");
     expect(workflow).toContain("'app-docker-containerd-exit'");
