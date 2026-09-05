@@ -133,7 +133,8 @@ describe("Task4 CI contracts", () => {
     expect(liveHostSandbox).toContain('timeout --signal=TERM --kill-after=1s 3s ctr --address /var/run/sub2api-containerd/containerd.sock --namespace "sub2api-$name" --timeout 2s --connect-timeout 1s');
     expect(liveHostSandbox).toContain('--containerd /var/run/sub2api-containerd/containerd.sock --containerd-namespace "sub2api-$name" --containerd-plugins-namespace "plugins.sub2api-$name"');
     expect(liveHostSandbox).toContain('if ! process_alive "$containerd"; then\n    stage=docker-containerd-exit\n    exit 1');
-    expect(liveHostSandbox).toContain('stage=docker-containerd-timeout\n    exit 1');
+    expect(liveHostSandbox).toContain('if [ ! -S /var/run/sub2api-containerd/containerd.sock ]; then\n      stage=docker-containerd-socket');
+    expect(liveHostSandbox).toContain('else\n      stage=docker-containerd-timeout');
     const privateConfig = 'mount --bind "$root/$name/etc-containerd" /etc/containerd';
     const containerdStart = "setsid containerd";
     expect(liveHostSandbox.indexOf(privateConfig)).toBeLessThan(liveHostSandbox.indexOf(containerdStart));

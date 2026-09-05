@@ -160,7 +160,11 @@ until ctr_cli version >/dev/null 2>&1; do
   fi
   i=$((i + 1))
   if [ "$i" -ge 45 ]; then
-    stage=docker-containerd-timeout
+    if [ ! -S /var/run/sub2api-containerd/containerd.sock ]; then
+      stage=docker-containerd-socket
+    else
+      stage=docker-containerd-timeout
+    fi
     exit 1
   fi
   sleep 1
