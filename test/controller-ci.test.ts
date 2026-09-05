@@ -128,6 +128,11 @@ describe("Task4 CI contracts", () => {
     expect(liveHostSandbox).toContain("imports = []");
     expect(liveHostSandbox).toContain('"io.containerd.grpc.v1.cri"');
     expect(liveHostSandbox).toContain('mount --bind "$root/$name/etc-containerd" /etc/containerd');
+    const mountPrivateShadow = 'mount --bind "$root/$name.shadow" /etc/shadow';
+    expect(liveHostSandbox).toContain("printf '%s\\n' 'root:x:20000:0:99999:7:::' >\"$root/$name.shadow\"");
+    expect(liveHostSandbox).toContain('chmod 0600 "$root/$name.shadow"');
+    expect(liveHostSandbox).toContain(mountPrivateShadow);
+    expect(liveHostSandbox.indexOf(mountPrivateShadow)).toBeLessThan(liveHostSandbox.indexOf("setsid /usr/sbin/sshd"));
     const saveHostCgroupMount = 'mount --bind /sys/fs/cgroup "$root/cgroup-host"';
     const restoreHostCgroupMount = 'mount --bind "$root/cgroup-host" /sys/fs/cgroup';
     const mountSSHHome = 'mount --bind "$root/home" /root';

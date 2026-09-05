@@ -168,8 +168,11 @@ trap cleanup EXIT
 trap on_signal INT TERM
 mkdir -p "$root/$name" "$root/$name/containerd" "$root/$name/docker" "$root/$name/etc-containerd/conf.d" "$root/$name/mount"
 test -d /etc/containerd
+printf '%s\n' 'root:x:20000:0:99999:7:::' >"$root/$name.shadow"
+chmod 0600 "$root/$name.shadow"
 mount --bind "$root/$name.machine-id" /etc/machine-id
 mount --bind "$root/$name/etc-containerd" /etc/containerd
+mount --bind "$root/$name.shadow" /etc/shadow
 mount --bind "$root/cgroup-host" /sys/fs/cgroup
 mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
 mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
