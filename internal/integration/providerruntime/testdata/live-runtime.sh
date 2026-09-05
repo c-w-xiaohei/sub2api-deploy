@@ -10,24 +10,35 @@ shift
 data_pid=
 app_pid=
 cleanup_failed=0
+process_alive() {
+  pid=$1
+  kill -0 "$pid" 2>/dev/null || return 1
+  awk '{ exit ($3 == "Z") ? 1 : 0 }' "/proc/$pid/stat" 2>/dev/null
+}
 
-stop_group() {
+signal_group() {
   pid=$1
   [ -n "$pid" ] || return 0
   kill -TERM "-$pid" 2>/dev/null || true
+}
+wait_group() {
+  pid=$1
+  [ -n "$pid" ] || return 0
   i=0
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+  while process_alive "$pid" && [ "$i" -lt 90 ]; do
     sleep 1
     i=$((i + 1))
   done
-  if kill -0 "$pid" 2>/dev/null; then
+  if process_alive "$pid"; then
     kill -KILL "-$pid" 2>/dev/null || true
     sleep 1
   fi
-  if kill -0 "$pid" 2>/dev/null; then
+  if process_alive "$pid"; then
     cleanup_failed=1
   fi
-  wait "$pid" 2>/dev/null || true
+  if ! process_alive "$pid"; then
+    wait "$pid" 2>/dev/null || cleanup_failed=1
+  fi
 }
 wait_ready() {
   name=$1
@@ -44,8 +55,10 @@ wait_ready() {
 }
 cleanup() {
   status=$?
-  stop_group "$data_pid"
-  stop_group "$app_pid"
+  signal_group "$data_pid"
+  signal_group "$app_pid"
+  wait_group "$data_pid"
+  wait_group "$app_pid"
   ip netns del "${LIVE_DATA_NS:?}" 2>/dev/null || true
   ip netns del "${LIVE_APP_NS:?}" 2>/dev/null || true
   ip netns del "${LIVE_UNAUTHORIZED_NS:?}" 2>/dev/null || true

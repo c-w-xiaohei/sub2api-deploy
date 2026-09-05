@@ -232,7 +232,7 @@ jobs:
           sudo unshare --mount --net --propagation private true
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends openssh-server nftables iproute2 util-linux postgresql-client redis-tools sudo openssl
-          for tool in dockerd docker sshd ssh sudo nft ip unshare nsenter psql redis-cli openssl; do command -v "$tool"; done
+          for tool in dockerd docker containerd containerd-shim-runc-v2 ctr runc timeout sshd ssh sudo nft ip unshare nsenter psql redis-cli openssl; do command -v "$tool"; done
           daemon_pid_file="$RUNNER_TEMP/provider-runtime-dockerd-${TARGET_SHA}.pid"; daemon_log="$RUNNER_TEMP/provider-runtime-dockerd-${TARGET_SHA}.log"
           if ! sudo docker info >/dev/null 2>&1; then sudo dockerd >"$daemon_log" 2>&1 & echo "$!" > "$daemon_pid_file"; fi
           ready=false; for _ in $(seq 1 45); do if sudo docker info >/dev/null 2>&1; then ready=true; break; fi; sleep 1; done; test "$ready" = true
@@ -339,6 +339,8 @@ jobs:
           sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<'NODE'
           const fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe,consumerTrace]=process.argv.slice(2), test='TestProviderRuntimeCrossHostDataAdmissionLive'; let terminal; for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(e.Test===test&&['pass','fail','skip'].includes(e.Action))terminal=e.Action} if(terminal!=='pass')throw Error('live test did not pass'); const files=fs.readdirSync(trace); if(JSON.stringify(files)!==JSON.stringify(['mx-allowlist-live.json']))throw Error('unexpected live evidence inventory'); const p=path.join(trace,files[0]),stat=fs.lstatSync(p),e=JSON.parse(fs.readFileSync(p,'utf8')); const keys=['appDataEnvironmentAuthenticated','appHostPass','appReadyAfterData','dataHostPass','foreignTableSHA256','foreignTableUnchanged','hostAMD64SHA256','postgresCatalog','postgresDrop','postgresPass','postgresWrongPasswordDenied','providerSHA256','redisACL','redisDefaultDenied','redisDrop','redisPass','redisWrongPasswordDenied','releasedBoundary','test']; if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600||JSON.stringify(Object.keys(e).sort())!==JSON.stringify(keys.sort())||e.test!==test||e.releasedBoundary!==process.env.TARGET_SHA||e.providerSHA256!==process.env.PROVIDER_SHA||!Object.values(e).every(v=>typeof v!=='boolean'||v)||!['providerSHA256','hostAMD64SHA256','foreignTableSHA256'].every(k=>/^[0-9a-f]{64}$/.test(e[k]))||/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |CrossHost.*(?:Password|Secret)|(?:\d{1,3}\.){3}\d{1,3}/i.test(JSON.stringify(e)))throw Error('invalid live evidence'); fs.rmSync(path.join(safe,'metadata.json')); fs.copyFileSync(p,path.join(safe,files[0])); fs.chmodSync(path.join(safe,files[0]),0o600); fs.writeFileSync(path.join(safe,'live.jsonl'),JSON.stringify({Action:'pass',Test:test})+'\n',{mode:0o600}); fs.writeFileSync(consumerTrace,JSON.stringify({sha:process.env.TARGET_SHA,providerRuntimeCrossHostAppLive:'data-then-app-pass',providerSHA256:e.providerSHA256,hostAMD64SHA256:e.hostAMD64SHA256})+'\n',{mode:0o600});
           NODE
+          sudo chown "$USER:$USER" "$candidate/consumer-trace.json"
+          chmod 0600 "$candidate/consumer-trace.json"
           test ! -s "$stderr"
           test "$status" -eq 0
           test "$(find "$safe" -type f | wc -l)" -eq 4

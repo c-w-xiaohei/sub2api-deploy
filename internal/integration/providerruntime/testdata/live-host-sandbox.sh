@@ -35,6 +35,12 @@ docker_failure_reason() {
 docker_cli() {
   docker -H unix:///var/run/docker.sock "$@"
 }
+ctr_cli() {
+  timeout --signal=TERM --kill-after=1s 6s ctr --address /var/run/sub2api-containerd/containerd.sock --namespace "sub2api-$name" --timeout 5s --connect-timeout 2s "$@"
+}
+ctr_cleanup() {
+  timeout --signal=TERM --kill-after=1s 3s ctr --address /var/run/sub2api-containerd/containerd.sock --namespace "sub2api-$name" --timeout 2s --connect-timeout 1s "$@"
+}
 if [ "${1:-}" = --classify-docker-log ]; then
   docker_failure_reason "${2:?}" "${3:?}"
   exit 0
@@ -44,39 +50,123 @@ root=${LIVE_ROOT:?}
 host=${LIVE_HOST_BINARY:?}
 images=${LIVE_IMAGE_ARCHIVE:?}
 log="$root/$name.private.log"
+containerd_log="$root/$name.containerd.private.log"
 stage=mount-setup
+containerd=
 dockerd=
 sshd=
+cleanup_failed=0
+shutdown_requested=0
+process_alive() {
+  pid=$1
+  kill -0 "$pid" 2>/dev/null || return 1
+  awk '{ exit ($3 == "Z") ? 1 : 0 }' "/proc/$pid/stat" 2>/dev/null
+}
+stop_group() {
+  pid=$1
+  [ -n "$pid" ] || return 0
+  kill -TERM "-$pid" 2>/dev/null || true
+  i=0
+  while process_alive "$pid" && [ "$i" -lt 8 ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if process_alive "$pid"; then
+    kill -KILL "-$pid" 2>/dev/null || true
+    sleep 1
+  fi
+  process_alive "$pid" && return 1
+  wait "$pid" 2>/dev/null || true
+}
+remove_all_docker_containers() {
+  kill -0 "$dockerd" 2>/dev/null || return 0
+  ids=$(timeout --signal=TERM --kill-after=1s 4s docker -H unix:///var/run/docker.sock ps -aq) || return 1
+  if [ -n "$ids" ]; then
+    timeout --signal=TERM --kill-after=1s 12s docker -H unix:///var/run/docker.sock rm -f $ids >/dev/null 2>&1 || return 1
+  fi
+  [ -z "$(timeout --signal=TERM --kill-after=1s 4s docker -H unix:///var/run/docker.sock ps -aq)" ]
+}
+wait_for_no_containerd_tasks() {
+  [ -n "$containerd" ] || return 0
+  i=0
+  while [ "$i" -lt 5 ]; do
+    tasks=$(ctr_cleanup tasks ls -q 2>/dev/null) || return 1
+    [ -z "$tasks" ] && return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+host_shims_alive() {
+  ps -eo args= | awk -v ns="sub2api-$name" -v socket=/var/run/sub2api-containerd/containerd.sock '
+    /containerd-shim/ && index($0, "-namespace " ns) && index($0, "-address " socket) { found = 1 }
+    END { exit found ? 0 : 1 }
+  '
+}
+wait_for_no_host_shims() {
+  [ -n "$containerd" ] || return 0
+  i=0
+  while host_shims_alive; do
+    i=$((i + 1))
+    [ "$i" -lt 5 ] || return 1
+    sleep 1
+  done
+}
 cleanup() {
   status=$?
+  trap - EXIT INT TERM
+  [ "$shutdown_requested" -eq 0 ] || status=0
   if [ "$status" -ne 0 ] && [ "$stage" != running ]; then
     printf '%s\n' "SUB2API_LIVE_STAGE=$name-$stage" >&2
   fi
-  for pid in "$sshd" "$dockerd"; do
-    [ -n "$pid" ] || continue
-    kill -TERM "-$pid" 2>/dev/null || true
-    i=0
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 15 ]; do
-      sleep 1
-      i=$((i + 1))
-    done
-    kill -KILL "-$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  done
-  trap - EXIT INT TERM
+  remove_all_docker_containers || cleanup_failed=1
+  wait_for_no_containerd_tasks || cleanup_failed=1
+  wait_for_no_host_shims || cleanup_failed=1
+  stop_group "$dockerd" || cleanup_failed=1
+  stop_group "$containerd" || cleanup_failed=1
+  stop_group "$sshd" || cleanup_failed=1
+  [ "$cleanup_failed" -eq 0 ] || status=1
   exit "$status"
 }
-trap cleanup EXIT INT TERM
-mkdir -p "$root/$name" "$root/$name/docker" "$root/$name/mount"
+on_signal() {
+  shutdown_requested=1
+  exit 0
+}
+trap cleanup EXIT
+trap on_signal INT TERM
+mkdir -p "$root/$name" "$root/$name/containerd" "$root/$name/docker" "$root/$name/etc-containerd/conf.d" "$root/$name/mount"
+test -d /etc/containerd
 mount --bind "$root/$name.machine-id" /etc/machine-id
+mount --bind "$root/$name/etc-containerd" /etc/containerd
 mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
 mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
 mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
 mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
 printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
 printf '%s\n' '{}' >"$root/$name/daemon.json"
+cat >"$root/$name/containerd.toml" <<'EOF'
+version = 3
+imports = []
+disabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.cri.v1", "io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime", "io.containerd.podsandbox.controller.v1.podsandbox"]
+EOF
+stage=docker-containerd
+setsid containerd --config "$root/$name/containerd.toml" --root "$root/$name/containerd" --state /var/run/sub2api-containerd --address /var/run/sub2api-containerd/containerd.sock >"$containerd_log" 2>&1 &
+containerd=$!
+i=0
+until ctr_cli version >/dev/null 2>&1; do
+  if ! kill -0 "$containerd" 2>/dev/null; then
+    stage=docker-containerd-exit
+    exit 1
+  fi
+  i=$((i + 1))
+  if [ "$i" -ge 45 ]; then
+    stage=docker-containerd-timeout
+    exit 1
+  fi
+  sleep 1
+done
 stage=docker-start
-setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root /var/run/sub2api-docker --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
+setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root /var/run/sub2api-docker --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --containerd /var/run/sub2api-containerd/containerd.sock --containerd-namespace "sub2api-$name" --containerd-plugins-namespace "plugins.sub2api-$name" --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
 dockerd=$!
 i=0
 until docker_cli info >/dev/null 2>&1; do

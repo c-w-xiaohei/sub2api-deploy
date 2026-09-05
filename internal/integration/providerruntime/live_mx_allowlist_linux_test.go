@@ -58,7 +58,7 @@ func TestProviderRuntimeCrossHostDataAdmissionLive(t *testing.T) {
 	cmd.Env = append(os.Environ(), fixture.environment()...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
-	cmd.WaitDelay = 45 * time.Second
+	cmd.WaitDelay = 4 * time.Minute
 	var output boundedBuffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	if err := cmd.Run(); err != nil {
