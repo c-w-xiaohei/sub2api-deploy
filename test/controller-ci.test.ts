@@ -128,6 +128,11 @@ describe("Task4 CI contracts", () => {
     expect(liveHostSandbox).toContain("imports = []");
     expect(liveHostSandbox).toContain('"io.containerd.grpc.v1.cri"');
     expect(liveHostSandbox).toContain('mount --bind "$root/$name/etc-containerd" /etc/containerd');
+    const saveHostCgroupMount = 'mount --bind /sys/fs/cgroup "$root/cgroup-host"';
+    const restoreHostCgroupMount = 'mount --bind "$root/cgroup-host" /sys/fs/cgroup';
+    expect(liveRuntime).toContain(saveHostCgroupMount);
+    expect(liveHostSandbox).toContain(restoreHostCgroupMount);
+    expect(liveHostSandbox.indexOf(restoreHostCgroupMount)).toBeLessThan(liveHostSandbox.indexOf("setsid containerd"));
     expect(liveHostSandbox).toContain('setsid containerd --config "$root/$name/containerd.toml" --root "$root/$name/containerd" --state /var/run/sub2api-containerd --address /var/run/sub2api-containerd/containerd.sock');
     expect(liveHostSandbox).toContain('timeout --signal=TERM --kill-after=1s 6s ctr --address /var/run/sub2api-containerd/containerd.sock --namespace "sub2api-$name" --timeout 5s --connect-timeout 2s');
     expect(liveHostSandbox).toContain('timeout --signal=TERM --kill-after=1s 3s ctr --address /var/run/sub2api-containerd/containerd.sock --namespace "sub2api-$name" --timeout 2s --connect-timeout 1s');

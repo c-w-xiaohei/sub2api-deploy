@@ -170,6 +170,7 @@ mkdir -p "$root/$name" "$root/$name/containerd" "$root/$name/docker" "$root/$nam
 test -d /etc/containerd
 mount --bind "$root/$name.machine-id" /etc/machine-id
 mount --bind "$root/$name/etc-containerd" /etc/containerd
+mount --bind "$root/cgroup-host" /sys/fs/cgroup
 mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
 mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
 mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run

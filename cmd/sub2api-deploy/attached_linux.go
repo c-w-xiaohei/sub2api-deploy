@@ -20,7 +20,10 @@ import (
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 )
 
-const attachedPortLimit = 64
+const (
+	attachedPortLimit              = 64
+	attachedProviderEOFGracePeriod = 500 * time.Millisecond
+)
 
 type attachedExecutables struct {
 	provider string
@@ -205,7 +208,12 @@ func waitAttached(command *exec.Cmd) *attachedCompletion {
 
 func cleanupAttached(provider *exec.Cmd, providerDone *attachedCompletion, approval io.Closer, output *os.File, readerDone <-chan struct{}, server *attachedCompletion) {
 	_ = approval.Close()
-	stopAttachedProcess(provider, providerDone)
+	// Approval EOF lets the provider finish its own cleanup before escalation.
+	select {
+	case <-providerDone.done:
+	case <-time.After(attachedProviderEOFGracePeriod):
+		stopAttachedProcess(provider, providerDone)
+	}
 	_ = output.Close()
 	<-readerDone
 	<-server.done

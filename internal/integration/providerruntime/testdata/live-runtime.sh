@@ -59,6 +59,7 @@ cleanup() {
   signal_group "$app_pid"
   wait_group "$data_pid"
   wait_group "$app_pid"
+  umount "$root/cgroup-host" 2>/dev/null || cleanup_failed=1
   ip netns del "${LIVE_DATA_NS:?}" 2>/dev/null || true
   ip netns del "${LIVE_APP_NS:?}" 2>/dev/null || true
   ip netns del "${LIVE_UNAUTHORIZED_NS:?}" 2>/dev/null || true
@@ -73,6 +74,8 @@ for binary in bash dockerd docker sshd ssh sudo nft ip psql redis-cli openssl un
   command -v "$binary" >/dev/null 2>&1 || exit 1
 done
 
+mkdir -p "$root/cgroup-host"
+mount --bind /sys/fs/cgroup "$root/cgroup-host"
 printf '%s\n' 'SUB2API_LIVE_STAGE=network-setup' >&2
 ip link add "${LIVE_BRIDGE:?}" type bridge
 ip addr add 10.252.0.1/24 dev "$LIVE_BRIDGE"
