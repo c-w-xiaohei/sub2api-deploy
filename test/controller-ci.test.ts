@@ -134,7 +134,8 @@ describe("Task4 CI contracts", () => {
     expect(liveHostSandbox).toContain('--containerd /var/run/sub2api-containerd/containerd.sock --containerd-namespace "sub2api-$name" --containerd-plugins-namespace "plugins.sub2api-$name"');
     expect(liveHostSandbox).toContain('if ! process_alive "$containerd"; then\n    stage=docker-containerd-exit\n    exit 1');
     expect(liveHostSandbox).toContain('if [ ! -S /var/run/sub2api-containerd/containerd.sock ]; then\n      stage=docker-containerd-socket');
-    expect(liveHostSandbox).toContain('else\n      stage=docker-containerd-timeout');
+    expect(liveHostSandbox).toContain('stage="docker-$(containerd_probe_failure_reason "$containerd_probe_log")"');
+    expect(liveHostSandbox).toContain('until ctr_cli version >"$containerd_probe_log" 2>&1; do');
     const privateConfig = 'mount --bind "$root/$name/etc-containerd" /etc/containerd';
     const containerdStart = "setsid containerd";
     expect(liveHostSandbox.indexOf(privateConfig)).toBeLessThan(liveHostSandbox.indexOf(containerdStart));
@@ -195,6 +196,8 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("'data-docker-timeout'");
     expect(workflow).toContain("'data-docker-containerd-timeout'");
     expect(workflow).toContain("'app-docker-containerd-exit'");
+    expect(workflow).toContain("'data-docker-containerd-client'");
+    expect(workflow).toContain("'app-docker-containerd-rpc'");
     expect(workflow).toContain("event.Test === test && typeof event.Output === 'string'");
     expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
     expect(workflow).toContain("console.log(`${test} stage: ${stage}`)");

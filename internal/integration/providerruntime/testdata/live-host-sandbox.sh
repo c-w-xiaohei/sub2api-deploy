@@ -32,6 +32,22 @@ docker_failure_reason() {
     printf '%s' "$fallback"
   fi
 }
+containerd_probe_failure_reason() {
+  log=${1:?}
+  if grep -Eqi 'incorrect usage|flag provided but not defined|unknown flag|unknown command' "$log"; then
+    printf '%s' containerd-client
+  elif grep -Eqi 'permission denied|operation not permitted' "$log"; then
+    printf '%s' containerd-permission
+  elif grep -Eqi 'connection refused|no such file|failed to dial|transport.*(closing|unavailable)' "$log"; then
+    printf '%s' containerd-socket
+  elif grep -Eqi 'deadline exceeded|timeout|timed out' "$log"; then
+    printf '%s' containerd-timeout
+  elif grep -Eqi 'rpc error|unknown service|unimplemented' "$log"; then
+    printf '%s' containerd-rpc
+  else
+    printf '%s' containerd
+  fi
+}
 docker_cli() {
   docker -H unix:///var/run/docker.sock "$@"
 }
@@ -45,12 +61,17 @@ if [ "${1:-}" = --classify-docker-log ]; then
   docker_failure_reason "${2:?}" "${3:?}"
   exit 0
 fi
+if [ "${1:-}" = --classify-containerd-probe ]; then
+  containerd_probe_failure_reason "${2:?}"
+  exit 0
+fi
 name=${1:?}
 root=${LIVE_ROOT:?}
 host=${LIVE_HOST_BINARY:?}
 images=${LIVE_IMAGE_ARCHIVE:?}
 log="$root/$name.private.log"
 containerd_log="$root/$name.containerd.private.log"
+containerd_probe_log="$root/$name.containerd-probe.private.log"
 stage=mount-setup
 containerd=
 dockerd=
@@ -153,7 +174,7 @@ stage=docker-containerd
 setsid containerd --config "$root/$name/containerd.toml" --root "$root/$name/containerd" --state /var/run/sub2api-containerd --address /var/run/sub2api-containerd/containerd.sock >"$containerd_log" 2>&1 &
 containerd=$!
 i=0
-until ctr_cli version >/dev/null 2>&1; do
+until ctr_cli version >"$containerd_probe_log" 2>&1; do
   if ! process_alive "$containerd"; then
     stage=docker-containerd-exit
     exit 1
@@ -163,7 +184,7 @@ until ctr_cli version >/dev/null 2>&1; do
     if [ ! -S /var/run/sub2api-containerd/containerd.sock ]; then
       stage=docker-containerd-socket
     else
-      stage=docker-containerd-timeout
+      stage="docker-$(containerd_probe_failure_reason "$containerd_probe_log")"
     fi
     exit 1
   fi
