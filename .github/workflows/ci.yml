@@ -336,6 +336,7 @@ jobs:
             'data-create',
             'data-create-artifact',
             'data-create-bootstrap',
+            'data-create-bootstrap-remote',
             'data-create-host',
             'data-create-observation',
             'data-create-response',

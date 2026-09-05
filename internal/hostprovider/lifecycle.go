@@ -183,10 +183,7 @@ func (h *host) lifecycleCreate(ctx context.Context, req p.CreateRequest) (p.Crea
 		return p.CreateResponse{}, fmt.Errorf("host artifact unavailable")
 	}
 	result, err := h.deps.transport.Bootstrap(ctx, in.server.SSHAlias, stdin)
-	if err != nil {
-		return p.CreateResponse{}, fmt.Errorf("transport failed")
-	}
-	if err := expectedResponse(result, hostprotocol.ResultApplied, "bootstrap"); err != nil {
+	if err := expectedBootstrapResponse(result, err); err != nil {
 		return p.CreateResponse{}, err
 	}
 	if result.Result.AppliedRevision != in.revision {
@@ -341,13 +338,10 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
 		}
 		result, err := h.deps.transport.Bootstrap(ctx, next.server.SSHAlias, stdin)
-		if err != nil {
-			return p.UpdateResponse{}, fmt.Errorf("transport failed")
+		if err := expectedBootstrapResponse(result, err); err != nil {
+			return p.UpdateResponse{}, err
 		}
-		if err := expectedResponse(result, hostprotocol.ResultApplied, "bootstrap"); err != nil || result.Result.AppliedRevision != next.revision {
-			if err != nil {
-				return p.UpdateResponse{}, err
-			}
+		if result.Result.AppliedRevision != next.revision {
 			return p.UpdateResponse{}, fmt.Errorf("invalid bootstrap response")
 		}
 		installed, err := h.deps.transport.Probe(ctx, next.server.SSHAlias)
@@ -631,6 +625,13 @@ func expectedResponse(response hostprotocol.Response, status hostprotocol.Result
 		return fmt.Errorf("invalid %s response", stage)
 	}
 	return nil
+}
+
+func expectedBootstrapResponse(response hostprotocol.Response, transportErr error) error {
+	if transportErr != nil && (!errors.Is(transportErr, openssh.ErrRemote) || response.Error == nil) {
+		return fmt.Errorf("transport failed")
+	}
+	return expectedResponse(response, hostprotocol.ResultApplied, "bootstrap")
 }
 
 func parseCheckpoint(state property.Map) (hostcontract.MachineIdentity, hostcontract.OwnershipIdentity, string, hostcontract.StableObservation, error) {

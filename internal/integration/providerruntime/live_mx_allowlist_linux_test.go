@@ -998,6 +998,7 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"data-create":                       true,
 		"data-create-artifact":              true,
 		"data-create-bootstrap":             true,
+		"data-create-bootstrap-remote":      true,
 		"data-create-host":                  true,
 		"data-create-observation":           true,
 		"data-create-response":              true,
@@ -1045,6 +1046,8 @@ func liveDataCreateFailureStage(err error) string {
 		return prefix + "artifact"
 	case strings.Contains(message, "unsupported host"):
 		return prefix + "host"
+	case strings.Contains(message, "bootstrap remote response"):
+		return prefix + "bootstrap-remote"
 	case strings.Contains(message, "bootstrap response"):
 		return prefix + "bootstrap"
 	case strings.Contains(message, "inspect response") || strings.Contains(message, "remote observation"):
@@ -1079,6 +1082,7 @@ func TestLiveFailureCategoryReportsOnlyKnownLastStage(t *testing.T) {
 		{name: "empty", want: "exit"},
 		{name: "unknown marker", output: "SUB2API_LIVE_STAGE=credential-canary\n", want: "isolated-fixture-exit"},
 		{name: "known marker", output: "SUB2API_LIVE_STAGE=data-create\n", want: "data-create"},
+		{name: "bootstrap remote", output: "SUB2API_LIVE_STAGE=data-create-bootstrap-remote\n", want: "data-create-bootstrap-remote"},
 		{name: "known Docker reason", output: "SUB2API_LIVE_STAGE=app-docker-network\n", want: "app-docker-network"},
 		{name: "unknown Docker reason", output: "SUB2API_LIVE_STAGE=app-docker-sensitive-detail\n", want: "isolated-fixture-exit"},
 		{name: "last known marker", output: "SUB2API_LIVE_STAGE=network-setup\nSUB2API_LIVE_STAGE=app-ready-check\n", want: "app-ready-check"},
@@ -1110,6 +1114,7 @@ func TestLiveDataCreateFailureStageReportsOnlyFixedClasses(t *testing.T) {
 		{name: "artifact", err: errors.New("rpc error: host artifact unavailable"), want: "data-create-artifact"},
 		{name: "host", err: errors.New("rpc error: unsupported host"), want: "data-create-host"},
 		{name: "bootstrap", err: errors.New("rpc error: invalid bootstrap response"), want: "data-create-bootstrap"},
+		{name: "bootstrap remote", err: errors.New("rpc error: bootstrap remote response"), want: "data-create-bootstrap-remote"},
 		{name: "observation", err: errors.New("rpc error: unsafe remote observation"), want: "data-create-observation"},
 		{name: "unknown redacts detail", err: errors.New("credential canary"), want: "data-create-unknown"},
 	}

@@ -342,6 +342,98 @@ func TestLifecycleCreateRejectsInvalidBootstrapAndFinalObservation(t *testing.T)
 	}
 }
 
+func TestLifecycleCreateClassifiesDecodedBootstrapRemoteErrorAsRemoteResponse(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	bundle, _ := lifecycleBundle(t, release(t, inputs))
+	remote := hostprotocol.Response{Version: hostprotocol.Version, Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorRemoteOperation, Code: hostprotocol.CodeOperationFailed}}
+	r := &recordingLifecycleTransport{
+		probe:    artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"},
+		outcomes: []lifecycleOutcome{{response: remote, err: fmt.Errorf("%w: fixed remote failure", openssh.ErrRemote)}},
+	}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
+
+	got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
+	if err == nil || err.Error() != "bootstrap remote response" || got.ID != "" || got.Properties.Len() != 0 {
+		t.Fatalf("decoded bootstrap remote error = %#v, %v; want redacted remote-response failure", got, err)
+	}
+	if len(r.calls) != 2 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver {
+		t.Fatal("bootstrap remote error did not stop after Probe and Bootstrap")
+	}
+	assertNoCanary(t, errString(err))
+}
+
+func TestLifecycleCreatePreservesBootstrapTransportFailure(t *testing.T) {
+	inputs := lifecycleInputs("edge")
+	bundle, _ := lifecycleBundle(t, release(t, inputs))
+	r := &recordingLifecycleTransport{
+		probe:    artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"},
+		outcomes: []lifecycleOutcome{failure(openssh.ErrTransport)},
+	}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }})
+
+	got, err := h.create(t.Context(), p.CreateRequest{Properties: inputs})
+	if err == nil || err.Error() != "transport failed" || got.ID != "" || got.Properties.Len() != 0 {
+		t.Fatalf("bootstrap transport failure = %#v, %v; want redacted transport failure", got, err)
+	}
+	if len(r.calls) != 2 || r.calls[0].kind != "probe" || r.calls[1].command != openssh.BootstrapReceiver {
+		t.Fatal("bootstrap transport failure did not stop after Probe and Bootstrap")
+	}
+	assertNoCanary(t, errString(err))
+}
+
+func TestLifecycleUpdateClassifiesDecodedBootstrapRemoteErrorAsRemoteResponse(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
+	bundle, _ := lifecycleBundle(t, nextTarget.ReleaseArtifact)
+	remote := hostprotocol.Response{Version: hostprotocol.Version, Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorRemoteOperation, Code: hostprotocol.CodeOperationFailed}}
+	r := &recordingLifecycleTransport{
+		probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"},
+		outcomes: []lifecycleOutcome{
+			response(inspected(observation(revisionForInputs(t, old)))),
+			{response: remote, err: fmt.Errorf("%w: fixed remote failure", openssh.ErrRemote)},
+		},
+	}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }, approve: fatalApproval(t)})
+	oldRevision := revision(t, h, old)
+
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	if err == nil || err.Error() != "bootstrap remote response" || got.Properties.Len() != 0 {
+		t.Fatalf("decoded upgrade bootstrap remote error = %#v, %v; want redacted remote-response failure", got, err)
+	}
+	if len(r.calls) != 3 || r.calls[0].command != openssh.Host || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver {
+		t.Fatalf("bootstrap remote error calls = %#v; want inspect, Probe, Bootstrap", r.calls)
+	}
+	assertNoCanary(t, errString(err))
+}
+
+func TestLifecycleUpdatePreservesBootstrapTransportFailure(t *testing.T) {
+	old := lifecycleInputs("edge")
+	nextTarget := decodeTarget(t, old)
+	nextTarget.ReleaseArtifact = "release-next@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	next := old.Set("target", encodeValue(t, nextTarget))
+	bundle, _ := lifecycleBundle(t, nextTarget.ReleaseArtifact)
+	r := &recordingLifecycleTransport{
+		probe: artifact.ProbeInfo{OS: "Linux", Arch: "amd64", Machine: "machine-a", InstalledDigest: "missing"},
+		outcomes: []lifecycleOutcome{
+			response(inspected(observation(revisionForInputs(t, old)))),
+			failure(openssh.ErrTransport),
+		},
+	}
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: func() (artifactBundle, error) { return bundle, nil }, approve: fatalApproval(t)})
+	oldRevision := revision(t, h, old)
+
+	got, err := h.update(t.Context(), p.UpdateRequest{ID: stableID(lifecycleResource(t, old)), State: checkpoint(t, old, observation(oldRevision), oldRevision), OldInputs: old, Inputs: next})
+	if err == nil || err.Error() != "transport failed" || got.Properties.Len() != 0 {
+		t.Fatalf("upgrade bootstrap transport failure = %#v, %v; want redacted transport failure", got, err)
+	}
+	if len(r.calls) != 3 || r.calls[0].command != openssh.Host || r.calls[1].kind != "probe" || r.calls[2].command != openssh.BootstrapReceiver {
+		t.Fatalf("bootstrap transport failure calls = %#v; want inspect, Probe, Bootstrap", r.calls)
+	}
+	assertNoCanary(t, errString(err))
+}
+
 func TestLifecycleCreateArtifactAndConfigurationFailuresPrecedeTransport(t *testing.T) {
 	inputs := lifecycleInputs("edge")
 	for _, source := range []func() (artifactBundle, error){

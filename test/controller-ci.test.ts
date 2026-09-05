@@ -221,7 +221,7 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("event.Test === test && typeof event.Output === 'string'");
     expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
     expect(workflow).toContain("console.log(`${test} stage: ${stage}`)");
-    for (const stage of ["artifact", "bootstrap", "host", "observation", "response", "timeout", "transport", "unknown"]) {
+    for (const stage of ["artifact", "bootstrap", "bootstrap-remote", "host", "observation", "response", "timeout", "transport", "unknown"]) {
       expect(workflow).toContain(`'data-create-${stage}'`);
     }
     for (const stage of ["host-key", "protocol", "timeout", "transport", "unknown"]) {
