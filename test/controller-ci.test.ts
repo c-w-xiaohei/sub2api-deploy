@@ -210,6 +210,9 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("event.Test === test && typeof event.Output === 'string'");
     expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
     expect(workflow).toContain("console.log(`${test} stage: ${stage}`)");
+    for (const stage of ["artifact", "bootstrap", "host", "observation", "response", "timeout", "transport", "unknown"]) {
+      expect(workflow).toContain(`'data-create-${stage}'`);
+    }
     expect(workflow).not.toContain("console.log(event.Output)");
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).not.toContain("-race -json -count=1 -timeout=15m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$");

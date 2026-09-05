@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -97,6 +98,7 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	reportLiveStage("data-create")
 	dataCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::data", Properties: rpcProperties(t, dataInput)})
 	if err != nil || dataCreated == nil || dataCreated.Id == "" {
+		reportLiveStage(liveDataCreateFailureStage(err))
 		t.Fatal("released Provider Create failed")
 	}
 	reportLiveStage("data-ready-check")
@@ -981,6 +983,14 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"provider-start":                    true,
 		"provider-configure":                true,
 		"data-create":                       true,
+		"data-create-artifact":              true,
+		"data-create-bootstrap":             true,
+		"data-create-host":                  true,
+		"data-create-observation":           true,
+		"data-create-response":              true,
+		"data-create-timeout":               true,
+		"data-create-transport":             true,
+		"data-create-unknown":               true,
 		"data-ready-check":                  true,
 		"app-create":                        true,
 		"app-ready-check":                   true,
@@ -1005,6 +1015,30 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 
 func reportLiveStage(stage string) {
 	_, _ = os.Stderr.WriteString("SUB2API_LIVE_STAGE=" + stage + "\n")
+}
+
+func liveDataCreateFailureStage(err error) string {
+	const prefix = "data-create-"
+	if err == nil {
+		return prefix + "response"
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "context deadline exceeded"):
+		return prefix + "timeout"
+	case strings.Contains(message, "transport failed") || strings.Contains(message, "transport unavailable"):
+		return prefix + "transport"
+	case strings.Contains(message, "host artifact"):
+		return prefix + "artifact"
+	case strings.Contains(message, "unsupported host"):
+		return prefix + "host"
+	case strings.Contains(message, "bootstrap response"):
+		return prefix + "bootstrap"
+	case strings.Contains(message, "inspect response") || strings.Contains(message, "remote observation"):
+		return prefix + "observation"
+	default:
+		return prefix + "unknown"
+	}
 }
 
 func TestLiveFailureCategoryReportsOnlyKnownLastStage(t *testing.T) {
@@ -1032,6 +1066,30 @@ func TestLiveFailureCategoryReportsOnlyKnownLastStage(t *testing.T) {
 	cancel()
 	if got := liveFailureCategory(canceled, []byte("SUB2API_LIVE_STAGE=data-create\n")); got != "timeout" {
 		t.Fatalf("liveFailureCategory(canceled) = %q, want timeout", got)
+	}
+}
+
+func TestLiveDataCreateFailureStageReportsOnlyFixedClasses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "missing response", want: "data-create-response"},
+		{name: "timeout", err: errors.New("rpc error: context deadline exceeded"), want: "data-create-timeout"},
+		{name: "transport", err: errors.New("rpc error: transport failed"), want: "data-create-transport"},
+		{name: "artifact", err: errors.New("rpc error: host artifact unavailable"), want: "data-create-artifact"},
+		{name: "host", err: errors.New("rpc error: unsupported host"), want: "data-create-host"},
+		{name: "bootstrap", err: errors.New("rpc error: invalid bootstrap response"), want: "data-create-bootstrap"},
+		{name: "observation", err: errors.New("rpc error: unsafe remote observation"), want: "data-create-observation"},
+		{name: "unknown redacts detail", err: errors.New("credential canary"), want: "data-create-unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := liveDataCreateFailureStage(test.err); got != test.want {
+				t.Fatalf("liveDataCreateFailureStage() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
