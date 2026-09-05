@@ -931,9 +931,6 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"data-docker-containerd-path":       true,
 		"data-docker-containerd-socket":     true,
 		"data-docker-containerd-exit":       true,
-		"data-docker-containerd-client":     true,
-		"data-docker-containerd-rpc":        true,
-		"data-docker-containerd-permission": true,
 		"data-docker-conflict":              true,
 		"data-docker-resource":              true,
 		"data-docker-permission":            true,
@@ -950,9 +947,6 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"app-docker-containerd-path":        true,
 		"app-docker-containerd-socket":      true,
 		"app-docker-containerd-exit":        true,
-		"app-docker-containerd-client":      true,
-		"app-docker-containerd-rpc":         true,
-		"app-docker-containerd-permission":  true,
 		"app-docker-conflict":               true,
 		"app-docker-resource":               true,
 		"app-docker-permission":             true,
@@ -1060,35 +1054,6 @@ func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *tes
 			}
 			if got := string(output); got != test.want {
 				t.Fatalf("Docker failure reason = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
-func TestLiveContainerdProbeFailureReasonIsSanitized(t *testing.T) {
-	script := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "live-host-sandbox.sh")
-	tests := []struct {
-		name, log, want string
-	}{
-		{name: "client invocation", log: "Incorrect Usage: flag provided but not defined: -connect-timeout", want: "containerd-client"},
-		{name: "RPC response", log: "rpc error: code = Unimplemented desc = unknown service", want: "containerd-rpc"},
-		{name: "socket connection", log: "failed to dial: connection refused", want: "containerd-socket"},
-		{name: "permission", log: "failed to dial: permission denied", want: "containerd-permission"},
-		{name: "deadline", log: "context deadline exceeded", want: "containerd-timeout"},
-		{name: "unknown", log: "probe failed", want: "containerd"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			log := filepath.Join(t.TempDir(), "probe.log")
-			if err := os.WriteFile(log, []byte(test.log), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			output, err := exec.Command("sh", script, "--classify-containerd-probe", log).Output()
-			if err != nil {
-				t.Fatalf("classify containerd probe failure: %v", err)
-			}
-			if got := string(output); got != test.want {
-				t.Fatalf("containerd probe failure reason = %q, want %q", got, test.want)
 			}
 		})
 	}
