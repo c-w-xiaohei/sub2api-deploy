@@ -175,7 +175,7 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("openssh-server nftables iproute2 util-linux postgresql-client redis-tools sudo openssl");
     expect(workflow).not.toMatch(/apt-get install[^\n]*docker\.io/);
     expect(workflow).toContain("unshare nsenter psql redis-cli openssl");
-    expect(workflow).toContain("containerd containerd-shim-runc-v2 ctr runc timeout");
+    expect(workflow).toContain("containerd containerd-shim-runc-v2 runc timeout");
     expect(workflow).toContain('command -v "$tool"');
     expect(workflow).toContain("sudo docker pull postgres:18-alpine");
     expect(workflow).toContain("sudo docker pull redis:8-alpine");
@@ -200,10 +200,6 @@ describe("Task4 CI contracts", () => {
     expect(liveHostSandbox).not.toContain('"$root/$name/run"');
     expect(liveHostSandbox).not.toContain("--storage-driver overlay");
     expect(liveHostSandbox).toContain('docker -H unix:///var/run/docker.sock "$@"');
-    expect(liveHostSandbox).toContain("version = 3");
-    expect(liveHostSandbox).toContain("imports = []");
-    expect(liveHostSandbox).toContain('"io.containerd.grpc.v1.cri"');
-    expect(liveHostSandbox).toContain('mount --bind "$root/$name/etc-containerd" /etc/containerd');
     const mountPrivateShadow = 'mount --bind "$root/$name.shadow" /etc/shadow';
     expect(liveHostSandbox).toContain("printf '%s\\n' 'root:x:20000:0:99999:7:::' >\"$root/$name.shadow\"");
     expect(liveHostSandbox).toContain('chmod 0600 "$root/$name.shadow"');
@@ -219,34 +215,7 @@ describe("Task4 CI contracts", () => {
     expect(liveRuntimeTest).not.toContain('AuthorizedKeysFile "+filepath.Join(root, item.name, "authorized_keys")');
     expect(liveRuntime.indexOf(mountSSHHome)).toBeLessThan(liveRuntime.indexOf("ip link set lo up"));
     expect(liveHostSandbox).toContain(restoreHostCgroupMount);
-    expect(liveHostSandbox.indexOf(restoreHostCgroupMount)).toBeLessThan(liveHostSandbox.indexOf("setsid containerd"));
-    expect(liveHostSandbox).toContain('setsid containerd --config "$root/$name/containerd.toml" --root "$root/$name/containerd" --state /var/run/sub2api-containerd --address /var/run/sub2api-containerd/containerd.sock');
-    expect(liveHostSandbox).toContain('timeout --signal=TERM --kill-after=1s 6s ctr --address /var/run/sub2api-containerd/containerd.sock --namespace "sub2api-$name" --timeout 5s --connect-timeout 2s');
-    expect(liveHostSandbox).toContain('timeout --signal=TERM --kill-after=1s 3s ctr --address /var/run/sub2api-containerd/containerd.sock --namespace "sub2api-$name" --timeout 2s --connect-timeout 1s');
-    expect(liveHostSandbox).toContain('--containerd /var/run/sub2api-containerd/containerd.sock --containerd-namespace "sub2api-$name" --containerd-plugins-namespace "plugins.sub2api-$name"');
-    expect(liveHostSandbox).toContain('if ! process_alive "$containerd"; then\n    stage=docker-containerd-exit\n    exit 1');
-    expect(liveHostSandbox).toContain('until [ -S /var/run/sub2api-containerd/containerd.sock ]; do');
-    expect(liveHostSandbox).not.toContain('ctr_cli version');
-    expect(liveHostSandbox).toContain('if [ "$reason" = containerd-timeout ]; then\n      reason=$(containerd_startup_reason "$containerd_log")');
-    const privateConfig = 'mount --bind "$root/$name/etc-containerd" /etc/containerd';
-    const containerdStart = "setsid containerd";
-    expect(liveHostSandbox.indexOf(privateConfig)).toBeLessThan(liveHostSandbox.indexOf(containerdStart));
-    const removeContainers = "remove_all_docker_containers || cleanup_failed=1";
-    const waitTasks = "wait_for_no_containerd_tasks || cleanup_failed=1";
-    const waitShims = "wait_for_no_host_shims || cleanup_failed=1";
-    const stopDocker = 'stop_group "$dockerd"';
-    const stopContainerd = 'stop_group "$containerd"';
-    const stopSSHD = 'stop_group "$sshd"';
-    for (const command of [removeContainers, waitTasks, waitShims, stopDocker, stopContainerd, stopSSHD]) {
-      expect(liveHostSandbox).toContain(command);
-    }
-    expect(liveHostSandbox.indexOf(removeContainers)).toBeLessThan(liveHostSandbox.indexOf(waitTasks));
-    expect(liveHostSandbox.indexOf(waitTasks)).toBeLessThan(liveHostSandbox.indexOf(waitShims));
-    expect(liveHostSandbox.indexOf(waitShims)).toBeLessThan(liveHostSandbox.indexOf(stopDocker));
-    expect(liveHostSandbox.indexOf(stopDocker)).toBeLessThan(liveHostSandbox.indexOf(stopContainerd));
-    expect(liveHostSandbox.indexOf(stopContainerd)).toBeLessThan(liveHostSandbox.indexOf(stopSSHD));
     expect(liveHostSandbox).toContain('[ "$i" -lt 8 ]');
-    expect(liveHostSandbox).toContain('[ "$i" -lt 5 ]');
     expect(liveHostSandbox).toContain('12s docker -H unix:///var/run/docker.sock rm -f $ids');
     expect(liveHostSandbox).toMatch(/on_signal\(\) \{\s+shutdown_requested=1\s+exit 0\s+\}/);
     expect(liveHostSandbox).toContain("trap on_signal INT TERM");
@@ -290,10 +259,10 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("'data-docker-cgroup'");
     expect(workflow).toContain("'app-docker-helper'");
     expect(workflow).toContain("'data-docker-timeout'");
+    expect(workflow).toContain("'data-docker-containerd'");
+    expect(workflow).toContain("'app-docker-containerd'");
     expect(workflow).toContain("'data-docker-containerd-timeout'");
-    expect(workflow).toContain("'app-docker-containerd-exit'");
-    expect(workflow).toContain("'data-docker-containerd-booted'");
-    expect(workflow).toContain("'app-docker-containerd-plugin'");
+    expect(workflow).toContain("'app-docker-containerd-timeout'");
     expect(workflow).toContain("if (event.Test !== test || typeof event.Output !== 'string') continue;");
     expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
     expect(workflow).toContain("console.log(`${test} observer: ${observer}`)");
@@ -309,6 +278,46 @@ describe("Task4 CI contracts", () => {
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).not.toContain("-race -json -count=1 -timeout=15m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$");
     expect(workflow).toContain("test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$'");
+  });
+
+  it("runs each Host dockerd in its private mounts with a dockerd-managed containerd", () => {
+    const privateVarLib = "mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib";
+    const privateVarRun = "mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run";
+    const dockerdStart = 'setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root /var/run/sub2api-docker --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock';
+
+    expect(liveRuntime).toContain('setsid ip netns exec "$LIVE_DATA_NS" unshare --mount --propagation private "$root/host-sandbox.sh" data &');
+    expect(liveRuntime).toContain('setsid ip netns exec "$LIVE_APP_NS" unshare --mount --propagation private "$root/host-sandbox.sh" app &');
+    expect(liveHostSandbox).toContain(privateVarLib);
+    expect(liveHostSandbox).toContain(privateVarRun);
+    expect(liveHostSandbox).toContain(dockerdStart);
+    expect(liveHostSandbox.indexOf(privateVarLib)).toBeLessThan(liveHostSandbox.indexOf(dockerdStart));
+    expect(liveHostSandbox.indexOf(privateVarRun)).toBeLessThan(liveHostSandbox.indexOf(dockerdStart));
+    expect(liveHostSandbox).not.toMatch(/^setsid containerd\b/m);
+    expect(liveHostSandbox).not.toContain("--containerd /var/run/sub2api-containerd/containerd.sock");
+    expect(liveHostSandbox).not.toContain("ctr --address /var/run/sub2api-containerd/containerd.sock");
+    const cleanupSteps = [
+      'remove_all_docker_containers || cleanup_failed=1',
+      'stop_group "$dockerd" || cleanup_failed=1',
+      'cleanup_host_runtime || cleanup_failed=1',
+      'stop_group "$sshd" || cleanup_failed=1',
+    ];
+    for (const step of cleanupSteps) expect(liveHostSandbox).toContain(step);
+    for (let i = 1; i < cleanupSteps.length; i++) {
+      expect(liveHostSandbox.indexOf(cleanupSteps[i - 1])).toBeLessThan(liveHostSandbox.indexOf(cleanupSteps[i]));
+    }
+    expect(liveHostSandbox).toContain('readlink "/proc/$$/ns/mnt"');
+    expect(liveHostSandbox).toContain('readlink "/proc/$pid/ns/mnt"');
+    expect(liveHostSandbox).toContain('case "$pid" in');
+    expect(liveHostSandbox).toContain('*[!0-9]*|\'\') return 1');
+    expect(liveHostSandbox).toContain('case "$comm" in');
+    expect(liveHostSandbox).toContain('containerd|containerd-shim*)');
+    const runtimePidCheck = liveHostSandbox.slice(liveHostSandbox.indexOf("host_runtime_pid()"), liveHostSandbox.indexOf("host_runtime_alive()"));
+    expect(runtimePidCheck).toContain('host_runtime_identity_matches "$pid" || return 1');
+    expect(runtimePidCheck.match(/host_runtime_identity_matches "\$pid"/g)).toHaveLength(2);
+    expect(liveHostSandbox).toContain('signal_host_runtime TERM');
+    expect(liveHostSandbox).toContain('signal_host_runtime KILL');
+    const runtimeCleanup = liveHostSandbox.slice(liveHostSandbox.indexOf("host_runtime_identity_matches()"), liveHostSandbox.indexOf("cleanup()"));
+    expect(runtimeCleanup).not.toMatch(/printf|echo/);
   });
 
   it("leaves the fresh Host root exclusively to Bootstrap", () => {

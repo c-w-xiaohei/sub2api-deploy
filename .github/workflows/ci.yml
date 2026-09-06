@@ -232,7 +232,7 @@ jobs:
           sudo unshare --mount --net --propagation private true
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends openssh-server nftables iproute2 util-linux postgresql-client redis-tools sudo openssl
-          for tool in dockerd docker containerd containerd-shim-runc-v2 ctr runc timeout sshd ssh sudo nft ip unshare nsenter psql redis-cli openssl; do command -v "$tool"; done
+          for tool in dockerd docker containerd containerd-shim-runc-v2 runc timeout sshd ssh sudo nft ip unshare nsenter psql redis-cli openssl; do command -v "$tool"; done
           daemon_pid_file="$RUNNER_TEMP/provider-runtime-dockerd-${TARGET_SHA}.pid"; daemon_log="$RUNNER_TEMP/provider-runtime-dockerd-${TARGET_SHA}.log"
           if ! sudo docker info >/dev/null 2>&1; then sudo dockerd >"$daemon_log" 2>&1 & echo "$!" > "$daemon_pid_file"; fi
           ready=false; for _ in $(seq 1 45); do if sudo docker info >/dev/null 2>&1; then ready=true; break; fi; sleep 1; done; test "$ready" = true
@@ -283,12 +283,6 @@ jobs:
             'data-docker-containerd-path',
             'data-docker-containerd-socket',
             'data-docker-containerd-exit',
-            'data-docker-containerd-booted',
-            'data-docker-containerd-listener',
-            'data-docker-containerd-permission',
-            'data-docker-containerd-resource',
-            'data-docker-containerd-plugin',
-            'data-docker-containerd-startup',
             'data-docker-conflict',
             'data-docker-resource',
             'data-docker-permission',
@@ -310,12 +304,6 @@ jobs:
             'app-docker-containerd-path',
             'app-docker-containerd-socket',
             'app-docker-containerd-exit',
-            'app-docker-containerd-booted',
-            'app-docker-containerd-listener',
-            'app-docker-containerd-permission',
-            'app-docker-containerd-resource',
-            'app-docker-containerd-plugin',
-            'app-docker-containerd-startup',
             'app-docker-conflict',
             'app-docker-resource',
             'app-docker-permission',
