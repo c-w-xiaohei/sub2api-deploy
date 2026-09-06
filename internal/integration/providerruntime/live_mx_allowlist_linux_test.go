@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
@@ -1569,14 +1570,18 @@ const liveSSHDockerPreflightMarker = "live ssh docker preflight:"
 var liveSSHDockerPreflightSockets = map[string]bool{"present": true, "missing": true, "not-socket": true}
 var liveSSHDockerPreflightDocker = map[string]bool{"ok": true, "failed": true}
 var liveSSHDockerPreflightOverride = map[string]bool{"set": true, "unset": true}
+var liveBootstrapDiscoveryCategories = map[string]bool{"empty": true, "unowned": true, "owned": true, "malformed": true, "failed": true}
 
 const liveSSHDockerPreflightScript = `if test -S /var/run/docker.sock; then socket=present; elif test -e /var/run/docker.sock; then socket=not-socket; else socket=missing; fi
-if docker container ls --all --filter label=sub2api.host --format '{{.Names}}' >/dev/null 2>&1; then container=ok; else container=failed; fi
-if docker network ls --filter label=sub2api.host --format '{{.Name}}' >/dev/null 2>&1; then network=ok; else network=failed; fi
 if test "${DOCKER_HOST+x}" = x; then docker_host=set; else docker_host=unset; fi
 if test "${DOCKER_CONTEXT+x}" = x; then docker_context=set; else docker_context=unset; fi
 if test "${DOCKER_CONFIG+x}" = x; then docker_config=set; else docker_config=unset; fi
-printf 'live ssh docker preflight: socket=%s container=%s network=%s docker-host=%s docker-context=%s docker-config=%s\n' "$socket" "$container" "$network" "$docker_host" "$docker_context" "$docker_config"`
+printf 'socket=%s docker-host=%s docker-context=%s docker-config=%s\n' "$socket" "$docker_host" "$docker_context" "$docker_config"`
+
+var liveBootstrapDiscoveryCommands = [...]string{
+	`docker container ls --all --filter label=sub2api.host --format '{{.Names}}\t{{index .Labels "sub2api.host"}}'`,
+	`docker network ls --filter label=sub2api.host --format '{{.Name}}\t{{index .Labels "sub2api.host"}}'`,
+}
 
 func liveSSHDockerPreflightArgs(alias string) []string {
 	remote := "/bin/sh -c '" + liveShellQuote(liveSSHDockerPreflightScript) + "' fixed-argv0"
@@ -1587,14 +1592,26 @@ func liveSSHDockerPreflight(t *testing.T, parent context.Context, alias string) 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(parent, liveCommandTimeout)
 	defer cancel()
-	args := liveSSHDockerPreflightArgs(alias)
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-	var output boundedBuffer
-	cmd.Stdout, cmd.Stderr = &output, &output
-	if cmd.Run() != nil || ctx.Err() != nil {
+	output, err := liveSSHPreflightCommand(ctx, alias, liveSSHDockerPreflightScript)
+	if err != nil || ctx.Err() != nil {
 		return false
 	}
-	record := string(output.Bytes())
+	fields := strings.Fields(strings.TrimSuffix(string(output), "\n"))
+	if len(fields) != 4 {
+		return false
+	}
+	socket, socketOK := strings.CutPrefix(fields[0], "socket=")
+	host, hostOK := strings.CutPrefix(fields[1], "docker-host=")
+	dockerContext, contextOK := strings.CutPrefix(fields[2], "docker-context=")
+	config, configOK := strings.CutPrefix(fields[3], "docker-config=")
+	if !socketOK || !hostOK || !contextOK || !configOK || !liveSSHDockerPreflightSockets[socket] || !liveSSHDockerPreflightOverride[host] || !liveSSHDockerPreflightOverride[dockerContext] || !liveSSHDockerPreflightOverride[config] || string(output) != fmt.Sprintf("socket=%s docker-host=%s docker-context=%s docker-config=%s\n", socket, host, dockerContext, config) {
+		return false
+	}
+	containerOutput, containerErr := liveSSHPreflightCommand(ctx, alias, liveBootstrapDiscoveryCommands[0])
+	networkOutput, networkErr := liveSSHPreflightCommand(ctx, alias, liveBootstrapDiscoveryCommands[1])
+	container := liveBootstrapDiscoveryClassification(containerOutput, containerErr)
+	network := liveBootstrapDiscoveryClassification(networkOutput, networkErr)
+	record := fmt.Sprintf("%s socket=%s container=%s network=%s container-discovery=%s network-discovery=%s docker-host=%s docker-context=%s docker-config=%s\n", liveSSHDockerPreflightMarker, socket, liveDockerCommandCategory(containerErr), liveDockerCommandCategory(networkErr), container, network, host, dockerContext, config)
 	if !liveSSHDockerPreflightRecord(record) {
 		return false
 	}
@@ -1602,18 +1619,92 @@ func liveSSHDockerPreflight(t *testing.T, parent context.Context, alias string) 
 	return true
 }
 
+func liveSSHPreflightCommand(ctx context.Context, alias, remote string) ([]byte, error) {
+	args := liveSSHDockerPreflightArgs(alias)
+	args[len(args)-1] = "/bin/sh -c '" + liveShellQuote(remote) + "' fixed-argv0"
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	var output liveDiscoveryOutput
+	cmd.Stdout, cmd.Stderr = &output, &output
+	err := cmd.Run()
+	return output.Bytes(), output.commandError(err)
+}
+
+const liveDiscoveryOutputLimit = 64 * 1024
+
+type liveDiscoveryOutput struct {
+	data []byte
+}
+
+func (b *liveDiscoveryOutput) Write(p []byte) (int, error) {
+	const captureLimit = liveDiscoveryOutputLimit + 1
+	if len(b.data) < captureLimit {
+		n := min(len(p), captureLimit-len(b.data))
+		b.data = append(b.data, p[:n]...)
+	}
+	return len(p), nil
+}
+
+func (b *liveDiscoveryOutput) Bytes() []byte { return append([]byte(nil), b.data...) }
+
+func (b *liveDiscoveryOutput) commandError(err error) error {
+	if len(b.data) > liveDiscoveryOutputLimit {
+		return errors.New("live discovery output limit")
+	}
+	return err
+}
+
+func liveDockerCommandCategory(err error) string {
+	if err != nil {
+		return "failed"
+	}
+	return "ok"
+}
+
+func liveBootstrapDiscoveryClassification(out []byte, commandErr error) string {
+	if commandErr != nil {
+		return "failed"
+	}
+	if len(out) > liveDiscoveryOutputLimit || bytes.IndexByte(out, '\r') >= 0 {
+		return "malformed"
+	}
+	if len(out) == 0 {
+		return "empty"
+	}
+	lines := strings.Split(string(out), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 || len(lines) > 1024 {
+		return "malformed"
+	}
+	seen := map[string]bool{}
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 2 || fields[0] == "" || !utf8.ValidString(fields[0]) || !utf8.ValidString(fields[1]) || seen[fields[0]] {
+			return "malformed"
+		}
+		seen[fields[0]] = true
+		if fields[1] != "" {
+			return "owned"
+		}
+	}
+	return "unowned"
+}
+
 func liveSSHDockerPreflightRecord(record string) bool {
 	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
-	if len(fields) != 10 || strings.Join(fields[:4], " ") != liveSSHDockerPreflightMarker {
+	if len(fields) != 12 || strings.Join(fields[:4], " ") != liveSSHDockerPreflightMarker {
 		return false
 	}
 	socket, socketOK := strings.CutPrefix(fields[4], "socket=")
 	container, containerOK := strings.CutPrefix(fields[5], "container=")
 	network, networkOK := strings.CutPrefix(fields[6], "network=")
-	host, hostOK := strings.CutPrefix(fields[7], "docker-host=")
-	context, contextOK := strings.CutPrefix(fields[8], "docker-context=")
-	config, configOK := strings.CutPrefix(fields[9], "docker-config=")
-	return socketOK && containerOK && networkOK && hostOK && contextOK && configOK && liveSSHDockerPreflightSockets[socket] && liveSSHDockerPreflightDocker[container] && liveSSHDockerPreflightDocker[network] && liveSSHDockerPreflightOverride[host] && liveSSHDockerPreflightOverride[context] && liveSSHDockerPreflightOverride[config] && record == fmt.Sprintf("%s socket=%s container=%s network=%s docker-host=%s docker-context=%s docker-config=%s\n", liveSSHDockerPreflightMarker, socket, container, network, host, context, config)
+	containerDiscovery, containerDiscoveryOK := strings.CutPrefix(fields[7], "container-discovery=")
+	networkDiscovery, networkDiscoveryOK := strings.CutPrefix(fields[8], "network-discovery=")
+	host, hostOK := strings.CutPrefix(fields[9], "docker-host=")
+	context, contextOK := strings.CutPrefix(fields[10], "docker-context=")
+	config, configOK := strings.CutPrefix(fields[11], "docker-config=")
+	return socketOK && containerOK && networkOK && containerDiscoveryOK && networkDiscoveryOK && hostOK && contextOK && configOK && liveSSHDockerPreflightSockets[socket] && liveSSHDockerPreflightDocker[container] && liveSSHDockerPreflightDocker[network] && liveBootstrapDiscoveryCategories[containerDiscovery] && liveBootstrapDiscoveryCategories[networkDiscovery] && liveSSHDockerPreflightOverride[host] && liveSSHDockerPreflightOverride[context] && liveSSHDockerPreflightOverride[config] && record == fmt.Sprintf("%s socket=%s container=%s network=%s container-discovery=%s network-discovery=%s docker-host=%s docker-context=%s docker-config=%s\n", liveSSHDockerPreflightMarker, socket, container, network, containerDiscovery, networkDiscovery, host, context, config)
 }
 
 func livePostCreateSnapshotRecord(record string) bool {
@@ -2033,8 +2124,8 @@ func TestLiveSSHDockerPreflightUsesFixedSSHTransportAndRedactsOutput(t *testing.
 			t.Fatalf("production SSH transport changed; missing %q", want)
 		}
 	}
-	if !strings.Contains(liveSSHDockerPreflightScript, `test -S /var/run/docker.sock`) || !strings.Contains(liveSSHDockerPreflightScript, `docker container ls --all --filter label=sub2api.host --format '{{.Names}}' >/dev/null 2>&1`) || !strings.Contains(liveSSHDockerPreflightScript, `docker network ls --filter label=sub2api.host --format '{{.Name}}' >/dev/null 2>&1`) {
-		t.Fatal("preflight does not use fixed plain Docker discovery")
+	if !strings.Contains(liveSSHDockerPreflightScript, `test -S /var/run/docker.sock`) || liveBootstrapDiscoveryCommands[0] != `docker container ls --all --filter label=sub2api.host --format '{{.Names}}\t{{index .Labels "sub2api.host"}}'` || liveBootstrapDiscoveryCommands[1] != `docker network ls --filter label=sub2api.host --format '{{.Name}}\t{{index .Labels "sub2api.host"}}'` {
+		t.Fatal("preflight does not use exact fixed Docker bootstrap discovery")
 	}
 	if strings.Contains(liveSSHDockerPreflightScript, "-H") || strings.Contains(liveSSHDockerPreflightScript, `"$DOCKER_`) {
 		t.Fatal("preflight script leaks override values or changes Docker transport")
@@ -2042,14 +2133,14 @@ func TestLiveSSHDockerPreflightUsesFixedSSHTransportAndRedactsOutput(t *testing.
 }
 
 func TestLiveSSHDockerPreflightRecordAndCaptureFailClosed(t *testing.T) {
-	good := "live ssh docker preflight: socket=present container=ok network=ok docker-host=unset docker-context=unset docker-config=unset\n"
+	good := "live ssh docker preflight: socket=present container=ok network=ok container-discovery=empty network-discovery=empty docker-host=unset docker-context=unset docker-config=unset\n"
 	if !liveSSHDockerPreflightRecord(good) {
 		t.Fatal("good preflight rejected")
 	}
 	for _, input := range []string{
 		"prefix " + good,
-		"live ssh docker preflight: socket=present container=ok network=ok docker-host=set docker-context=unset docker-config=unset canary\n",
-		"live ssh docker preflight: socket=bad container=ok network=ok docker-host=unset docker-context=unset docker-config=unset\n",
+		"live ssh docker preflight: socket=present container=ok network=ok container-discovery=empty network-discovery=empty docker-host=set docker-context=unset docker-config=unset canary\n",
+		"live ssh docker preflight: socket=bad container=ok network=ok container-discovery=empty network-discovery=empty docker-host=unset docker-context=unset docker-config=unset\n",
 		strings.Repeat("x", 161) + good,
 		good + good,
 	} {
@@ -2058,6 +2149,63 @@ func TestLiveSSHDockerPreflightRecordAndCaptureFailClosed(t *testing.T) {
 		var out bytes.Buffer
 		if capture.forward(&out) || out.String() != "live observer: observer-error\n" {
 			t.Fatalf("unsafe preflight record forwarded: %q", out.String())
+		}
+	}
+}
+
+func TestLiveBootstrapDiscoveryClassificationMirrorsReleasedValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		out  []byte
+		want string
+	}{
+		{name: "empty", want: "empty"},
+		{name: "accepted unowned row", out: []byte("existing-object\t\n"), want: "unowned"},
+		{name: "ownership conflict", out: []byte("existing-object\towned\n"), want: "owned"},
+		{name: "duplicate name", out: []byte("existing-object\t\nexisting-object\t\n"), want: "malformed"},
+		{name: "carriage return", out: []byte("existing-object\t\r\n"), want: "malformed"},
+		{name: "bad fields", out: []byte("existing-object\n"), want: "malformed"},
+		{name: "too large", out: bytes.Repeat([]byte("x"), liveDiscoveryOutputLimit+1), want: "malformed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := liveBootstrapDiscoveryClassification(test.out, nil); got != test.want {
+				t.Fatalf("classification = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if got := liveBootstrapDiscoveryClassification(nil, errors.New("docker failed")); got != "failed" {
+		t.Fatalf("command failure classification = %q, want failed", got)
+	}
+}
+
+func TestLiveDiscoveryOutputLimitClassifiesAsCommandFailure(t *testing.T) {
+	var output liveDiscoveryOutput
+	_, _ = output.Write(bytes.Repeat([]byte("x"), liveDiscoveryOutputLimit+1))
+	err := output.commandError(nil)
+	if err == nil {
+		t.Fatal("output limit did not fail command")
+	}
+	if got := liveDockerCommandCategory(err); got != "failed" {
+		t.Fatalf("command category = %q, want failed", got)
+	}
+	if got := liveBootstrapDiscoveryClassification(output.Bytes(), err); got != "failed" {
+		t.Fatalf("discovery category = %q, want failed", got)
+	}
+}
+
+func TestLiveSSHDockerPreflightRecordRejectsMalformedDiscoveryMarkers(t *testing.T) {
+	good := "live ssh docker preflight: socket=present container=ok network=ok container-discovery=empty network-discovery=unowned docker-host=unset docker-context=unset docker-config=unset\n"
+	if !liveSSHDockerPreflightRecord(good) {
+		t.Fatal("good discovery preflight rejected")
+	}
+	for _, record := range []string{
+		strings.Replace(good, "container-discovery=empty", "container-discovery=unknown", 1),
+		strings.Replace(good, "network-discovery=unowned", "network-discovery=unowned extra=marker", 1),
+		strings.Replace(good, "network-discovery=unowned", "network-discovery=unowned\r", 1),
+	} {
+		if liveSSHDockerPreflightRecord(record) {
+			t.Fatalf("malformed discovery record accepted: %q", record)
 		}
 	}
 }

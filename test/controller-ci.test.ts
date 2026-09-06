@@ -60,7 +60,7 @@ function parseLiveRecords(records: unknown[], parser: "diagnostic" | "candidate"
 
 const livePass = { Test: liveTest, Action: "pass" };
 const liveOutput = (Output: string) => ({ Test: liveTest, Output });
-const goodPreflight = "live ssh docker preflight: socket=present container=ok network=ok docker-host=unset docker-context=unset docker-config=unset\n";
+const goodPreflight = "live ssh docker preflight: socket=present container=ok network=ok container-discovery=empty network-discovery=unowned docker-host=unset docker-context=unset docker-config=unset\n";
 
 function validLiveRecords(): unknown[] {
   return [liveOutput(goodPreflight), ...liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`))];
@@ -351,7 +351,7 @@ describe("Task4 CI contracts", () => {
     expect(parseLiveRecords(valid, "diagnostic")).toBe(0);
     expect(parseLiveRecords(valid, "candidate")).toBe(0);
     for (const output of [
-      "live ssh docker preflight: socket=missing container=failed network=failed docker-host=set docker-context=set docker-config=set\n",
+      "live ssh docker preflight: socket=missing container=failed network=failed container-discovery=failed network-discovery=failed docker-host=set docker-context=set docker-config=set\n",
       "prefix " + goodPreflight,
       goodPreflight + goodPreflight,
     ]) {
@@ -360,6 +360,28 @@ describe("Task4 CI contracts", () => {
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
     expect(parseLiveRecords([...liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`)), livePass], "candidate")).toBe(1);
+  });
+
+  it("accepts only fixed bootstrap discovery categories and rejects extra markers", () => {
+    const base = [...liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`)), livePass];
+    for (const discovery of [
+      "container-discovery=empty network-discovery=unowned",
+      "container-discovery=unowned network-discovery=empty",
+    ]) {
+      const output = goodPreflight.replace("container-discovery=empty network-discovery=unowned", discovery);
+      expect(parseLiveRecords([liveOutput(output), ...base], "diagnostic")).toBe(0);
+      expect(parseLiveRecords([liveOutput(output), ...base], "candidate")).toBe(0);
+    }
+    for (const discovery of [
+      "container-discovery=owned network-discovery=empty",
+      "container-discovery=malformed network-discovery=empty",
+      "container-discovery=failed network-discovery=empty",
+      "container-discovery=empty network-discovery=unowned extra=marker",
+    ]) {
+      const output = goodPreflight.replace("container-discovery=empty network-discovery=unowned", discovery);
+      expect(parseLiveRecords([liveOutput(output), ...base], "diagnostic")).toBe(discovery.includes("extra") ? 1 : 0);
+      expect(parseLiveRecords([liveOutput(output), ...base], "candidate")).toBe(1);
+    }
   });
 
   it("keeps fixed observer diagnostics while rejecting them from a candidate pass", () => {
@@ -393,6 +415,9 @@ describe("Task4 CI contracts", () => {
       expect(parseLiveRecords(records, "diagnostic")).toBe(diagnostic);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
+    const duplicate = [...valid, liveOutput("live namespace fixture failed: data-create-response\n"), liveOutput("live namespace fixture failed: data-create-response\n"), livePass];
+    expect(parseLiveRecords(duplicate, "diagnostic")).toBe(1);
+    expect(parseLiveRecords(duplicate, "candidate")).toBe(1);
   });
 
   it("hands the tested candidate to Target Release without rebuilding it", () => {
