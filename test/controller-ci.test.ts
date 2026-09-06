@@ -425,6 +425,26 @@ describe("Task4 CI contracts", () => {
     }
   });
 
+  it("accepts one fixed postgres lifecycle diagnostic and rejects it from candidates", () => {
+    for (const output of [
+      "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=failed state=restarting restarts=nonzero oom=yes error=present\n",
+      "live postgres container: exec=failed state=failed restarts=unknown oom=unknown error=unknown\n",
+    ]) {
+      const records = [...validLiveRecords(), liveOutput(output), livePass];
+      expect(parseLiveRecords(records, "diagnostic")).toBe(0);
+      expect(parseLiveRecords(records, "candidate")).toBe(1);
+    }
+    for (const output of [
+      "prefix live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok state=running restarts=zero oom=no error=absent extra=field\n",
+      "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\nlive postgres container: exec=ok state=running restarts=zero oom=no error=absent\n",
+    ]) {
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
+    }
+  });
+
   it("rejects provider failure markers only in the success-only candidate parser", () => {
     const valid = validLiveRecords();
     for (const [marker, diagnostic] of [["live namespace fixture failed: data-create-response\n", 0], ["live namespace fixture failed: unknown detail\n", 1]] as const) {

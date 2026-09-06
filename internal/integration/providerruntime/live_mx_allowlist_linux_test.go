@@ -133,7 +133,7 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	dataCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::data", Properties: rpcProperties(t, dataInput)})
 	observerResult := observer.stop()
 	if err != nil || dataCreated == nil || dataCreated.Id == "" {
-		reportLivePostCreateSnapshot(&fixture, observerFacts)
+		reportLivePostCreateSnapshot(ctx, &fixture, observerFacts)
 		reportLiveStage(liveDataCreateFailureStage(err))
 		reportLiveObserverStatus(liveCreateObserverStatus(false, observerResult))
 		t.Fatal("released Provider Create failed")
@@ -1086,17 +1086,17 @@ func (f *liveFixture) liveDataReady(ctx context.Context, expected liveDataContai
 const livePostCreateSnapshotMarker = "live post-create snapshot:"
 
 const (
-	livePostCreateReportTimeout  = 9 * time.Second
+	livePostCreateReportTimeout  = 11 * time.Second
 	livePostCreateStateTimeout   = 3 * time.Second
 	livePostCreateCommandTimeout = time.Second
-	livePostgresReadinessTimeout = 4 * time.Second
+	livePostgresLifecycleTimeout = 6 * time.Second
 )
 
 var livePostCreateStates = map[string]bool{"root-absent": true, "state-absent": true, "invalid": true, "unavailable": true, "not-exact": true, "pending-exact": true}
 var livePostCreateContainers = map[string]bool{"not-inspected": true, "absent": true, "identity-mismatch": true, "exited": true, "not-running": true, "running-probe-failed": true, "running-unready": true, "ready": true, "unavailable": true, "ambiguous": true}
 
-func reportLivePostCreateSnapshot(f *liveFixture, facts liveDataObserverFacts) {
-	ctx, cancel := context.WithTimeout(context.Background(), livePostCreateReportTimeout)
+func reportLivePostCreateSnapshot(parent context.Context, f *liveFixture, facts liveDataObserverFacts) {
+	ctx, cancel := context.WithTimeout(parent, livePostCreateReportTimeout)
 	defer cancel()
 	state, parsed := livePostCreateState(ctx, func(ctx context.Context) ([]byte, error) {
 		return f.sandboxOutputForObserver(ctx, "data", livePostCreateStateTimeout, "sh", "-c", livePostCreateStateReadScript())
@@ -1115,9 +1115,9 @@ func reportLivePostCreateSnapshot(f *liveFixture, facts liveDataObserverFacts) {
 				return command(ctx, args...)
 			}
 			postgres = livePostCreateContainer(ctx, expected[0], command, probe, func(ctx context.Context, expected liveDataContainerExpectation, command func(context.Context, ...string) ([]byte, error)) {
-				diagnosticCtx, cancel := livePostgresReadinessContext(ctx)
+				diagnosticCtx, cancel := livePostgresLifecycleContext(ctx)
 				defer cancel()
-				reportLivePostgresReadiness(diagnosticCtx, expected, command)
+				reportLivePostgresLifecycle(diagnosticCtx, expected, command)
 			})
 			redis = livePostCreateContainer(ctx, expected[1], command, probe, nil)
 		}
@@ -1220,15 +1220,18 @@ func livePostCreateReadiness(ctx context.Context, expected liveDataContainerExpe
 
 const livePostgresReadinessMarker = "live postgres readiness:"
 
+const livePostgresLifecycleMarker = "live postgres container:"
+
 var livePostgresPGDataCategories = map[string]bool{"present": true, "absent": true, "failed": true}
 var livePostgresServerCategories = map[string]bool{"accepting": true, "rejecting": true, "no-response": true, "failed": true}
 var livePostgresPSQLCategories = map[string]bool{"ok": true, "failed": true}
 
-func livePostgresReadinessContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, livePostgresReadinessTimeout)
+func livePostgresLifecycleContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, livePostgresLifecycleTimeout)
 }
 
-func reportLivePostgresReadiness(ctx context.Context, expected liveDataContainerExpectation, command func(context.Context, ...string) ([]byte, error)) {
+func reportLivePostgresLifecycle(ctx context.Context, expected liveDataContainerExpectation, command func(context.Context, ...string) ([]byte, error)) {
+	execErr := livePostgresReadinessCommand(ctx, command, livePostgresNeutralArgs(expected)...)
 	pgdata := livePostgresPGDataCategory(livePostgresReadinessCommand(ctx, command, livePostgresPGDataArgs(expected)...))
 	server := livePostgresServerCategory(livePostgresReadinessCommand(ctx, command, livePostgresServerArgs(expected)...))
 	psql := livePostgresPSQLCategory(livePostgresReadinessCommand(ctx, command, liveDataReadinessArgs(expected)...))
@@ -1236,6 +1239,68 @@ func reportLivePostgresReadiness(ctx context.Context, expected liveDataContainer
 	if livePostgresReadinessRecord(record) {
 		_, _ = os.Stderr.WriteString(record)
 	}
+	inspection, inspectErr := command(ctx, livePostgresLifecycleInspectArgs(expected)...)
+	lifecycle := livePostgresLifecycleRecord(execErr, expected, inspection)
+	if inspectErr != nil {
+		lifecycle = livePostgresLifecycleFailedRecord(execErr)
+	}
+	if livePostgresLifecycleRecordValid(lifecycle) {
+		_, _ = os.Stderr.WriteString(lifecycle)
+	}
+}
+
+func livePostgresNeutralArgs(expected liveDataContainerExpectation) []string {
+	return []string{"docker", "exec", expected.name, "true"}
+}
+
+func livePostgresLifecycleInspectArgs(expected liveDataContainerExpectation) []string {
+	return []string{"docker", "container", "inspect", "--format", "{{.Name}}\t{{.Config.Image}}\t{{index .Config.Labels \"sub2api.host\"}}\t{{index .Config.Labels \"sub2api.host.target\"}}\t{{.State.Status}}\t{{.RestartCount}}\t{{.State.OOMKilled}}\t{{if .State.Error}}true{{else}}false{{end}}", expected.name}
+}
+
+func livePostgresLifecycleFailedRecord(execErr error) string {
+	return fmt.Sprintf("%s exec=%s state=failed restarts=unknown oom=unknown error=unknown\n", livePostgresLifecycleMarker, liveDockerCommandCategory(execErr))
+}
+
+func livePostgresLifecycleRecord(execErr error, expected liveDataContainerExpectation, out []byte) string {
+	if len(out) >= 256 || !utf8.Valid(out) || bytes.IndexByte(out, '\r') >= 0 || !strings.HasSuffix(string(out), "\n") {
+		return livePostgresLifecycleFailedRecord(execErr)
+	}
+	fields := strings.Split(strings.TrimSuffix(string(out), "\n"), "\t")
+	if len(fields) != 8 || fields[0] != "/"+expected.name || fields[1] != expected.image || fields[2] != expected.owner || fields[3] != expected.target {
+		return livePostgresLifecycleFailedRecord(execErr)
+	}
+	states := map[string]bool{"running": true, "restarting": true, "exited": true, "created": true, "paused": true, "dead": true, "removing": true}
+	if !states[fields[4]] || !livePostgresRestartCategory(fields[5]) || (fields[6] != "true" && fields[6] != "false") || (fields[7] != "true" && fields[7] != "false") {
+		return livePostgresLifecycleFailedRecord(execErr)
+	}
+	restarts := "nonzero"
+	if fields[5] == "0" {
+		restarts = "zero"
+	}
+	oom, errorPresent := "yes", "present"
+	if fields[6] == "false" {
+		oom = "no"
+	}
+	if fields[7] == "false" {
+		errorPresent = "absent"
+	}
+	return fmt.Sprintf("%s exec=%s state=%s restarts=%s oom=%s error=%s\n", livePostgresLifecycleMarker, liveDockerCommandCategory(execErr), fields[4], restarts, oom, errorPresent)
+}
+
+func livePostgresRestartCategory(value string) bool {
+	if value == "0" {
+		return true
+	}
+	if len(value) == 0 || len(value) > 19 || value[0] == '0' {
+		return false
+	}
+	for _, b := range value {
+		if b < '0' || b > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(value, 10, 64)
+	return err == nil
 }
 
 func livePostgresPGDataArgs(expected liveDataContainerExpectation) []string {
@@ -1551,6 +1616,7 @@ type liveRecordCapture struct {
 	observerSeen  bool
 	snapshotSeen  bool
 	readinessSeen bool
+	lifecycleSeen bool
 	preflightSeen bool
 	invalid       bool
 	acceptRecords bool
@@ -1589,7 +1655,7 @@ func (c *liveRecordCapture) Write(p []byte) (int, error) {
 
 func (c *liveRecordCapture) hasMarker() bool {
 	b := c.rolling[:c.rollLen]
-	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker)) || bytes.Contains(b, []byte(livePostgresReadinessMarker)) || bytes.Contains(b, []byte(liveSSHDockerPreflightMarker))
+	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker)) || bytes.Contains(b, []byte(livePostgresReadinessMarker)) || bytes.Contains(b, []byte(livePostgresLifecycleMarker)) || bytes.Contains(b, []byte(liveSSHDockerPreflightMarker))
 }
 
 func (c *liveRecordCapture) finishLine() {
@@ -1642,6 +1708,14 @@ func (c *liveRecordCapture) finishLine() {
 				c.invalid = true
 			} else {
 				c.readinessSeen = true
+				c.records = append(c.records, record)
+			}
+		}
+		if strings.Contains(record, livePostgresLifecycleMarker) {
+			if !livePostgresLifecycleRecordValid(record) || c.lifecycleSeen {
+				c.invalid = true
+			} else {
+				c.lifecycleSeen = true
 				c.records = append(c.records, record)
 			}
 		}
@@ -1828,6 +1902,22 @@ func livePostgresReadinessRecord(record string) bool {
 	server, serverOK := strings.CutPrefix(fields[4], "server=")
 	psql, psqlOK := strings.CutPrefix(fields[5], "psql=")
 	return pgdataOK && serverOK && psqlOK && livePostgresPGDataCategories[pgdata] && livePostgresServerCategories[server] && livePostgresPSQLCategories[psql] && record == fmt.Sprintf("%s pgdata=%s server=%s psql=%s\n", livePostgresReadinessMarker, pgdata, server, psql)
+}
+
+func livePostgresLifecycleRecordValid(record string) bool {
+	if len(record) >= liveRecordLineLimit {
+		return false
+	}
+	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
+	if len(fields) != 8 || strings.Join(fields[:3], " ") != livePostgresLifecycleMarker {
+		return false
+	}
+	execResult, execOK := strings.CutPrefix(fields[3], "exec=")
+	state, stateOK := strings.CutPrefix(fields[4], "state=")
+	restarts, restartsOK := strings.CutPrefix(fields[5], "restarts=")
+	oom, oomOK := strings.CutPrefix(fields[6], "oom=")
+	errorValue, errorOK := strings.CutPrefix(fields[7], "error=")
+	return execOK && stateOK && restartsOK && oomOK && errorOK && (execResult == "ok" || execResult == "failed") && map[string]bool{"running": true, "restarting": true, "exited": true, "created": true, "paused": true, "dead": true, "removing": true, "failed": true}[state] && map[string]bool{"zero": true, "nonzero": true, "unknown": true}[restarts] && map[string]bool{"yes": true, "no": true, "unknown": true}[oom] && map[string]bool{"present": true, "absent": true, "unknown": true}[errorValue] && record == fmt.Sprintf("%s exec=%s state=%s restarts=%s oom=%s error=%s\n", livePostgresLifecycleMarker, execResult, state, restarts, oom, errorValue)
 }
 
 func (c *liveRecordCapture) failureBytes(stdout []byte) []byte {
@@ -2772,11 +2862,11 @@ func TestLivePostCreateSnapshotClassifiesStateAndContainers(t *testing.T) {
 }
 
 func TestLivePostCreatePostgresDiagnosticsRunBeforeReadinessRetry(t *testing.T) {
-	if livePostCreateReportTimeout != livePostCreateStateTimeout+2*livePostCreateCommandTimeout+livePostgresReadinessTimeout {
+	if livePostCreateReportTimeout != livePostCreateStateTimeout+2*livePostCreateCommandTimeout+livePostgresLifecycleTimeout {
 		t.Fatal("post-create phase budgets do not reserve diagnostics")
 	}
 	parent, cancel := context.WithCancel(context.Background())
-	diagnostic, diagnosticCancel := livePostgresReadinessContext(parent)
+	diagnostic, diagnosticCancel := livePostgresLifecycleContext(parent)
 	defer diagnosticCancel()
 	cancel()
 	select {
@@ -2798,12 +2888,18 @@ func TestLivePostCreatePostgresDiagnosticsRunBeforeReadinessRetry(t *testing.T) 
 		case slices.Equal(args, livePostgresPGDataArgs(expected)):
 			order = append(order, "pgdata")
 			return nil, nil
+		case slices.Equal(args, livePostgresNeutralArgs(expected)):
+			order = append(order, "neutral")
+			return nil, nil
 		case slices.Equal(args, livePostgresServerArgs(expected)):
 			order = append(order, "server")
 			return nil, nil
 		case slices.Equal(args, liveDataReadinessArgs(expected)):
 			order = append(order, "psql")
 			return nil, nil
+		case slices.Equal(args, livePostgresLifecycleInspectArgs(expected)):
+			order = append(order, "lifecycle-inspect")
+			return []byte("/pg\tpostgres:18-alpine\towner\ttarget\trunning\t0\tfalse\tfalse\n"), nil
 		case slices.Equal(args, []string{"docker", "container", "ls", "--all", "--filter", "name=^/redis$", "--format", "{{.Names}}"}):
 			order = append(order, "redis-list")
 			return []byte("redis\n"), nil
@@ -2823,7 +2919,7 @@ func TestLivePostCreatePostgresDiagnosticsRunBeforeReadinessRetry(t *testing.T) 
 		return nil, errors.New("not ready")
 	}
 	got := livePostCreateContainer(context.Background(), expected, command, probe, func(ctx context.Context, expected liveDataContainerExpectation, command func(context.Context, ...string) ([]byte, error)) {
-		reportLivePostgresReadiness(ctx, expected, command)
+		reportLivePostgresLifecycle(ctx, expected, command)
 	})
 	if got != "running-probe-failed" {
 		t.Fatalf("postgres category = %q", got)
@@ -2831,8 +2927,48 @@ func TestLivePostCreatePostgresDiagnosticsRunBeforeReadinessRetry(t *testing.T) 
 	if got := livePostCreateContainer(context.Background(), redis, command, probe, nil); got != "ready" {
 		t.Fatalf("redis category = %q", got)
 	}
-	if strings.Join(order, ",") != "pg-list,pg-inspect,pgdata,server,psql,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,redis-list,redis-inspect,redis-retry" {
+	if strings.Join(order, ",") != "pg-list,pg-inspect,neutral,pgdata,server,psql,lifecycle-inspect,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,redis-list,redis-inspect,redis-retry" {
 		t.Fatalf("category = %q, command order = %q", got, strings.Join(order, ","))
+	}
+}
+
+func TestLivePostgresLifecycleRecordAndInspectionFailClosed(t *testing.T) {
+	expected := liveDataContainerExpectation{name: "pg", image: "postgres:18-alpine", owner: "owner", target: "target", kind: "postgres", port: 5432}
+	inspect := livePostgresLifecycleInspectArgs(expected)
+	wantInspect := []string{"docker", "container", "inspect", "--format", "{{.Name}}\t{{.Config.Image}}\t{{index .Config.Labels \"sub2api.host\"}}\t{{index .Config.Labels \"sub2api.host.target\"}}\t{{.State.Status}}\t{{.RestartCount}}\t{{.State.OOMKilled}}\t{{if .State.Error}}true{{else}}false{{end}}", "pg"}
+	if !slices.Equal(inspect, wantInspect) || !slices.Equal(livePostgresNeutralArgs(expected), []string{"docker", "exec", "pg", "true"}) {
+		t.Fatal("postgres lifecycle argv is not fixed and neutral")
+	}
+	for _, test := range []struct {
+		output, want string
+		execErr      error
+	}{
+		{"/pg\tpostgres:18-alpine\towner\ttarget\trunning\t0\tfalse\tfalse\n", "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n", nil},
+		{"/pg\tpostgres:18-alpine\towner\ttarget\trestarting\t1\ttrue\ttrue\n", "live postgres container: exec=failed state=restarting restarts=nonzero oom=yes error=present\n", errors.New("exec failed")},
+		{"/pg\tpostgres:18-alpine\twrong\ttarget\trunning\t0\tfalse\tfalse\n", "live postgres container: exec=failed state=failed restarts=unknown oom=unknown error=unknown\n", errors.New("exec failed")},
+		{"/pg\tpostgres:18-alpine\towner\ttarget\trunning\t01\tfalse\tfalse\n", "live postgres container: exec=failed state=failed restarts=unknown oom=unknown error=unknown\n", errors.New("exec failed")},
+	} {
+		if got := livePostgresLifecycleRecord(test.execErr, expected, []byte(test.output)); got != test.want {
+			t.Fatalf("record = %q, want %q", got, test.want)
+		}
+	}
+	good := "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n"
+	if !livePostgresLifecycleRecordValid(good) {
+		t.Fatal("valid lifecycle record rejected")
+	}
+	capture := newLiveRecordCapture()
+	_, _ = capture.Write([]byte(good))
+	var captured bytes.Buffer
+	if !capture.forward(&captured) || captured.String() != good {
+		t.Fatalf("lifecycle capture = %q", captured.String())
+	}
+	for _, input := range []string{"prefix " + good, good + good, "live postgres container: exec=ok state=running restarts=zero oom=no error=absent extra=x\n"} {
+		capture := newLiveRecordCapture()
+		_, _ = capture.Write([]byte(input))
+		var out bytes.Buffer
+		if capture.forward(&out) || out.String() != "live observer: observer-error\n" {
+			t.Fatalf("unsafe lifecycle record = %q", out.String())
+		}
 	}
 }
 
