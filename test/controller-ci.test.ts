@@ -427,24 +427,28 @@ describe("Task4 CI contracts", () => {
 
   it("accepts one fixed postgres lifecycle diagnostic and rejects it from candidates", () => {
     const categories = ["ok", "timeout", "exit-1", "exit-126", "exit-127", "exit-other", "failed"];
-    for (const [exec, absolute] of [
-      ...categories.map((exec) => [exec, "ok"]),
-      ...categories.slice(1).map((absolute) => ["ok", absolute]),
+    const absoluteErrors = ["none", "empty", "not-found", "permission", "cgroup", "namespace", "rootfs", "runtime", "daemon", "unknown"];
+    for (const [exec, absolute, absoluteError] of [
+      ...categories.map((exec) => [exec, "ok", "none"]),
+      ...categories.slice(1).map((absolute) => ["ok", absolute, "none"]),
+      ...absoluteErrors.map((absoluteError) => ["ok", "exit-127", absoluteError]),
     ]) {
-      const output = `live postgres container: exec=${exec} absolute=${absolute} state=running restarts=zero oom=no error=absent\n`;
+      const output = `live postgres container: exec=${exec} absolute=${absolute} absolute-error=${absoluteError} state=running restarts=zero oom=no error=absent\n`;
       const records = [...validLiveRecords(), liveOutput(output), livePass];
       expect(parseLiveRecords(records, "diagnostic")).toBe(0);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
     for (const output of [
-      "prefix live postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent extra=field\n",
-      "live postgres container: exec=exit-37 absolute=ok state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=exit-37 state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: absolute=ok exec=ok state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute=ok state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent\nlive postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent\n",
+      "prefix live postgres container: exec=ok absolute=ok absolute-error=none state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none state=running restarts=zero oom=no error=absent extra=field\n",
+      "live postgres container: exec=exit-37 absolute=ok absolute-error=none state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=exit-37 absolute-error=none state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute-error=none state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: absolute=ok exec=ok absolute-error=none state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none absolute-error=none state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=arbitrary state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none state=running restarts=zero oom=no error=absent\nlive postgres container: exec=ok absolute=ok absolute-error=none state=running restarts=zero oom=no error=absent\n",
     ]) {
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
