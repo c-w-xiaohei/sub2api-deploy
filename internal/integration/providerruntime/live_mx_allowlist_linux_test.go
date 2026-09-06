@@ -1081,16 +1081,14 @@ func (f *liveFixture) liveDataReady(ctx context.Context, expected liveDataContai
 
 const livePostCreateSnapshotMarker = "live post-create snapshot:"
 
-const livePostCreateStateDirectory = "/var/lib/sub2api-host"
-
-var livePostCreateStates = map[string]bool{"absent": true, "invalid": true, "unavailable": true, "not-exact": true, "pending-exact": true}
+var livePostCreateStates = map[string]bool{"root-absent": true, "state-absent": true, "invalid": true, "unavailable": true, "not-exact": true, "pending-exact": true}
 var livePostCreateContainers = map[string]bool{"not-inspected": true, "absent": true, "identity-mismatch": true, "exited": true, "not-running": true, "running-probe-failed": true, "running-unready": true, "ready": true, "unavailable": true, "ambiguous": true}
 
 func reportLivePostCreateSnapshot(f *liveFixture, facts liveDataObserverFacts) {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 	state, parsed := livePostCreateState(ctx, func(ctx context.Context) ([]byte, error) {
-		return f.sandboxOutputForObserver(ctx, "data", 3*time.Second, "sh", "-c", livePostCreateStateReadScript(livePostCreateStateDirectory))
+		return f.sandboxOutputForObserver(ctx, "data", 3*time.Second, "sh", "-c", livePostCreateStateReadScript())
 	}, facts)
 	postgres, redis := "not-inspected", "not-inspected"
 	if state == "pending-exact" {
@@ -1112,17 +1110,26 @@ func reportLivePostCreateSnapshot(f *liveFixture, facts liveDataObserverFacts) {
 	_, _ = os.Stderr.WriteString(fmt.Sprintf("%s state=%s postgres=%s redis=%s\n", livePostCreateSnapshotMarker, state, postgres, redis))
 }
 
-func livePostCreateStateReadScript(root string) string {
-	return `root='` + root + `'; result=$(find "$root"/. -mindepth 1 -maxdepth 1 -name state.json -print); status=$?; if test "$status" -ne 0; then exit "$status"; fi; if test -z "$result"; then printf 'absent\n'; elif test "$result" = "$root/./state.json"; then printf 'present\n'; cat "$root/state.json"; else exit 1; fi`
+func livePostCreateStateReadScript() string {
+	return livePostCreateStateReadScriptForPaths("/var/lib", "/var/lib/sub2api-host")
 }
+
+func livePostCreateStateReadScriptForPaths(parent, root string) string {
+	return `parent='` + liveShellQuote(parent) + `'; root='` + liveShellQuote(root) + `'; result=$(find "$parent"/. -mindepth 1 -maxdepth 1 -name sub2api-host -print); status=$?; if test "$status" -ne 0; then exit "$status"; fi; if test -z "$result"; then printf 'root-absent\n'; exit 0; elif test "$result" != "$parent/./sub2api-host" || ! test -d "$root" || test -L "$root"; then exit 1; fi; result=$(find "$root"/. -mindepth 1 -maxdepth 1 -name state.json -print); status=$?; if test "$status" -ne 0; then exit "$status"; fi; if test -z "$result"; then printf 'state-absent\n'; elif test "$result" = "$root/./state.json" && test -f "$root/state.json" && ! test -L "$root/state.json"; then printf 'present\n'; cat "$root/state.json"; else exit 1; fi`
+}
+
+func liveShellQuote(value string) string { return strings.ReplaceAll(value, "'", "'\"'\"'") }
 
 func livePostCreateState(ctx context.Context, read func(context.Context) ([]byte, error), facts liveDataObserverFacts) (string, liveObserverState) {
 	b, err := read(ctx)
 	if err != nil {
 		return "unavailable", liveObserverState{}
 	}
-	if bytes.Equal(b, []byte("absent\n")) {
-		return "absent", liveObserverState{}
+	if bytes.Equal(b, []byte("root-absent\n")) {
+		return "root-absent", liveObserverState{}
+	}
+	if bytes.Equal(b, []byte("state-absent\n")) {
+		return "state-absent", liveObserverState{}
 	}
 	if !bytes.HasPrefix(b, []byte("present\n")) {
 		return "invalid", liveObserverState{}
@@ -2242,7 +2249,9 @@ func TestLivePostCreateSnapshotClassifiesStateAndContainers(t *testing.T) {
 		want string
 	}{
 		{"arbitrary exit 42 is unavailable", exit42, nil, "unavailable"},
-		{"explicit absence", nil, []byte("absent\n"), "absent"},
+		{"root absent", nil, []byte("root-absent\n"), "root-absent"},
+		{"state absent", nil, []byte("state-absent\n"), "state-absent"},
+		{"old absence framing is invalid", nil, []byte("absent\n"), "invalid"},
 		{"malformed framing", nil, []byte("present\n{"), "invalid"},
 		{"invalid", nil, []byte("{"), "invalid"},
 		{"unavailable", errors.New("namespace unavailable"), nil, "unavailable"},
@@ -2323,46 +2332,88 @@ func TestLivePostCreateSnapshotClassifiesStateAndContainers(t *testing.T) {
 }
 
 func TestLivePostCreateStateReaderUsesBoundedFindFraming(t *testing.T) {
-	root := t.TempDir()
-	script := livePostCreateStateReadScript(root)
-	if !strings.Contains(script, `find "$root"/. -mindepth 1 -maxdepth 1 -name state.json -print`) || !strings.Contains(script, "status=$?") || strings.Contains(script, "test ! -e") {
+	parent := filepath.Join(t.TempDir(), "parent's-path")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "sub2api-host")
+	script := livePostCreateStateReadScriptForPaths(parent, root)
+	if !strings.Contains(script, `find "$parent"/. -mindepth 1 -maxdepth 1 -name sub2api-host -print`) || !strings.Contains(script, `find "$root"/. -mindepth 1 -maxdepth 1 -name state.json -print`) || !strings.Contains(script, "status=$?") || strings.Contains(script, "test ! -e") {
 		t.Fatalf("invalid state reader script: %q", script)
 	}
-	run := func(root string) ([]byte, error) {
-		return exec.Command("sh", "-c", livePostCreateStateReadScript(root)).Output()
+	fixed := livePostCreateStateReadScript()
+	if fixed != livePostCreateStateReadScriptForPaths("/var/lib", "/var/lib/sub2api-host") {
+		t.Fatalf("production state reader is not fixed: %q", fixed)
 	}
-	assertRead := func(root, want string, wantError bool) {
-		out, err := run(root)
+	run := func(parent, root string) ([]byte, error) {
+		return exec.Command("sh", "-c", livePostCreateStateReadScriptForPaths(parent, root)).Output()
+	}
+	facts := liveTestDataObserverFacts(hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}, "revision")
+	assertRead := func(parent, root, want string, wantError bool) {
+		out, err := run(parent, root)
 		if (err != nil) != wantError || string(out) != want {
 			t.Fatalf("state read = %q, %v; want %q, error %t", out, err, want, wantError)
 		}
+		if wantError {
+			if state, _ := livePostCreateState(context.Background(), func(context.Context) ([]byte, error) { return out, err }, facts); state != "unavailable" {
+				t.Fatalf("unsafe state read classified %q, want unavailable", state)
+			}
+		}
 	}
-	assertRead(root, "absent\n", false)
+	assertRead(parent, root, "root-absent\n", false)
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(parent, root, "state-absent\n", false)
 	statePath := filepath.Join(root, "state.json")
 	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	assertRead(root, "present\nstate", false)
+	assertRead(parent, root, "present\nstate", false)
 	if err := os.Remove(statePath); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(statePath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	assertRead(root, "present\n", true)
+	assertRead(parent, root, "", true)
 	if err := os.Remove(statePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(root, statePath); err != nil {
+	readableRoot := filepath.Join(parent, "readable-root")
+	if err := os.Mkdir(readableRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	assertRead(root, "present\n", true)
-	notDirectory := filepath.Join(root, "not-directory")
+	if err := os.WriteFile(filepath.Join(readableRoot, "state.json"), []byte("linked-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(readableRoot, statePath); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(parent, root, "", true)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(readableRoot, root); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(parent, root, "", true)
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(parent, root, "", true)
+	notDirectory := filepath.Join(parent, "not-directory")
 	if err := os.WriteFile(notDirectory, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	assertRead(notDirectory, "", true)
-	assertRead(filepath.Join(root, "missing-root"), "", true)
+	assertRead(notDirectory, root, "", true)
+	assertRead(filepath.Join(parent, "missing-parent"), root, "", true)
 }
 
 func TestLivePostCreateSnapshotReadinessRetriesAndCaptureIsStrict(t *testing.T) {
@@ -2391,6 +2442,18 @@ func TestLivePostCreateSnapshotReadinessRetriesAndCaptureIsStrict(t *testing.T) 
 	var out bytes.Buffer
 	if !capture.forward(&out) || out.String() != "live post-create snapshot: state=pending-exact postgres=ready redis=running-unready\n" {
 		t.Fatalf("snapshot capture = %q", out.String())
+	}
+	absentSnapshots := [][]byte{
+		[]byte("live post-create snapshot: state=root-absent postgres=not-inspected redis=not-inspected\n"),
+		[]byte("live post-create snapshot: state=state-absent postgres=not-inspected redis=not-inspected\n"),
+	}
+	for _, snapshot := range absentSnapshots {
+		capture := newLiveRecordCapture()
+		_, _ = capture.Write(snapshot)
+		var out bytes.Buffer
+		if !capture.forward(&out) || out.String() != string(snapshot) {
+			t.Fatalf("absence snapshot = %q", out.String())
+		}
 	}
 	absentSnapshot := []byte("live post-create snapshot: state=absent postgres=not-inspected redis=not-inspected\n")
 	for _, input := range [][]byte{

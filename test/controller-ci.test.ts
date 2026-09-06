@@ -294,6 +294,13 @@ describe("Task4 CI contracts", () => {
       expect(parseLiveRecords(records, "diagnostic")).toBe(1);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
+    for (const records of [
+      [],
+      [liveOutput("live milestone: postgres-owned-container\n"), liveOutput("live post-create snapshot: state=root-absent postgres=not-inspected redis=not-inspected\n")],
+    ]) {
+      expect(parseLiveRecords(records, "diagnostic")).toBe(1);
+      expect(parseLiveRecords(records, "candidate")).toBe(1);
+    }
   });
 
   it("keeps fixed observer diagnostics while rejecting them from a candidate pass", () => {
@@ -307,9 +314,11 @@ describe("Task4 CI contracts", () => {
   it("accepts one validated post-create snapshot only in diagnostics", () => {
     for (const [output, diagnosticStatus] of [
       ["live post-create snapshot: state=pending-exact postgres=ready redis=running-unready\n", 0],
-      ["live post-create snapshot: state=absent postgres=not-inspected redis=not-inspected\n", 0],
-      ["live post-create snapshot: state=absent postgres=ready redis=not-inspected\n", 1],
-      ["prefix live post-create snapshot: state=absent postgres=not-inspected redis=not-inspected\n", 1],
+      ["live post-create snapshot: state=root-absent postgres=not-inspected redis=not-inspected\n", 0],
+      ["live post-create snapshot: state=state-absent postgres=not-inspected redis=not-inspected\n", 0],
+      ["live post-create snapshot: state=root-absent postgres=ready redis=not-inspected\n", 1],
+      ["prefix live post-create snapshot: state=root-absent postgres=not-inspected redis=not-inspected\n", 1],
+      ["live post-create snapshot: state=absent postgres=not-inspected redis=not-inspected\n", 1],
       ["live post-create snapshot: state=unknown postgres=not-inspected redis=not-inspected\n", 1],
     ] as const) {
       const records = [...validLiveRecords(), liveOutput(output), livePass];

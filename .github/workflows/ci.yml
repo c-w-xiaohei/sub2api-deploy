@@ -350,7 +350,7 @@ jobs:
             'complete',
           ]);
           const milestones = ['postgres-owned-container','postgres-ready','redis-owned-container','redis-ready'];
-          const snapshotStates = new Set(['absent','invalid','unavailable','not-exact','pending-exact']);
+          const snapshotStates = new Set(['root-absent','state-absent','invalid','unavailable','not-exact','pending-exact']);
           const snapshotContainers = new Set(['not-inspected','absent','identity-mismatch','exited','not-running','running-probe-failed','running-unready','ready','unavailable','ambiguous']);
           let terminal;
           let stage;
@@ -396,6 +396,7 @@ jobs:
           }
 
           if (terminal === 'pass' && (nextMilestone !== milestones.length || milestone !== milestones.at(-1))) throw Error('live observer evidence incomplete');
+          if (!terminal) throw Error('live terminal action absent');
           console.log(`${test}: ${terminal ?? 'absent'}`);
           console.log(`${test} stage: ${stage ?? 'none'}`);
           console.log(`${test} milestone: ${milestone ?? 'none'}`);
