@@ -402,9 +402,9 @@ jobs:
               postgresReadiness = { pgdata: match[1], server: match[2], psql: match[3] };
             }
             if (event.Output.includes('live postgres container:')) {
-              const match = event.Output.match(/^live postgres container: exec=(ok|timeout|exit-1|exit-126|exit-127|exit-other|failed) state=(running|restarting|exited|created|paused|dead|removing|failed) restarts=(zero|nonzero|unknown) oom=(yes|no|unknown) error=(present|absent|unknown)\n$/);
+              const match = event.Output.match(/^live postgres container: exec=(ok|timeout|exit-1|exit-126|exit-127|exit-other|failed) absolute=(ok|timeout|exit-1|exit-126|exit-127|exit-other|failed) state=(running|restarting|exited|created|paused|dead|removing|failed) restarts=(zero|nonzero|unknown) oom=(yes|no|unknown) error=(present|absent|unknown)\n$/);
               if (!match || postgresLifecycle) throw Error('invalid live postgres lifecycle');
-              postgresLifecycle = { exec: match[1], state: match[2], restarts: match[3], oom: match[4], error: match[5] };
+              postgresLifecycle = { exec: match[1], absolute: match[2], state: match[3], restarts: match[4], oom: match[5], error: match[6] };
             }
             if (event.Output.includes('live ssh docker preflight:')) {
                 const match = event.Output.match(/^live ssh docker preflight: socket=(present|missing|not-socket) container=(ok|failed) network=(ok|failed) container-discovery=(empty|unowned|owned|malformed|failed) network-discovery=(empty|unowned|owned|malformed|failed) docker-host=(set|unset) docker-context=(set|unset) docker-config=(set|unset)\n$/);
@@ -421,7 +421,7 @@ jobs:
           console.log(`${test} observer: ${observer}`);
           if (snapshot) console.log(`${test} post-create snapshot: state=${snapshot.state} postgres=${snapshot.postgres} redis=${snapshot.redis}`);
           if (postgresReadiness) console.log(`${test} postgres readiness: pgdata=${postgresReadiness.pgdata} server=${postgresReadiness.server} psql=${postgresReadiness.psql}`);
-          if (postgresLifecycle) console.log(`${test} postgres lifecycle: exec=${postgresLifecycle.exec} state=${postgresLifecycle.state} restarts=${postgresLifecycle.restarts} oom=${postgresLifecycle.oom} error=${postgresLifecycle.error}`);
+          if (postgresLifecycle) console.log(`${test} postgres lifecycle: exec=${postgresLifecycle.exec} absolute=${postgresLifecycle.absolute} state=${postgresLifecycle.state} restarts=${postgresLifecycle.restarts} oom=${postgresLifecycle.oom} error=${postgresLifecycle.error}`);
           if (preflight) console.log(`${test} ssh docker preflight: socket=${preflight.socket} container=${preflight.container} network=${preflight.network} container-discovery=${preflight.containerDiscovery} network-discovery=${preflight.networkDiscovery} docker-host=${preflight.dockerHost} docker-context=${preflight.dockerContext} docker-config=${preflight.dockerConfig}`);
           NODE
           sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<'NODE'

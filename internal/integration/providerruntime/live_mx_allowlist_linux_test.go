@@ -1086,10 +1086,10 @@ func (f *liveFixture) liveDataReady(ctx context.Context, expected liveDataContai
 const livePostCreateSnapshotMarker = "live post-create snapshot:"
 
 const (
-	livePostCreateReportTimeout  = 11 * time.Second
+	livePostCreateReportTimeout  = 12 * time.Second
 	livePostCreateStateTimeout   = 3 * time.Second
 	livePostCreateCommandTimeout = time.Second
-	livePostgresLifecycleTimeout = 6 * time.Second
+	livePostgresLifecycleTimeout = 7 * time.Second
 )
 
 var livePostCreateStates = map[string]bool{"root-absent": true, "state-absent": true, "invalid": true, "unavailable": true, "not-exact": true, "pending-exact": true}
@@ -1232,6 +1232,7 @@ func livePostgresLifecycleContext(parent context.Context) (context.Context, cont
 
 func reportLivePostgresLifecycle(ctx context.Context, expected liveDataContainerExpectation, command func(context.Context, ...string) ([]byte, error)) {
 	execErr := livePostgresReadinessCommand(ctx, command, livePostgresNeutralArgs(expected)...)
+	absoluteErr := livePostgresReadinessCommand(ctx, command, livePostgresAbsoluteArgs(expected)...)
 	pgdata := livePostgresPGDataCategory(livePostgresReadinessCommand(ctx, command, livePostgresPGDataArgs(expected)...))
 	server := livePostgresServerCategory(livePostgresReadinessCommand(ctx, command, livePostgresServerArgs(expected)...))
 	psql := livePostgresPSQLCategory(livePostgresReadinessCommand(ctx, command, liveDataReadinessArgs(expected)...))
@@ -1240,9 +1241,9 @@ func reportLivePostgresLifecycle(ctx context.Context, expected liveDataContainer
 		_, _ = os.Stderr.WriteString(record)
 	}
 	inspection, inspectErr := command(ctx, livePostgresLifecycleInspectArgs(expected)...)
-	lifecycle := livePostgresLifecycleRecord(execErr, expected, inspection)
+	lifecycle := livePostgresLifecycleRecord(execErr, absoluteErr, expected, inspection)
 	if inspectErr != nil {
-		lifecycle = livePostgresLifecycleFailedRecord(execErr)
+		lifecycle = livePostgresLifecycleFailedRecord(execErr, absoluteErr)
 	}
 	if livePostgresLifecycleRecordValid(lifecycle) {
 		_, _ = os.Stderr.WriteString(lifecycle)
@@ -1253,25 +1254,29 @@ func livePostgresNeutralArgs(expected liveDataContainerExpectation) []string {
 	return []string{"docker", "exec", expected.name, "true"}
 }
 
+func livePostgresAbsoluteArgs(expected liveDataContainerExpectation) []string {
+	return []string{"docker", "exec", expected.name, "/bin/busybox", "true"}
+}
+
 func livePostgresLifecycleInspectArgs(expected liveDataContainerExpectation) []string {
 	return []string{"docker", "container", "inspect", "--format", "{{.Name}}\t{{.Config.Image}}\t{{index .Config.Labels \"sub2api.host\"}}\t{{index .Config.Labels \"sub2api.host.target\"}}\t{{.State.Status}}\t{{.RestartCount}}\t{{.State.OOMKilled}}\t{{if .State.Error}}true{{else}}false{{end}}", expected.name}
 }
 
-func livePostgresLifecycleFailedRecord(execErr error) string {
-	return fmt.Sprintf("%s exec=%s state=failed restarts=unknown oom=unknown error=unknown\n", livePostgresLifecycleMarker, livePostgresLifecycleExecCategory(execErr))
+func livePostgresLifecycleFailedRecord(execErr, absoluteErr error) string {
+	return fmt.Sprintf("%s exec=%s absolute=%s state=failed restarts=unknown oom=unknown error=unknown\n", livePostgresLifecycleMarker, livePostgresLifecycleExecCategory(execErr), livePostgresLifecycleExecCategory(absoluteErr))
 }
 
-func livePostgresLifecycleRecord(execErr error, expected liveDataContainerExpectation, out []byte) string {
+func livePostgresLifecycleRecord(execErr, absoluteErr error, expected liveDataContainerExpectation, out []byte) string {
 	if len(out) >= 256 || !utf8.Valid(out) || bytes.IndexByte(out, '\r') >= 0 || !strings.HasSuffix(string(out), "\n") {
-		return livePostgresLifecycleFailedRecord(execErr)
+		return livePostgresLifecycleFailedRecord(execErr, absoluteErr)
 	}
 	fields := strings.Split(strings.TrimSuffix(string(out), "\n"), "\t")
 	if len(fields) != 8 || fields[0] != "/"+expected.name || fields[1] != expected.image || fields[2] != expected.owner || fields[3] != expected.target {
-		return livePostgresLifecycleFailedRecord(execErr)
+		return livePostgresLifecycleFailedRecord(execErr, absoluteErr)
 	}
 	states := map[string]bool{"running": true, "restarting": true, "exited": true, "created": true, "paused": true, "dead": true, "removing": true}
 	if !states[fields[4]] || !livePostgresRestartCategory(fields[5]) || (fields[6] != "true" && fields[6] != "false") || (fields[7] != "true" && fields[7] != "false") {
-		return livePostgresLifecycleFailedRecord(execErr)
+		return livePostgresLifecycleFailedRecord(execErr, absoluteErr)
 	}
 	restarts := "nonzero"
 	if fields[5] == "0" {
@@ -1284,7 +1289,7 @@ func livePostgresLifecycleRecord(execErr error, expected liveDataContainerExpect
 	if fields[7] == "false" {
 		errorPresent = "absent"
 	}
-	return fmt.Sprintf("%s exec=%s state=%s restarts=%s oom=%s error=%s\n", livePostgresLifecycleMarker, livePostgresLifecycleExecCategory(execErr), fields[4], restarts, oom, errorPresent)
+	return fmt.Sprintf("%s exec=%s absolute=%s state=%s restarts=%s oom=%s error=%s\n", livePostgresLifecycleMarker, livePostgresLifecycleExecCategory(execErr), livePostgresLifecycleExecCategory(absoluteErr), fields[4], restarts, oom, errorPresent)
 }
 
 func livePostgresLifecycleExecCategory(err error) string {
@@ -1932,15 +1937,17 @@ func livePostgresLifecycleRecordValid(record string) bool {
 		return false
 	}
 	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
-	if len(fields) != 8 || strings.Join(fields[:3], " ") != livePostgresLifecycleMarker {
+	if len(fields) != 9 || strings.Join(fields[:3], " ") != livePostgresLifecycleMarker {
 		return false
 	}
 	execResult, execOK := strings.CutPrefix(fields[3], "exec=")
-	state, stateOK := strings.CutPrefix(fields[4], "state=")
-	restarts, restartsOK := strings.CutPrefix(fields[5], "restarts=")
-	oom, oomOK := strings.CutPrefix(fields[6], "oom=")
-	errorValue, errorOK := strings.CutPrefix(fields[7], "error=")
-	return execOK && stateOK && restartsOK && oomOK && errorOK && map[string]bool{"ok": true, "timeout": true, "exit-1": true, "exit-126": true, "exit-127": true, "exit-other": true, "failed": true}[execResult] && map[string]bool{"running": true, "restarting": true, "exited": true, "created": true, "paused": true, "dead": true, "removing": true, "failed": true}[state] && map[string]bool{"zero": true, "nonzero": true, "unknown": true}[restarts] && map[string]bool{"yes": true, "no": true, "unknown": true}[oom] && map[string]bool{"present": true, "absent": true, "unknown": true}[errorValue] && record == fmt.Sprintf("%s exec=%s state=%s restarts=%s oom=%s error=%s\n", livePostgresLifecycleMarker, execResult, state, restarts, oom, errorValue)
+	absoluteResult, absoluteOK := strings.CutPrefix(fields[4], "absolute=")
+	state, stateOK := strings.CutPrefix(fields[5], "state=")
+	restarts, restartsOK := strings.CutPrefix(fields[6], "restarts=")
+	oom, oomOK := strings.CutPrefix(fields[7], "oom=")
+	errorValue, errorOK := strings.CutPrefix(fields[8], "error=")
+	categories := map[string]bool{"ok": true, "timeout": true, "exit-1": true, "exit-126": true, "exit-127": true, "exit-other": true, "failed": true}
+	return execOK && absoluteOK && stateOK && restartsOK && oomOK && errorOK && categories[execResult] && categories[absoluteResult] && map[string]bool{"running": true, "restarting": true, "exited": true, "created": true, "paused": true, "dead": true, "removing": true, "failed": true}[state] && map[string]bool{"zero": true, "nonzero": true, "unknown": true}[restarts] && map[string]bool{"yes": true, "no": true, "unknown": true}[oom] && map[string]bool{"present": true, "absent": true, "unknown": true}[errorValue] && record == fmt.Sprintf("%s exec=%s absolute=%s state=%s restarts=%s oom=%s error=%s\n", livePostgresLifecycleMarker, execResult, absoluteResult, state, restarts, oom, errorValue)
 }
 
 func (c *liveRecordCapture) failureBytes(stdout []byte) []byte {
@@ -2908,11 +2915,14 @@ func TestLivePostCreatePostgresDiagnosticsRunBeforeReadinessRetry(t *testing.T) 
 		case slices.Equal(args, []string{"docker", "container", "inspect", "--format", "{{.Name}}\t{{.Config.Image}}\t{{index .Config.Labels \"sub2api.host\"}}\t{{index .Config.Labels \"sub2api.host.target\"}}\t{{.State.Status}}", "pg"}):
 			order = append(order, "pg-inspect")
 			return []byte("/pg\tpostgres:18-alpine\towner\ttarget\trunning\n"), nil
-		case slices.Equal(args, livePostgresPGDataArgs(expected)):
-			order = append(order, "pgdata")
-			return nil, nil
 		case slices.Equal(args, livePostgresNeutralArgs(expected)):
 			order = append(order, "neutral")
+			return nil, nil
+		case slices.Equal(args, livePostgresAbsoluteArgs(expected)):
+			order = append(order, "absolute")
+			return nil, nil
+		case slices.Equal(args, livePostgresPGDataArgs(expected)):
+			order = append(order, "pgdata")
 			return nil, nil
 		case slices.Equal(args, livePostgresServerArgs(expected)):
 			order = append(order, "server")
@@ -2950,7 +2960,7 @@ func TestLivePostCreatePostgresDiagnosticsRunBeforeReadinessRetry(t *testing.T) 
 	if got := livePostCreateContainer(context.Background(), redis, command, probe, nil); got != "ready" {
 		t.Fatalf("redis category = %q", got)
 	}
-	if strings.Join(order, ",") != "pg-list,pg-inspect,neutral,pgdata,server,psql,lifecycle-inspect,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,redis-list,redis-inspect,redis-retry" {
+	if strings.Join(order, ",") != "pg-list,pg-inspect,neutral,absolute,pgdata,server,psql,lifecycle-inspect,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,pg-retry,redis-list,redis-inspect,redis-retry" {
 		t.Fatalf("category = %q, command order = %q", got, strings.Join(order, ","))
 	}
 }
@@ -2959,24 +2969,24 @@ func TestLivePostgresLifecycleRecordAndInspectionFailClosed(t *testing.T) {
 	expected := liveDataContainerExpectation{name: "pg", image: "postgres:18-alpine", owner: "owner", target: "target", kind: "postgres", port: 5432}
 	inspect := livePostgresLifecycleInspectArgs(expected)
 	wantInspect := []string{"docker", "container", "inspect", "--format", "{{.Name}}\t{{.Config.Image}}\t{{index .Config.Labels \"sub2api.host\"}}\t{{index .Config.Labels \"sub2api.host.target\"}}\t{{.State.Status}}\t{{.RestartCount}}\t{{.State.OOMKilled}}\t{{if .State.Error}}true{{else}}false{{end}}", "pg"}
-	if !slices.Equal(inspect, wantInspect) || !slices.Equal(livePostgresNeutralArgs(expected), []string{"docker", "exec", "pg", "true"}) {
+	if !slices.Equal(inspect, wantInspect) || !slices.Equal(livePostgresNeutralArgs(expected), []string{"docker", "exec", "pg", "true"}) || !slices.Equal(livePostgresAbsoluteArgs(expected), []string{"docker", "exec", "pg", "/bin/busybox", "true"}) {
 		t.Fatal("postgres lifecycle argv is not fixed and neutral")
 	}
 	for _, test := range []struct {
-		output, want string
-		execErr      error
+		output, want         string
+		execErr, absoluteErr error
 	}{
-		{"/pg\tpostgres:18-alpine\towner\ttarget\trunning\t0\tfalse\tfalse\n", "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n", nil},
-		{"/pg\tpostgres:18-alpine\towner\ttarget\trestarting\t1\ttrue\ttrue\n", "live postgres container: exec=exit-1 state=restarting restarts=nonzero oom=yes error=present\n", livePostgresExitError(t, 1)},
-		{"/pg\tpostgres:18-alpine\twrong\ttarget\trunning\t0\tfalse\tfalse\n", "live postgres container: exec=failed state=failed restarts=unknown oom=unknown error=unknown\n", errors.New("exec failed")},
-		{"/pg\tpostgres:18-alpine\towner\ttarget\trunning\t01\tfalse\tfalse\n", "live postgres container: exec=failed state=failed restarts=unknown oom=unknown error=unknown\n", errors.New("exec failed")},
+		{"/pg\tpostgres:18-alpine\towner\ttarget\trunning\t0\tfalse\tfalse\n", "live postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent\n", nil, nil},
+		{"/pg\tpostgres:18-alpine\towner\ttarget\trestarting\t1\ttrue\ttrue\n", "live postgres container: exec=exit-1 absolute=exit-127 state=restarting restarts=nonzero oom=yes error=present\n", livePostgresExitError(t, 1), livePostgresExitError(t, 127)},
+		{"/pg\tpostgres:18-alpine\twrong\ttarget\trunning\t0\tfalse\tfalse\n", "live postgres container: exec=failed absolute=timeout state=failed restarts=unknown oom=unknown error=unknown\n", errors.New("exec failed"), context.DeadlineExceeded},
+		{"/pg\tpostgres:18-alpine\towner\ttarget\trunning\t01\tfalse\tfalse\n", "live postgres container: exec=failed absolute=failed state=failed restarts=unknown oom=unknown error=unknown\n", errors.New("exec failed"), errors.New("absolute failed")},
 	} {
-		if got := livePostgresLifecycleRecord(test.execErr, expected, []byte(test.output)); got != test.want {
+		if got := livePostgresLifecycleRecord(test.execErr, test.absoluteErr, expected, []byte(test.output)); got != test.want {
 			t.Fatalf("record = %q, want %q", got, test.want)
 		}
 	}
 	for _, category := range []string{"ok", "timeout", "exit-1", "exit-126", "exit-127", "exit-other", "failed"} {
-		good := fmt.Sprintf("live postgres container: exec=%s state=running restarts=zero oom=no error=absent\n", category)
+		good := fmt.Sprintf("live postgres container: exec=%s absolute=%s state=running restarts=zero oom=no error=absent\n", category, category)
 		if !livePostgresLifecycleRecordValid(good) {
 			t.Fatalf("valid lifecycle record rejected: %q", category)
 		}
@@ -2987,8 +2997,8 @@ func TestLivePostgresLifecycleRecordAndInspectionFailClosed(t *testing.T) {
 			t.Fatalf("lifecycle capture = %q", captured.String())
 		}
 	}
-	good := "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n"
-	for _, input := range []string{"prefix " + good, good + good, "live postgres container: exec=exit-37 state=running restarts=zero oom=no error=absent\n", "live postgres container: exec=ok state=running restarts=zero oom=no error=absent extra=x\n"} {
+	good := "live postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent\n"
+	for _, input := range []string{"prefix " + good, good + good, "live postgres container: exec=exit-37 absolute=ok state=running restarts=zero oom=no error=absent\n", "live postgres container: exec=ok absolute=exit-37 state=running restarts=zero oom=no error=absent\n", "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n", "live postgres container: absolute=ok exec=ok state=running restarts=zero oom=no error=absent\n", "live postgres container: exec=ok absolute=ok absolute=ok state=running restarts=zero oom=no error=absent\n", "live postgres container: exec=ok absolute=ok state=running restarts=zero oom=no error=absent extra=x\n"} {
 		capture := newLiveRecordCapture()
 		_, _ = capture.Write([]byte(input))
 		var out bytes.Buffer
