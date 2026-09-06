@@ -1581,8 +1581,8 @@ if test "${DOCKER_CONFIG+x}" = x; then docker_config=set; else docker_config=uns
 printf 'socket=%s docker-host=%s docker-context=%s docker-config=%s\n' "$socket" "$docker_host" "$docker_context" "$docker_config"`
 
 var liveBootstrapDiscoveryCommands = [...]string{
-	`docker container ls --all --filter label=sub2api.host --format '{{.Names}}\t{{index .Labels "sub2api.host"}}'`,
-	`docker network ls --filter label=sub2api.host --format '{{.Name}}\t{{index .Labels "sub2api.host"}}'`,
+	`docker container ls --all --filter label=sub2api.host --format '{{.Names}}\t{{.Label "sub2api.host"}}'`,
+	`docker network ls --filter label=sub2api.host --format '{{.Name}}\t{{.Label "sub2api.host"}}'`,
 }
 
 func liveSSHDockerPreflightArgs(alias string) []string {
@@ -2126,7 +2126,7 @@ func TestLiveSSHDockerPreflightUsesFixedSSHTransportAndRedactsOutput(t *testing.
 			t.Fatalf("production SSH transport changed; missing %q", want)
 		}
 	}
-	if !strings.Contains(liveSSHDockerPreflightScript, `test -S /var/run/docker.sock`) || liveBootstrapDiscoveryCommands[0] != `docker container ls --all --filter label=sub2api.host --format '{{.Names}}\t{{index .Labels "sub2api.host"}}'` || liveBootstrapDiscoveryCommands[1] != `docker network ls --filter label=sub2api.host --format '{{.Name}}\t{{index .Labels "sub2api.host"}}'` {
+	if !strings.Contains(liveSSHDockerPreflightScript, `test -S /var/run/docker.sock`) || liveBootstrapDiscoveryCommands[0] != `docker container ls --all --filter label=sub2api.host --format '{{.Names}}\t{{.Label "sub2api.host"}}'` || liveBootstrapDiscoveryCommands[1] != `docker network ls --filter label=sub2api.host --format '{{.Name}}\t{{.Label "sub2api.host"}}'` {
 		t.Fatal("preflight does not use exact fixed Docker bootstrap discovery")
 	}
 	if strings.Contains(liveSSHDockerPreflightScript, "-H") || strings.Contains(liveSSHDockerPreflightScript, `"$DOCKER_`) {

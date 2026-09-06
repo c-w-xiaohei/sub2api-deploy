@@ -882,7 +882,7 @@ func (r *Runtime) ownedPresent(ctx context.Context, inv inventory, o managedObje
 	return r.ownedPresentEither(ctx, inv, o, managedObject{}, false)
 }
 func (r *Runtime) ownedPresentEither(ctx context.Context, inv inventory, o, alternate managedObject, allowAlternate bool) (bool, error) {
-	out, e := r.runner.Run(ctx, []string{"container", "ls", "--all", "--filter", "name=^/" + o.Name + "$", "--format", "{{.Names}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.target\"}}"}, nil)
+	out, e := r.runner.Run(ctx, []string{"container", "ls", "--all", "--filter", "name=^/" + o.Name + "$", "--format", "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}"}, nil)
 	if e != nil {
 		return false, recovery()
 	}
@@ -3134,7 +3134,7 @@ func (r *Runtime) ensureNetwork(ctx context.Context, s State) error {
 	return nil
 }
 func networkListArgs(s State) []string {
-	return []string{"network", "ls", "--filter", "name=^" + networkName(s) + "$", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.network\"}}"}
+	return []string{"network", "ls", "--filter", "name=^" + networkName(s) + "$", "--format", "{{.Name}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.network\"}}"}
 }
 func validHostname(v string) bool {
 	if len(v) == 0 || len(v) > 253 || !utf8.ValidString(v) || strings.HasSuffix(v, ".") {

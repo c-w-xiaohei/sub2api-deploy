@@ -915,7 +915,7 @@ func runDockerReadHelper(argv []string) error {
 		return errors.New("invalid docker model")
 	}
 	args := argv[separator+1:]
-	network := []string{"network", "ls", "--filter", "name=^" + model.NetworkName + "$", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.network\"}}"}
+	network := []string{"network", "ls", "--filter", "name=^" + model.NetworkName + "$", "--format", "{{.Name}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.network\"}}"}
 	if reflect.DeepEqual(args, network) {
 		_, err = fmt.Fprintf(os.Stdout, "%s\t%s\t%s\n", model.NetworkName, model.NetworkOwner, model.NetworkLabel)
 		if err == nil {
@@ -923,7 +923,7 @@ func runDockerReadHelper(argv []string) error {
 		}
 		return err
 	}
-	if len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.target\"}}" {
+	if len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}" {
 		name := strings.TrimSuffix(strings.TrimPrefix(args[4], "name=^/"), "$")
 		container, ok := model.Containers[name]
 		if !ok {

@@ -320,8 +320,8 @@ func (r *Runtime) Bootstrap(ctx context.Context, q hostprotocol.Request) (hostpr
 
 func (r *Runtime) bootstrapDiscovery(ctx context.Context) error {
 	for _, argv := range [][]string{
-		{"container", "ls", "--all", "--filter", "label=sub2api.host", "--format", "{{.Names}}\t{{index .Labels \"sub2api.host\"}}"},
-		{"network", "ls", "--filter", "label=sub2api.host", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}"},
+		{"container", "ls", "--all", "--filter", "label=sub2api.host", "--format", "{{.Names}}\t{{.Label \"sub2api.host\"}}"},
+		{"network", "ls", "--filter", "label=sub2api.host", "--format", "{{.Name}}\t{{.Label \"sub2api.host\"}}"},
 	} {
 		out, err := r.runner.Run(ctx, argv, nil)
 		if err != nil {

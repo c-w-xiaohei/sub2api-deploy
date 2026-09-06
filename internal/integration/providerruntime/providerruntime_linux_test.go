@@ -882,16 +882,16 @@ func dockerFixture(argv []string) error {
 
 func (s *dockerTrace) apply(root string, args []string) error {
 	listNetwork := func() (string, bool) {
-		return "{{.Name}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.network\"}}", len(args) == 6 && args[0] == "network" && args[1] == "ls" && args[2] == "--filter" && strings.HasPrefix(args[3], "name=^s2h-net-") && strings.HasSuffix(args[3], "$") && args[4] == "--format" && args[5] == "{{.Name}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.network\"}}"
+		return "{{.Name}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.network\"}}", len(args) == 6 && args[0] == "network" && args[1] == "ls" && args[2] == "--filter" && strings.HasPrefix(args[3], "name=^s2h-net-") && strings.HasSuffix(args[3], "$") && args[4] == "--format" && args[5] == "{{.Name}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.network\"}}"
 	}
 	listContainer := func() (string, bool) {
-		return "{{.Names}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.target\"}}", len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/s2h-") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{index .Labels \"sub2api.host\"}}\t{{index .Labels \"sub2api.host.target\"}}"
+		return "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}", len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/s2h-") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}"
 	}
-	if len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && args[4] == "label=sub2api.host" && args[5] == "--format" && args[6] == "{{.Names}}\t{{index .Labels \"sub2api.host\"}}" {
+	if len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && args[4] == "label=sub2api.host" && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host\"}}" {
 		s.Reads = append(s.Reads, "bootstrap-container-list")
 		return nil
 	}
-	if len(args) == 6 && args[0] == "network" && args[1] == "ls" && args[2] == "--filter" && args[3] == "label=sub2api.host" && args[4] == "--format" && args[5] == "{{.Name}}\t{{index .Labels \"sub2api.host\"}}" {
+	if len(args) == 6 && args[0] == "network" && args[1] == "ls" && args[2] == "--filter" && args[3] == "label=sub2api.host" && args[4] == "--format" && args[5] == "{{.Name}}\t{{.Label \"sub2api.host\"}}" {
 		s.Reads = append(s.Reads, "bootstrap-network-list")
 		return nil
 	}

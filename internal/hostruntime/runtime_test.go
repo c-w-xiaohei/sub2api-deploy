@@ -286,6 +286,27 @@ func TestBootstrapDiscoveryErrorLeavesAbsentRootUntouched(t *testing.T) {
 	}
 }
 
+func TestBootstrapDiscoveryUsesDockerLabelFormatter(t *testing.T) {
+	rt := testRuntime(t)
+	var calls [][]string
+	rt.runner = readinessRunner(func(_ context.Context, argv []string, _ []byte) ([]byte, error) {
+		calls = append(calls, append([]string(nil), argv...))
+		if len(calls) <= 2 {
+			return nil, nil
+		}
+		return nil, errors.New("stop after discovery")
+	})
+
+	_, _ = rt.Bootstrap(t.Context(), bootstrapRequest())
+	want := [][]string{
+		{"container", "ls", "--all", "--filter", "label=sub2api.host", "--format", "{{.Names}}\t{{.Label \"sub2api.host\"}}"},
+		{"network", "ls", "--filter", "label=sub2api.host", "--format", "{{.Name}}\t{{.Label \"sub2api.host\"}}"},
+	}
+	if len(calls) < len(want) || !reflect.DeepEqual(calls[:len(want)], want) {
+		t.Fatalf("bootstrap discovery argv = %#v, want %#v", calls, want)
+	}
+}
+
 func TestBootstrapIgnoresEmptyDockerOwnershipLabelDuringDiscovery(t *testing.T) {
 	rt := testRuntime(t)
 	runner := &bootstrapDiscoveryRunner{kind: "container", emptyLabel: true}
@@ -425,9 +446,9 @@ func (r *bootstrapDiscoveryRunner) Run(ctx context.Context, argv []string, stdin
 
 func bootstrapDiscovery(argv []string, kind string) bool {
 	if kind == "container" {
-		return reflect.DeepEqual(argv, []string{"container", "ls", "--all", "--filter", "label=sub2api.host", "--format", "{{.Names}}\t{{index .Labels \"sub2api.host\"}}"})
+		return reflect.DeepEqual(argv, []string{"container", "ls", "--all", "--filter", "label=sub2api.host", "--format", "{{.Names}}\t{{.Label \"sub2api.host\"}}"})
 	}
-	return kind == "network" && reflect.DeepEqual(argv, []string{"network", "ls", "--filter", "label=sub2api.host", "--format", "{{.Name}}\t{{index .Labels \"sub2api.host\"}}"})
+	return kind == "network" && reflect.DeepEqual(argv, []string{"network", "ls", "--filter", "label=sub2api.host", "--format", "{{.Name}}\t{{.Label \"sub2api.host\"}}"})
 }
 
 func onlyBootstrapDiscovery(calls [][]string) bool {

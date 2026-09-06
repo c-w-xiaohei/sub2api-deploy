@@ -3625,6 +3625,25 @@ func mustInventory(t *testing.T, rt *Runtime) inventory {
 	return inv
 }
 
+func TestOwnedAndNetworkListsUseDockerLabelFormatters(t *testing.T) {
+	rt, state := initialized(t)
+	var calls [][]string
+	rt.runner = readinessRunner(func(_ context.Context, argv []string, _ []byte) ([]byte, error) {
+		calls = append(calls, append([]string(nil), argv...))
+		return nil, nil
+	})
+	inv := inventory{Resource: state.Resource, Ownership: state.Ownership}
+	object := managedObject{Name: "owned"}
+	if present, err := rt.ownedPresentEither(t.Context(), inv, object, managedObject{}, false); err != nil || present {
+		t.Fatalf("owned present = %v, %v", present, err)
+	}
+	wantContainer := []string{"container", "ls", "--all", "--filter", "name=^/owned$", "--format", "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}"}
+	wantNetwork := []string{"network", "ls", "--filter", "name=^" + networkName(state) + "$", "--format", "{{.Name}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.network\"}}"}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], wantContainer) || !reflect.DeepEqual(networkListArgs(state), wantNetwork) {
+		t.Fatalf("list argv = %#v, %#v; want %#v, %#v", calls, networkListArgs(state), wantContainer, wantNetwork)
+	}
+}
+
 type recordingRunner struct {
 	calls                 [][]string
 	stdin                 [][]byte

@@ -161,9 +161,9 @@ func TestBootstrapStdioServesOneReconcileFrameAndReturnsAppliedResult(t *testing
 	fakeDocker := filepath.Join(binDir, "docker")
 	if err := os.WriteFile(fakeDocker, []byte(`#!/bin/sh
 tab=$(printf '\t')
-if [ "$1" = container ] && [ "$2" = ls ] && [ "$3" = --all ] && [ "$4" = --filter ] && [ "$5" = label=sub2api.host ] && [ "$6" = --format ] && [ "$7" = "{{.Names}}${tab}{{index .Labels \"sub2api.host\"}}" ] && [ "$#" = 7 ]; then exit 0; fi
-if [ "$1" = network ] && [ "$2" = ls ] && [ "$3" = --filter ] && [ "$4" = label=sub2api.host ] && [ "$5" = --format ] && [ "$6" = "{{.Name}}${tab}{{index .Labels \"sub2api.host\"}}" ] && [ "$#" = 6 ]; then exit 0; fi
-if [ "$1" = network ] && [ "$2" = ls ] && [ "$3" = --filter ] && [ "$4" != label=sub2api.host ] && [ "$5" = --format ] && [ "$6" = "{{.Name}}${tab}{{index .Labels \"sub2api.host\"}}${tab}{{index .Labels \"sub2api.host.network\"}}" ] && [ "$#" = 6 ]; then exit 0; fi
+if [ "$1" = container ] && [ "$2" = ls ] && [ "$3" = --all ] && [ "$4" = --filter ] && [ "$5" = label=sub2api.host ] && [ "$6" = --format ] && [ "$7" = "{{.Names}}${tab}{{.Label \"sub2api.host\"}}" ] && [ "$#" = 7 ]; then exit 0; fi
+if [ "$1" = network ] && [ "$2" = ls ] && [ "$3" = --filter ] && [ "$4" = label=sub2api.host ] && [ "$5" = --format ] && [ "$6" = "{{.Name}}${tab}{{.Label \"sub2api.host\"}}" ] && [ "$#" = 6 ]; then exit 0; fi
+if [ "$1" = network ] && [ "$2" = ls ] && [ "$3" = --filter ] && [ "$4" != label=sub2api.host ] && [ "$5" = --format ] && [ "$6" = "{{.Name}}${tab}{{.Label \"sub2api.host\"}}${tab}{{.Label \"sub2api.host.network\"}}" ] && [ "$#" = 6 ]; then exit 0; fi
 if [ "$1" = network ] && [ "$2" = create ] && [ "$3" = --label ] && [ "$4" != '' ] && [ "$5" = --label ] && [ "$6" != '' ] && [ "$7" != '' ] && [ "$#" = 7 ]; then exit 0; fi
 exit 1
 	`), 0700); err != nil {
