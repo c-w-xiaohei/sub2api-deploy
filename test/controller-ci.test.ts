@@ -8,6 +8,7 @@ const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta
 const liveHostSandbox = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-host-sandbox.sh", import.meta.url), "utf8");
 const liveRuntime = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-runtime.sh", import.meta.url), "utf8");
 const liveRuntimeTest = readFileSync(new URL("../internal/integration/providerruntime/live_mx_allowlist_linux_test.go", import.meta.url), "utf8");
+const hostRuntimeTest = readFileSync(new URL("../internal/hostruntime/runtime_test.go", import.meta.url), "utf8");
 const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
 const liveTest = "TestProviderRuntimeCrossHostDataAdmissionLive";
 const liveMilestones = ["postgres-owned-container", "postgres-ready", "redis-owned-container", "redis-ready"];
@@ -266,6 +267,14 @@ describe("Task4 CI contracts", () => {
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).not.toContain("-race -json -count=1 -timeout=15m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$");
     expect(workflow).toContain("test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$'");
+  });
+
+  it("leaves the fresh Host root exclusively to Bootstrap", () => {
+    expect(liveHostSandbox).toContain("mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib");
+    expect(liveHostSandbox).toMatch(/^mkdir -p \/usr\/local\/libexec \/var\/run\/sshd$/m);
+    expect(liveHostSandbox).not.toMatch(/^mkdir\b[^\n]*\/var\/lib\/sub2api-host/m);
+    expect(liveHostSandbox.indexOf("setsid /usr/sbin/sshd")).toBeGreaterThan(liveHostSandbox.indexOf("mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib"));
+    expect(hostRuntimeTest).toContain("TestBootstrapRejectsExistingSecureRootWithoutStateAsNonFresh");
   });
 
   it("executes both live workflow parsers as full ordered observer gates", () => {

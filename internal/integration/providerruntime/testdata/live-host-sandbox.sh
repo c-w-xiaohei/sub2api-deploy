@@ -177,7 +177,7 @@ mount --bind "$root/cgroup-host" /sys/fs/cgroup
 mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
 mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
 mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
-mkdir -p /usr/local/libexec /var/lib/sub2api-host /var/run/sshd
+mkdir -p /usr/local/libexec /var/run/sshd
 printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
 printf '%s\n' '{}' >"$root/$name/daemon.json"
 cat >"$root/$name/containerd.toml" <<'EOF'
