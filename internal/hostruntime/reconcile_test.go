@@ -919,7 +919,24 @@ func TestRedisReadinessUsesProtectedAuthAndRequiresExactPONG(t *testing.T) {
 	if err := rt.runLocal(t.Context(), state, o, hostcontract.LocalDataServiceTarget{ID: "cache", Type: "redis", Port: 6380}); err != nil {
 		t.Fatal(err)
 	}
+	launch := runner.calls[0]
+	bootstrap := "set -eu; " +
+		"id redis >/dev/null; " +
+		"cp /run/sub2api-redis-source/redis.conf /run/sub2api-redis/redis.conf; " +
+		"chown redis:redis /run/sub2api-redis /run/sub2api-redis/redis.conf; " +
+		"chmod 0700 /run/sub2api-redis; " +
+		"chmod 0400 /run/sub2api-redis/redis.conf; " +
+		"exec /usr/local/bin/docker-entrypoint.sh redis-server /run/sub2api-redis/redis.conf"
 	if !runner.anyArg("--env-file", rt.artifactPath(o.Env)) || runner.anyArg("-v", rt.artifactPath(o.Env)+":/run/secrets/redis-cli.env:ro") || runner.hasSecret("safe") {
+		t.Fatalf("redis environment=%#v", runner.calls)
+	}
+	if !containsPair(launch, "-v", rt.artifactPath(o.Config)+":/run/sub2api-redis-source/redis.conf:ro") {
+		t.Fatalf("redis config source mount=%#v", launch)
+	}
+	if runner.anyArg("-v", rt.artifactPath(o.Config)+":/usr/local/etc/redis/redis.conf:ro") {
+		t.Fatalf("redis legacy config mount=%#v", launch)
+	}
+	if !containsPair(launch, "--tmpfs", "/run/sub2api-redis:rw,nosuid,nodev,noexec,mode=0700") || !containsPair(launch, "--entrypoint", "/bin/sh") || !containsPair(launch, "-c", bootstrap) {
 		t.Fatalf("redis launch=%#v", runner.calls)
 	}
 	if err := rt.localReady(t.Context(), o); err != nil || !runner.hasCall([]string{"exec", o.Name, "redis-cli", "--raw", "-h", "127.0.0.1", "-p", "6380", "ping"}) {

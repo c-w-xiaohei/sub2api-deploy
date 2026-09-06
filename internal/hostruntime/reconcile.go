@@ -38,8 +38,18 @@ const (
 )
 
 const (
-	postgresImage              = "postgres:18-alpine"
-	redisImage                 = "redis:8-alpine"
+	postgresImage          = "postgres:18-alpine"
+	redisImage             = "redis:8-alpine"
+	redisConfigSourcePath  = "/run/sub2api-redis-source/redis.conf"
+	redisConfigStagingDir  = "/run/sub2api-redis"
+	redisConfigStagingPath = redisConfigStagingDir + "/redis.conf"
+	redisBootstrap         = "set -eu; " +
+		"id redis >/dev/null; " +
+		"cp " + redisConfigSourcePath + " " + redisConfigStagingPath + "; " +
+		"chown redis:redis " + redisConfigStagingDir + " " + redisConfigStagingPath + "; " +
+		"chmod 0700 " + redisConfigStagingDir + "; " +
+		"chmod 0400 " + redisConfigStagingPath + "; " +
+		"exec /usr/local/bin/docker-entrypoint.sh redis-server " + redisConfigStagingPath
 	localDataReadinessBudget   = time.Minute
 	localDataReadinessInterval = time.Second
 )
@@ -2352,7 +2362,7 @@ func (r *Runtime) runLocal(ctx context.Context, s State, o managedObject, target
 		args = append(args, "-v", r.artifactPath(o.Env)+":/run/secrets/postgres-admin:ro", "-v", r.artifactPath(o.Config)+":/etc/sub2api/postgresql.conf:ro", "-v", r.artifactPath(o.HBA)+":/etc/sub2api/pg_hba.conf:ro", "-v", r.artifactPath(o.Ident)+":/etc/sub2api/pg_ident.conf:ro", "-e", "POSTGRES_USER=s2h_admin", "-e", "POSTGRES_DB=postgres", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-admin", "-e", "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer", "-e", "PGDATA=/var/lib/postgresql/data", o.Image, "-c", "config_file=/etc/sub2api/postgresql.conf", "-p", strconv.Itoa(o.Port))
 	} else {
 		args[len(args)-1] += "/data"
-		args = append(args, "--env-file", r.artifactPath(o.Env), "-v", r.artifactPath(o.Config)+":/usr/local/etc/redis/redis.conf:ro", o.Image, "redis-server", "/usr/local/etc/redis/redis.conf")
+		args = append(args, "--env-file", r.artifactPath(o.Env), "-v", r.artifactPath(o.Config)+":"+redisConfigSourcePath+":ro", "--tmpfs", redisConfigStagingDir+":rw,nosuid,nodev,noexec,mode=0700", "--entrypoint", "/bin/sh", o.Image, "-c", redisBootstrap)
 	}
 	return r.docker(ctx, args...)
 }
