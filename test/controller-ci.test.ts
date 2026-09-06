@@ -37,7 +37,7 @@ function parseLiveRecords(records: unknown[], parser: "diagnostic" | "candidate"
   writeFileSync(raw, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
   const start = parser === "diagnostic"
     ? workflow.indexOf("const allowedLiveStages = new Set([")
-    : workflow.indexOf("const fs=require('node:fs'),path=require('node:path');", workflow.indexOf("const allowedLiveStages = new Set(["));
+    : workflow.indexOf("for(const l of require('node:fs').readFileSync(process.argv[2],'utf8').split('\\n'))", workflow.indexOf("const allowedLiveStages = new Set(["));
   const end = parser === "diagnostic"
     ? workflow.indexOf("          NODE", start)
     : workflow.indexOf(" const files=fs.readdirSync(trace);", start);
@@ -291,6 +291,20 @@ describe("Task4 CI contracts", () => {
     for (const status of ["observer-error", "observer-inconclusive"]) {
       const records = [...validLiveRecords(), liveOutput(`live observer: ${status}\n`), livePass];
       expect(parseLiveRecords(records, "diagnostic")).toBe(0);
+      expect(parseLiveRecords(records, "candidate")).toBe(1);
+    }
+  });
+
+  it("accepts one validated post-create snapshot only in diagnostics", () => {
+    for (const [output, diagnosticStatus] of [
+      ["live post-create snapshot: state=pending-exact postgres=ready redis=running-unready\n", 0],
+      ["live post-create snapshot: state=absent postgres=not-inspected redis=not-inspected\n", 0],
+      ["live post-create snapshot: state=absent postgres=ready redis=not-inspected\n", 1],
+      ["prefix live post-create snapshot: state=absent postgres=not-inspected redis=not-inspected\n", 1],
+      ["live post-create snapshot: state=unknown postgres=not-inspected redis=not-inspected\n", 1],
+    ] as const) {
+      const records = [...validLiveRecords(), liveOutput(output), livePass];
+      expect(parseLiveRecords(records, "diagnostic")).toBe(diagnosticStatus);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
   });

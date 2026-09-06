@@ -129,6 +129,7 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	dataCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::data", Properties: rpcProperties(t, dataInput)})
 	observerResult := observer.stop()
 	if err != nil || dataCreated == nil || dataCreated.Id == "" {
+		reportLivePostCreateSnapshot(&fixture, observerFacts)
 		reportLiveStage(liveDataCreateFailureStage(err))
 		reportLiveObserverStatus(liveCreateObserverStatus(false, observerResult))
 		t.Fatal("released Provider Create failed")
@@ -1078,6 +1079,120 @@ func (f *liveFixture) liveDataReady(ctx context.Context, expected liveDataContai
 	return bytes.Equal(out, []byte("PONG\n")), nil
 }
 
+const livePostCreateSnapshotMarker = "live post-create snapshot:"
+
+const livePostCreateStateDirectory = "/var/lib/sub2api-host"
+
+var livePostCreateStates = map[string]bool{"absent": true, "invalid": true, "unavailable": true, "not-exact": true, "pending-exact": true}
+var livePostCreateContainers = map[string]bool{"not-inspected": true, "absent": true, "identity-mismatch": true, "exited": true, "not-running": true, "running-probe-failed": true, "running-unready": true, "ready": true, "unavailable": true, "ambiguous": true}
+
+func reportLivePostCreateSnapshot(f *liveFixture, facts liveDataObserverFacts) {
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+	state, parsed := livePostCreateState(ctx, func(ctx context.Context) ([]byte, error) {
+		return f.sandboxOutputForObserver(ctx, "data", 3*time.Second, "sh", "-c", livePostCreateStateReadScript(livePostCreateStateDirectory))
+	}, facts)
+	postgres, redis := "not-inspected", "not-inspected"
+	if state == "pending-exact" {
+		expected, err := liveDataContainerExpectationsForState(facts, parsed)
+		if err != nil {
+			state = "invalid"
+		} else {
+			command := func(ctx context.Context, args ...string) ([]byte, error) {
+				return f.sandboxOutputForObserver(ctx, "data", time.Second, args[0], args[1:]...)
+			}
+			probe := func(ctx context.Context, expected liveDataContainerExpectation) ([]byte, error) {
+				args := liveDataReadinessArgs(expected)
+				return command(ctx, args...)
+			}
+			postgres = livePostCreateContainer(ctx, expected[0], command, probe)
+			redis = livePostCreateContainer(ctx, expected[1], command, probe)
+		}
+	}
+	_, _ = os.Stderr.WriteString(fmt.Sprintf("%s state=%s postgres=%s redis=%s\n", livePostCreateSnapshotMarker, state, postgres, redis))
+}
+
+func livePostCreateStateReadScript(root string) string {
+	return `root='` + root + `'; result=$(find "$root"/. -mindepth 1 -maxdepth 1 -name state.json -print); status=$?; if test "$status" -ne 0; then exit "$status"; fi; if test -z "$result"; then printf 'absent\n'; elif test "$result" = "$root/./state.json"; then printf 'present\n'; cat "$root/state.json"; else exit 1; fi`
+}
+
+func livePostCreateState(ctx context.Context, read func(context.Context) ([]byte, error), facts liveDataObserverFacts) (string, liveObserverState) {
+	b, err := read(ctx)
+	if err != nil {
+		return "unavailable", liveObserverState{}
+	}
+	if bytes.Equal(b, []byte("absent\n")) {
+		return "absent", liveObserverState{}
+	}
+	if !bytes.HasPrefix(b, []byte("present\n")) {
+		return "invalid", liveObserverState{}
+	}
+	b = b[len("present\n"):]
+	state, err := decodeLiveObserverHostState(b)
+	if err != nil {
+		return "invalid", liveObserverState{}
+	}
+	if !livePendingStateMatches(state, facts) {
+		return "not-exact", liveObserverState{}
+	}
+	return "pending-exact", liveObserverState{ownership: state.Ownership.Value, revision: state.Journal.Key.TargetRevision}
+}
+
+func livePostCreateContainer(ctx context.Context, expected liveDataContainerExpectation, command func(context.Context, ...string) ([]byte, error), probe func(context.Context, liveDataContainerExpectation) ([]byte, error)) string {
+	list, err := command(ctx, "docker", "container", "ls", "--all", "--filter", "name=^/"+expected.name+"$", "--format", "{{.Names}}")
+	if err != nil {
+		return "unavailable"
+	}
+	if len(list) == 0 {
+		return "absent"
+	}
+	if string(list) != expected.name+"\n" {
+		return "ambiguous"
+	}
+	out, err := command(ctx, "docker", "container", "inspect", "--format", "{{.Name}}\t{{.Config.Image}}\t{{index .Config.Labels \"sub2api.host\"}}\t{{index .Config.Labels \"sub2api.host.target\"}}\t{{.State.Status}}", expected.name)
+	if err != nil {
+		return "unavailable"
+	}
+	if !strings.HasSuffix(string(out), "\n") {
+		return "ambiguous"
+	}
+	fields := strings.Split(strings.TrimSuffix(string(out), "\n"), "\t")
+	if len(fields) != 5 || fields[0] != "/"+expected.name {
+		return "ambiguous"
+	}
+	if fields[1] != expected.image || fields[2] != expected.owner || fields[3] != expected.target {
+		return "identity-mismatch"
+	}
+	switch fields[4] {
+	case "exited":
+		return "exited"
+	case "running":
+		return livePostCreateReadiness(ctx, expected, probe, 10, 225*time.Millisecond)
+	default:
+		return "not-running"
+	}
+}
+
+func livePostCreateReadiness(ctx context.Context, expected liveDataContainerExpectation, probe func(context.Context, liveDataContainerExpectation) ([]byte, error), attempts int, pause time.Duration) string {
+	for i := 0; i < attempts; i++ {
+		out, err := probe(ctx, expected)
+		if err == nil {
+			if expected.kind == "postgres" || bytes.Equal(out, []byte("PONG\n")) {
+				return "ready"
+			}
+			return "running-unready"
+		}
+		if i+1 < attempts && pause > 0 {
+			select {
+			case <-ctx.Done():
+				return "running-probe-failed"
+			case <-time.After(pause):
+			}
+		}
+	}
+	return "running-probe-failed"
+}
+
 func liveDataReadinessArgs(expected liveDataContainerExpectation) []string {
 	if expected.kind == "postgres" {
 		return []string{"docker", "exec", expected.name, "psql", "-X", "-U", "s2h_admin", "-d", "postgres", "-p", strconv.Itoa(expected.port), "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1"}
@@ -1340,6 +1455,7 @@ type liveRecordCapture struct {
 	records       []string
 	next          int
 	observerSeen  bool
+	snapshotSeen  bool
 	invalid       bool
 	acceptRecords bool
 }
@@ -1377,7 +1493,7 @@ func (c *liveRecordCapture) Write(p []byte) (int, error) {
 
 func (c *liveRecordCapture) hasMarker() bool {
 	b := c.rolling[:c.rollLen]
-	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:"))
+	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker))
 }
 
 func (c *liveRecordCapture) finishLine() {
@@ -1417,8 +1533,36 @@ func (c *liveRecordCapture) finishLine() {
 				c.records = append(c.records, record)
 			}
 		}
+		if strings.Contains(record, livePostCreateSnapshotMarker) {
+			if !livePostCreateSnapshotRecord(record) || c.snapshotSeen {
+				c.invalid = true
+			} else {
+				c.snapshotSeen = true
+				c.records = append(c.records, record)
+			}
+		}
 	}
 	c.lineLen, c.overflow, c.marker, c.rollLen = 0, false, false, 0
+}
+
+func livePostCreateSnapshotRecord(record string) bool {
+	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
+	if len(fields) != 6 || strings.Join(fields[:3], " ") != livePostCreateSnapshotMarker {
+		return false
+	}
+	state, stateOK := strings.CutPrefix(fields[3], "state=")
+	postgres, postgresOK := strings.CutPrefix(fields[4], "postgres=")
+	redis, redisOK := strings.CutPrefix(fields[5], "redis=")
+	if !stateOK || !postgresOK || !redisOK || !livePostCreateStates[state] || !livePostCreateContainers[postgres] || !livePostCreateContainers[redis] {
+		return false
+	}
+	if record != fmt.Sprintf("%s state=%s postgres=%s redis=%s\n", livePostCreateSnapshotMarker, state, postgres, redis) {
+		return false
+	}
+	if state == "pending-exact" {
+		return postgres != "not-inspected" && redis != "not-inspected"
+	}
+	return postgres == "not-inspected" && redis == "not-inspected"
 }
 
 func (c *liveRecordCapture) failureBytes(stdout []byte) []byte {
@@ -1843,6 +1987,15 @@ func TestLiveObserverUsesOnlyDerivedNonSecretFactsAndReleasedReadinessArgv(t *te
 			t.Fatalf("observer source handles %s", forbidden)
 		}
 	}
+	snapshotStart := bytes.Index(observer, []byte("func reportLivePostCreateSnapshot"))
+	snapshotEnd := bytes.Index(observer, []byte("func (f *liveFixture) sandboxOutputForObserver"))
+	if snapshotStart < 0 || snapshotEnd < snapshotStart {
+		t.Fatal("snapshot source boundary unavailable")
+	}
+	snapshot := observer[snapshotStart:snapshotEnd]
+	if !bytes.Contains(snapshot, []byte(`"docker", "container", "ls", "--all"`)) {
+		t.Fatal("snapshot must list all containers")
+	}
 	postgres := liveDataReadinessArgs(liveDataContainerExpectation{kind: "postgres", name: "postgres-name", port: 5433})
 	wantPostgres := []string{"docker", "exec", "postgres-name", "psql", "-X", "-U", "s2h_admin", "-d", "postgres", "-p", "5433", "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1"}
 	if strings.Join(postgres, "\x00") != strings.Join(wantPostgres, "\x00") {
@@ -2075,6 +2228,183 @@ func TestLiveFailedCreateAlwaysEmitsOneObserverStatus(t *testing.T) {
 				t.Fatalf("status = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestLivePostCreateSnapshotClassifiesStateAndContainers(t *testing.T) {
+	facts := liveTestDataObserverFacts(hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}, "revision")
+	valid := livePendingStateJSON(t, facts, "owner")
+	exit42 := exec.Command("sh", "-c", "exit 42").Run()
+	for _, test := range []struct {
+		name string
+		err  error
+		body []byte
+		want string
+	}{
+		{"arbitrary exit 42 is unavailable", exit42, nil, "unavailable"},
+		{"explicit absence", nil, []byte("absent\n"), "absent"},
+		{"malformed framing", nil, []byte("present\n{"), "invalid"},
+		{"invalid", nil, []byte("{"), "invalid"},
+		{"unavailable", errors.New("namespace unavailable"), nil, "unavailable"},
+		{"not exact", nil, append([]byte("present\n"), []byte(strings.Replace(string(valid), `"pending"`, `"complete"`, 1))...), "not-exact"},
+		{"pending exact", nil, append([]byte("present\n"), valid...), "pending-exact"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got, _ := livePostCreateState(context.Background(), func(context.Context) ([]byte, error) { return test.body, test.err }, facts); got != test.want {
+				t.Fatalf("state = %q, want %q", got, test.want)
+			}
+		})
+	}
+	want := liveDataContainerExpectation{name: "pg", image: "postgres:18-alpine", owner: "owner", target: "target", kind: "postgres", port: 5432}
+	listArgs := []string{"docker", "container", "ls", "--all", "--filter", "name=^/pg$", "--format", "{{.Names}}"}
+	inspectArgs := []string{"docker", "container", "inspect", "--format", "{{.Name}}\t{{.Config.Image}}\t{{index .Config.Labels \"sub2api.host\"}}\t{{index .Config.Labels \"sub2api.host.target\"}}\t{{.State.Status}}", "pg"}
+	inspection := func(status string) string {
+		return "/pg\tpostgres:18-alpine\towner\ttarget\t" + status + "\n"
+	}
+	for _, test := range []struct {
+		name, list, inspect, want     string
+		listErr, inspectErr, probeErr error
+		probe                         []byte
+		wantProbes                    int
+	}{
+		{"list error", "", "", "unavailable", errors.New("list failed"), nil, nil, nil, 0},
+		{"absent", "", "", "absent", nil, nil, nil, nil, 0},
+		{"duplicate list", "pg\npg\n", "", "ambiguous", nil, nil, nil, nil, 0},
+		{"malformed list", "pg", "", "ambiguous", nil, nil, nil, nil, 0},
+		{"inspect error", "pg\n", "", "unavailable", nil, errors.New("inspect failed"), nil, nil, 0},
+		{"malformed inspect", "pg\n", "/pg\tpostgres:18-alpine\towner\ttarget\n", "ambiguous", nil, nil, nil, nil, 0},
+		{"unterminated inspect", "pg\n", "/pg\tpostgres:18-alpine\towner\ttarget\trunning", "ambiguous", nil, nil, nil, nil, 0},
+		{"identity mismatch", "pg\n", "/pg\twrong\towner\ttarget\trunning\n", "identity-mismatch", nil, nil, nil, nil, 0},
+		{"exited", "pg\n", inspection("exited"), "exited", nil, nil, nil, nil, 0},
+		{"created", "pg\n", inspection("created"), "not-running", nil, nil, nil, nil, 0},
+		{"starting", "pg\n", inspection("starting"), "not-running", nil, nil, nil, nil, 0},
+		{"restarting", "pg\n", inspection("restarting"), "not-running", nil, nil, nil, nil, 0},
+		{"dead", "pg\n", inspection("dead"), "not-running", nil, nil, nil, nil, 0},
+		{"running ready", "pg\n", inspection("running"), "ready", nil, nil, nil, []byte("ok"), 1},
+		{"running probe failure", "pg\n", inspection("running"), "running-probe-failed", nil, nil, errors.New("probe failed"), nil, 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var commands [][]string
+			probes := 0
+			got := livePostCreateContainer(context.Background(), want, func(_ context.Context, args ...string) ([]byte, error) {
+				commands = append(commands, append([]string(nil), args...))
+				if len(commands) == 1 {
+					return []byte(test.list), test.listErr
+				}
+				return []byte(test.inspect), test.inspectErr
+			}, func(context.Context, liveDataContainerExpectation) ([]byte, error) {
+				probes++
+				return test.probe, test.probeErr
+			})
+			if got != test.want {
+				t.Fatalf("container = %q, want %q", got, test.want)
+			}
+			if len(commands) == 0 || !slices.Equal(commands[0], listArgs) {
+				t.Fatalf("list argv = %#v, want %#v", commands, listArgs)
+			}
+			wantInspect := test.listErr == nil && test.list == want.name+"\n"
+			if (len(commands) == 2) != wantInspect || (wantInspect && !slices.Equal(commands[1], inspectArgs)) {
+				t.Fatalf("inspect argv = %#v, want inspect %t %#v", commands, wantInspect, inspectArgs)
+			}
+			if probes != test.wantProbes {
+				t.Fatalf("probes = %d, want %d", probes, test.wantProbes)
+			}
+		})
+	}
+	redis := liveDataContainerExpectation{name: "redis", image: "redis:8-alpine", owner: "owner", target: "target", kind: "redis", port: 6379}
+	if got := livePostCreateContainer(context.Background(), redis, func(_ context.Context, args ...string) ([]byte, error) {
+		if args[2] == "ls" {
+			return []byte("redis\n"), nil
+		}
+		return []byte("/redis\tredis:8-alpine\towner\ttarget\trunning\n"), nil
+	}, func(context.Context, liveDataContainerExpectation) ([]byte, error) { return []byte("NOPE\n"), nil }); got != "running-unready" {
+		t.Fatalf("redis container = %q", got)
+	}
+}
+
+func TestLivePostCreateStateReaderUsesBoundedFindFraming(t *testing.T) {
+	root := t.TempDir()
+	script := livePostCreateStateReadScript(root)
+	if !strings.Contains(script, `find "$root"/. -mindepth 1 -maxdepth 1 -name state.json -print`) || !strings.Contains(script, "status=$?") || strings.Contains(script, "test ! -e") {
+		t.Fatalf("invalid state reader script: %q", script)
+	}
+	run := func(root string) ([]byte, error) {
+		return exec.Command("sh", "-c", livePostCreateStateReadScript(root)).Output()
+	}
+	assertRead := func(root, want string, wantError bool) {
+		out, err := run(root)
+		if (err != nil) != wantError || string(out) != want {
+			t.Fatalf("state read = %q, %v; want %q, error %t", out, err, want, wantError)
+		}
+	}
+	assertRead(root, "absent\n", false)
+	statePath := filepath.Join(root, "state.json")
+	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(root, "present\nstate", false)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(root, "present\n", true)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, statePath); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(root, "present\n", true)
+	notDirectory := filepath.Join(root, "not-directory")
+	if err := os.WriteFile(notDirectory, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(notDirectory, "", true)
+	assertRead(filepath.Join(root, "missing-root"), "", true)
+}
+
+func TestLivePostCreateSnapshotReadinessRetriesAndCaptureIsStrict(t *testing.T) {
+	pg := liveDataContainerExpectation{kind: "postgres", name: "pg", port: 5432}
+	calls := 0
+	if got := livePostCreateReadiness(context.Background(), pg, func(context.Context, liveDataContainerExpectation) ([]byte, error) {
+		calls++
+		if calls < 3 {
+			return nil, errors.New("not ready")
+		}
+		return []byte("ignored"), nil
+	}, 3, 0); got != "ready" || calls != 3 {
+		t.Fatalf("postgres = %q after %d calls", got, calls)
+	}
+	redis := liveDataContainerExpectation{kind: "redis", name: "redis", port: 6379}
+	if got := livePostCreateReadiness(context.Background(), redis, func(context.Context, liveDataContainerExpectation) ([]byte, error) { return []byte("NOPE\n"), nil }, 2, 0); got != "running-unready" {
+		t.Fatalf("redis = %q", got)
+	}
+	if got := livePostCreateReadiness(context.Background(), redis, func(context.Context, liveDataContainerExpectation) ([]byte, error) { return nil, errors.New("failed") }, 2, 0); got != "running-probe-failed" {
+		t.Fatalf("failed probe = %q", got)
+	}
+	capture := newLiveRecordCapture()
+	for _, part := range []string{"live post-create snapshot: state=pending-exact postgres=ready ", "redis=running-unready\n"} {
+		_, _ = capture.Write([]byte(part))
+	}
+	var out bytes.Buffer
+	if !capture.forward(&out) || out.String() != "live post-create snapshot: state=pending-exact postgres=ready redis=running-unready\n" {
+		t.Fatalf("snapshot capture = %q", out.String())
+	}
+	absentSnapshot := []byte("live post-create snapshot: state=absent postgres=not-inspected redis=not-inspected\n")
+	for _, input := range [][]byte{
+		append([]byte("prefix "), absentSnapshot...),
+		[]byte("live post-create snapshot: state=unknown postgres=not-inspected redis=not-inspected\n"),
+		append(append([]byte(nil), absentSnapshot...), absentSnapshot...),
+		append(bytes.Repeat([]byte("x"), 161), absentSnapshot...),
+	} {
+		capture := newLiveRecordCapture()
+		_, _ = capture.Write(input)
+		var out bytes.Buffer
+		if capture.forward(&out) || out.String() != "live observer: observer-error\n" {
+			t.Fatalf("unsafe snapshot = %q", out.String())
+		}
 	}
 }
 

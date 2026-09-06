@@ -350,10 +350,13 @@ jobs:
             'complete',
           ]);
           const milestones = ['postgres-owned-container','postgres-ready','redis-owned-container','redis-ready'];
+          const snapshotStates = new Set(['absent','invalid','unavailable','not-exact','pending-exact']);
+          const snapshotContainers = new Set(['not-inspected','absent','identity-mismatch','exited','not-running','running-probe-failed','running-unready','ready','unavailable','ambiguous']);
           let terminal;
           let stage;
           let milestone;
           let observer = 'ok';
+          let snapshot;
           let nextMilestone = 0;
 
           for (const line of fs.readFileSync(process.argv[2], 'utf8').split('\n')) {
@@ -381,6 +384,15 @@ jobs:
               if (!['live observer: observer-error\n','live observer: observer-inconclusive\n'].includes(event.Output) || observer !== 'ok') throw Error('invalid live observer marker');
               observer = event.Output.trim().slice('live observer: '.length);
             }
+            if (event.Output.includes('live post-create snapshot:')) {
+              const match = event.Output.match(/^live post-create snapshot: state=([a-z-]+) postgres=([a-z-]+) redis=([a-z-]+)\n$/);
+              if (!match || snapshot) throw Error('invalid live post-create snapshot');
+              const [state, postgres, redis] = match.slice(1);
+              const containersInspected = postgres !== 'not-inspected' && redis !== 'not-inspected';
+              const containersNotInspected = postgres === 'not-inspected' && redis === 'not-inspected';
+              if (!snapshotStates.has(state) || !snapshotContainers.has(postgres) || !snapshotContainers.has(redis) || (state === 'pending-exact' ? !containersInspected : !containersNotInspected)) throw Error('invalid live post-create snapshot');
+              snapshot = { state, postgres, redis };
+            }
           }
 
           if (terminal === 'pass' && (nextMilestone !== milestones.length || milestone !== milestones.at(-1))) throw Error('live observer evidence incomplete');
@@ -388,8 +400,10 @@ jobs:
           console.log(`${test} stage: ${stage ?? 'none'}`);
           console.log(`${test} milestone: ${milestone ?? 'none'}`);
           console.log(`${test} observer: ${observer}`);
+          if (snapshot) console.log(`${test} post-create snapshot: state=${snapshot.state} postgres=${snapshot.postgres} redis=${snapshot.redis}`);
           NODE
           sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<'NODE'
+          for(const l of require('node:fs').readFileSync(process.argv[2],'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(typeof e.Output==='string'&&e.Output.includes('live post-create snapshot:'))throw Error('live post-create snapshot on candidate pass')}
           const fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe,consumerTrace]=process.argv.slice(2), test='TestProviderRuntimeCrossHostDataAdmissionLive', milestones=['postgres-owned-container','postgres-ready','redis-owned-container','redis-ready']; let terminal, milestone, observer='ok', nextMilestone=0, providerFailure=false; for(const l of fs.readFileSync(raw,'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(e.Test===test&&['pass','fail','skip'].includes(e.Action)){if(terminal)throw Error('duplicate live terminal action');terminal=e.Action}if(e.Test!==test||typeof e.Output!=='string')continue;if(e.Output.includes('live namespace fixture failed:'))providerFailure=true;if(e.Output.includes('live milestone:')){const expected=milestones[nextMilestone];if(!expected||e.Output!==`live milestone: ${expected}\n`)throw Error('invalid live milestone marker');milestone=expected;nextMilestone++}if(e.Output.includes('live observer:')){if(e.Output!=='live observer: observer-error\n'||observer!=='ok')throw Error('invalid live observer marker');observer='observer-error'}} if(terminal!=='pass')throw Error('live test did not pass');if(providerFailure)throw Error('provider failure marker on live pass');if(nextMilestone!==milestones.length||milestone!==milestones.at(-1)||observer!=='ok')throw Error('live observer evidence incomplete'); const files=fs.readdirSync(trace); if(JSON.stringify(files)!==JSON.stringify(['mx-allowlist-live.json']))throw Error('unexpected live evidence inventory'); const p=path.join(trace,files[0]),stat=fs.lstatSync(p),e=JSON.parse(fs.readFileSync(p,'utf8')); const keys=['appDataEnvironmentAuthenticated','appHostPass','appReadyAfterData','dataHostPass','foreignTableSHA256','foreignTableUnchanged','hostAMD64SHA256','postgresCatalog','postgresDrop','postgresPass','postgresWrongPasswordDenied','providerSHA256','redisACL','redisDefaultDenied','redisDrop','redisPass','redisWrongPasswordDenied','releasedBoundary','test']; if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600||JSON.stringify(Object.keys(e).sort())!==JSON.stringify(keys.sort())||e.test!==test||e.releasedBoundary!==process.env.TARGET_SHA||e.providerSHA256!==process.env.PROVIDER_SHA||!Object.values(e).every(v=>typeof v!=='boolean'||v)||!['providerSHA256','hostAMD64SHA256','foreignTableSHA256'].every(k=>/^[0-9a-f]{64}$/.test(e[k]))||/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |CrossHost.*(?:Password|Secret)|(?:\d{1,3}\.){3}\d{1,3}/i.test(JSON.stringify(e)))throw Error('invalid live evidence'); fs.rmSync(path.join(safe,'metadata.json')); fs.copyFileSync(p,path.join(safe,files[0])); fs.chmodSync(path.join(safe,files[0]),0o600); fs.writeFileSync(path.join(safe,'live.jsonl'),JSON.stringify({Action:'pass',Test:test})+'\n',{mode:0o600}); fs.writeFileSync(consumerTrace,JSON.stringify({sha:process.env.TARGET_SHA,providerRuntimeCrossHostAppLive:'data-then-app-pass',providerSHA256:e.providerSHA256,hostAMD64SHA256:e.hostAMD64SHA256})+'\n',{mode:0o600});
           NODE
           sudo chown "$USER:$USER" "$candidate/consumer-trace.json"
