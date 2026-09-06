@@ -2,7 +2,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
+
+const { parse: parseYAML } = createRequire(import.meta.url)("yaml") as {
+  parse: (source: string) => unknown;
+};
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const liveHostSandbox = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-host-sandbox.sh", import.meta.url), "utf8");
@@ -62,6 +67,42 @@ function validLiveRecords(): unknown[] {
 }
 
 describe("Task4 CI contracts", () => {
+  it("frames live diagnostic and candidate Node heredocs in the parsed workflow script", () => {
+    const parsedWorkflow = parseYAML(workflow) as {
+      jobs: {
+        "provider-runtime": {
+          steps: Array<{ name?: string; run?: string }>;
+        };
+      };
+    };
+    const run = parsedWorkflow.jobs["provider-runtime"].steps.find(
+      (step) => step.name === "Run isolated live MX-ALLOWLIST-01 gate and write candidate trace",
+    )?.run;
+
+    expect(run).toBeTypeOf("string");
+    const lines = run!.split("\n");
+    const diagnosticOpener = 'node - "$raw" <<\'NODE\'';
+    const candidateOpener = 'sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<\'NODE\'';
+    const openers = lines.reduce<number[]>((indices, line, index) => {
+      if (line === diagnosticOpener || line === candidateOpener) indices.push(index);
+      return indices;
+    }, []);
+    const terminators = lines.reduce<number[]>((indices, line, index) => {
+      if (line === "NODE") indices.push(index);
+      return indices;
+    }, []);
+
+    expect(openers).toHaveLength(2);
+    expect(terminators).toHaveLength(2);
+    expect(lines[openers[0]]).toBe(diagnosticOpener);
+    expect(lines[openers[1]]).toBe(candidateOpener);
+    expect(terminators[0]).toBeGreaterThan(openers[0]);
+    expect(terminators[1]).toBeGreaterThan(openers[1]);
+    expect(lines[terminators[0] + 1]).toBe(candidateOpener);
+    expect(lines[terminators[1] + 1]).toBe('sudo chown "$USER:$USER" "$candidate/consumer-trace.json"');
+    expect(lines.slice(openers[0] + 1, terminators[0]).join("\n")).not.toContain(candidateOpener);
+  });
+
   it("keeps exactly the eight required gates and exact checkout binding", () => {
     expect([...jobs.matchAll(/^  ([a-z-]+):$/gm)].map((match) => match[1])).toEqual(["verify", "host-controller", "engine-graph", "provider-ssh", "provider-runtime", "provider-import", "target-release"]);
     expect(workflow).toContain('name: Host Controller (${{ matrix.arch }})');
