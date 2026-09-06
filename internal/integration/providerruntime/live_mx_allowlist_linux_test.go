@@ -1453,10 +1453,12 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 
 func (b *boundedBuffer) Bytes() []byte { return append([]byte(nil), b.data...) }
 
+const liveRecordLineLimit = 256
+
 type liveRecordCapture struct {
 	mu            sync.Mutex
 	fallback      boundedBuffer
-	line          [160]byte
+	line          [liveRecordLineLimit]byte
 	lineLen       int
 	overflow      bool
 	marker        bool
@@ -2141,7 +2143,7 @@ func TestLiveSSHDockerPreflightRecordAndCaptureFailClosed(t *testing.T) {
 		"prefix " + good,
 		"live ssh docker preflight: socket=present container=ok network=ok container-discovery=empty network-discovery=empty docker-host=set docker-context=unset docker-config=unset canary\n",
 		"live ssh docker preflight: socket=bad container=ok network=ok container-discovery=empty network-discovery=empty docker-host=unset docker-context=unset docker-config=unset\n",
-		strings.Repeat("x", 161) + good,
+		strings.Repeat("x", liveRecordLineLimit+1) + good,
 		good + good,
 	} {
 		capture := newLiveRecordCapture()
@@ -2150,6 +2152,16 @@ func TestLiveSSHDockerPreflightRecordAndCaptureFailClosed(t *testing.T) {
 		if capture.forward(&out) || out.String() != "live observer: observer-error\n" {
 			t.Fatalf("unsafe preflight record forwarded: %q", out.String())
 		}
+	}
+}
+
+func TestLiveRecordCaptureForwardsFullValidDiscoveryPreflight(t *testing.T) {
+	record := "live ssh docker preflight: socket=present container=ok network=ok container-discovery=empty network-discovery=unowned docker-host=unset docker-context=unset docker-config=unset\n"
+	capture := newLiveRecordCapture()
+	_, _ = capture.Write([]byte(record))
+	var out bytes.Buffer
+	if !capture.forward(&out) || out.String() != record {
+		t.Fatalf("preflight forwarding = %q", out.String())
 	}
 }
 
