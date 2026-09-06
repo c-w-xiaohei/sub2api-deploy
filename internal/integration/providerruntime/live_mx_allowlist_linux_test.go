@@ -116,6 +116,9 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 		reportLiveStage(liveSSHProbeFailureStage(err))
 		t.Fatal("live data SSH probe failed")
 	}
+	if !liveSSHDockerPreflight(t, ctx, "live-data") {
+		t.Fatal("live SSH Docker preflight failed")
+	}
 	reportLiveStage("data-create")
 	resource, target, secrets, ok := liveCheckpointInputs(dataInput)
 	key, keyErr := base64.StdEncoding.DecodeString(ciKey)
@@ -1463,6 +1466,7 @@ type liveRecordCapture struct {
 	next          int
 	observerSeen  bool
 	snapshotSeen  bool
+	preflightSeen bool
 	invalid       bool
 	acceptRecords bool
 }
@@ -1500,7 +1504,7 @@ func (c *liveRecordCapture) Write(p []byte) (int, error) {
 
 func (c *liveRecordCapture) hasMarker() bool {
 	b := c.rolling[:c.rollLen]
-	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker))
+	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker)) || bytes.Contains(b, []byte(liveSSHDockerPreflightMarker))
 }
 
 func (c *liveRecordCapture) finishLine() {
@@ -1548,8 +1552,68 @@ func (c *liveRecordCapture) finishLine() {
 				c.records = append(c.records, record)
 			}
 		}
+		if strings.Contains(record, liveSSHDockerPreflightMarker) {
+			if !liveSSHDockerPreflightRecord(record) || c.preflightSeen {
+				c.invalid = true
+			} else {
+				c.preflightSeen = true
+				c.records = append(c.records, record)
+			}
+		}
 	}
 	c.lineLen, c.overflow, c.marker, c.rollLen = 0, false, false, 0
+}
+
+const liveSSHDockerPreflightMarker = "live ssh docker preflight:"
+
+var liveSSHDockerPreflightSockets = map[string]bool{"present": true, "missing": true, "not-socket": true}
+var liveSSHDockerPreflightDocker = map[string]bool{"ok": true, "failed": true}
+var liveSSHDockerPreflightOverride = map[string]bool{"set": true, "unset": true}
+
+const liveSSHDockerPreflightScript = `if test -S /var/run/docker.sock; then socket=present; elif test -e /var/run/docker.sock; then socket=not-socket; else socket=missing; fi
+if docker container ls --all --filter label=sub2api.host --format '{{.Names}}' >/dev/null 2>&1; then container=ok; else container=failed; fi
+if docker network ls --filter label=sub2api.host --format '{{.Name}}' >/dev/null 2>&1; then network=ok; else network=failed; fi
+if test "${DOCKER_HOST+x}" = x; then docker_host=set; else docker_host=unset; fi
+if test "${DOCKER_CONTEXT+x}" = x; then docker_context=set; else docker_context=unset; fi
+if test "${DOCKER_CONFIG+x}" = x; then docker_config=set; else docker_config=unset; fi
+printf 'live ssh docker preflight: socket=%s container=%s network=%s docker-host=%s docker-context=%s docker-config=%s\n' "$socket" "$container" "$network" "$docker_host" "$docker_context" "$docker_config"`
+
+func liveSSHDockerPreflightArgs(alias string) []string {
+	remote := "/bin/sh -c '" + liveShellQuote(liveSSHDockerPreflightScript) + "' fixed-argv0"
+	return append([]string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "--", alias}, remote)
+}
+
+func liveSSHDockerPreflight(t *testing.T, parent context.Context, alias string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(parent, liveCommandTimeout)
+	defer cancel()
+	args := liveSSHDockerPreflightArgs(alias)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	var output boundedBuffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if cmd.Run() != nil || ctx.Err() != nil {
+		return false
+	}
+	record := string(output.Bytes())
+	if !liveSSHDockerPreflightRecord(record) {
+		return false
+	}
+	_, _ = os.Stderr.WriteString(record)
+	return true
+}
+
+func liveSSHDockerPreflightRecord(record string) bool {
+	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
+	if len(fields) != 10 || strings.Join(fields[:4], " ") != liveSSHDockerPreflightMarker {
+		return false
+	}
+	socket, socketOK := strings.CutPrefix(fields[4], "socket=")
+	container, containerOK := strings.CutPrefix(fields[5], "container=")
+	network, networkOK := strings.CutPrefix(fields[6], "network=")
+	host, hostOK := strings.CutPrefix(fields[7], "docker-host=")
+	context, contextOK := strings.CutPrefix(fields[8], "docker-context=")
+	config, configOK := strings.CutPrefix(fields[9], "docker-config=")
+	return socketOK && containerOK && networkOK && hostOK && contextOK && configOK && liveSSHDockerPreflightSockets[socket] && liveSSHDockerPreflightDocker[container] && liveSSHDockerPreflightDocker[network] && liveSSHDockerPreflightOverride[host] && liveSSHDockerPreflightOverride[context] && liveSSHDockerPreflightOverride[config] && record == fmt.Sprintf("%s socket=%s container=%s network=%s docker-host=%s docker-context=%s docker-config=%s\n", liveSSHDockerPreflightMarker, socket, container, network, host, context, config)
 }
 
 func livePostCreateSnapshotRecord(record string) bool {
@@ -1956,6 +2020,45 @@ func TestLiveSSHProbeFailureStageReportsOnlyFixedClasses(t *testing.T) {
 				t.Fatalf("liveSSHProbeFailureStage() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestLiveSSHDockerPreflightUsesFixedSSHTransportAndRedactsOutput(t *testing.T) {
+	if got := liveSSHDockerPreflightArgs("live-data"); !slices.Equal(got, []string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "--", "live-data", "/bin/sh -c '" + liveShellQuote(liveSSHDockerPreflightScript) + "' fixed-argv0"}) {
+		t.Fatalf("argv = %#v", got)
+	}
+	source := string(mustRead(t, filepath.Join(repositoryRoot(t), "internal", "openssh", "openssh.go")))
+	for _, want := range liveSSHDockerPreflightArgs("live-data")[:len(liveSSHDockerPreflightArgs("live-data"))-2] {
+		if want != "live-data" && !strings.Contains(source, strconv.Quote(want)) {
+			t.Fatalf("production SSH transport changed; missing %q", want)
+		}
+	}
+	if !strings.Contains(liveSSHDockerPreflightScript, `test -S /var/run/docker.sock`) || !strings.Contains(liveSSHDockerPreflightScript, `docker container ls --all --filter label=sub2api.host --format '{{.Names}}' >/dev/null 2>&1`) || !strings.Contains(liveSSHDockerPreflightScript, `docker network ls --filter label=sub2api.host --format '{{.Name}}' >/dev/null 2>&1`) {
+		t.Fatal("preflight does not use fixed plain Docker discovery")
+	}
+	if strings.Contains(liveSSHDockerPreflightScript, "-H") || strings.Contains(liveSSHDockerPreflightScript, `"$DOCKER_`) {
+		t.Fatal("preflight script leaks override values or changes Docker transport")
+	}
+}
+
+func TestLiveSSHDockerPreflightRecordAndCaptureFailClosed(t *testing.T) {
+	good := "live ssh docker preflight: socket=present container=ok network=ok docker-host=unset docker-context=unset docker-config=unset\n"
+	if !liveSSHDockerPreflightRecord(good) {
+		t.Fatal("good preflight rejected")
+	}
+	for _, input := range []string{
+		"prefix " + good,
+		"live ssh docker preflight: socket=present container=ok network=ok docker-host=set docker-context=unset docker-config=unset canary\n",
+		"live ssh docker preflight: socket=bad container=ok network=ok docker-host=unset docker-context=unset docker-config=unset\n",
+		strings.Repeat("x", 161) + good,
+		good + good,
+	} {
+		capture := newLiveRecordCapture()
+		_, _ = capture.Write([]byte(input))
+		var out bytes.Buffer
+		if capture.forward(&out) || out.String() != "live observer: observer-error\n" {
+			t.Fatalf("unsafe preflight record forwarded: %q", out.String())
+		}
 	}
 }
 

@@ -55,9 +55,10 @@ function parseLiveRecords(records: unknown[], parser: "diagnostic" | "candidate"
 
 const livePass = { Test: liveTest, Action: "pass" };
 const liveOutput = (Output: string) => ({ Test: liveTest, Output });
+const goodPreflight = "live ssh docker preflight: socket=present container=ok network=ok docker-host=unset docker-context=unset docker-config=unset\n";
 
 function validLiveRecords(): unknown[] {
-  return liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`));
+  return [liveOutput(goodPreflight), ...liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`))];
 }
 
 describe("Task4 CI contracts", () => {
@@ -301,6 +302,23 @@ describe("Task4 CI contracts", () => {
       expect(parseLiveRecords(records, "diagnostic")).toBe(1);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
+  });
+
+  it("requires one good SSH-child Docker preflight for a candidate pass", () => {
+    expect(workflow).toContain("live ssh docker preflight:");
+    const valid = [...validLiveRecords(), livePass];
+    expect(parseLiveRecords(valid, "diagnostic")).toBe(0);
+    expect(parseLiveRecords(valid, "candidate")).toBe(0);
+    for (const output of [
+      "live ssh docker preflight: socket=missing container=failed network=failed docker-host=set docker-context=set docker-config=set\n",
+      "prefix " + goodPreflight,
+      goodPreflight + goodPreflight,
+    ]) {
+      const records = [...liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`)), liveOutput(output), livePass];
+      expect(parseLiveRecords(records, "diagnostic")).toBe(output.includes("prefix") || output === goodPreflight + goodPreflight ? 1 : 0);
+      expect(parseLiveRecords(records, "candidate")).toBe(1);
+    }
+    expect(parseLiveRecords([...liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`)), livePass], "candidate")).toBe(1);
   });
 
   it("keeps fixed observer diagnostics while rejecting them from a candidate pass", () => {
