@@ -438,15 +438,17 @@ describe("Task4 CI contracts", () => {
     const categories = ["ok", "timeout", "exit-1", "exit-126", "exit-127", "exit-other", "failed"];
     const absoluteErrors = ["none", "empty", "not-found", "permission", "cgroup", "namespace", "rootfs", "runtime", "daemon", "unknown"];
     const rootfsCategories = ["present", "absent", "nonregular", "nonexecutable", "unavailable"];
-    for (const [exec, absolute, absoluteError, rootfs, direct, directError] of [
-      ...categories.map((exec) => [exec, "ok", "none", "unavailable", "failed", "unknown"]),
-      ...categories.slice(1).map((absolute) => ["ok", absolute, "none", "unavailable", "failed", "unknown"]),
-      ...absoluteErrors.map((absoluteError) => ["ok", "exit-127", absoluteError, "unavailable", "failed", "unknown"]),
-      ...rootfsCategories.map((rootfs) => ["ok", "exit-127", "empty", rootfs, "failed", "unknown"]),
-      ...categories.map((direct) => ["ok", "exit-127", "empty", "present", direct, direct === "ok" ? "none" : "unknown"]),
-      ...absoluteErrors.map((directError) => ["ok", "exit-127", "empty", "present", "exit-127", directError]),
+    const children = ["ran", "not-run", "timeout", "invalid", "failed"];
+    for (const [exec, absolute, absoluteError, child, rootfs, direct, directError] of [
+      ...categories.map((exec) => [exec, "ok", "none", "ran", "unavailable", "failed", "unknown"]),
+      ...categories.slice(1).map((absolute) => ["ok", absolute, "none", "ran", "unavailable", "failed", "unknown"]),
+      ...absoluteErrors.map((absoluteError) => ["ok", "exit-127", absoluteError, "ran", "unavailable", "failed", "unknown"]),
+      ...children.map((child) => ["ok", "exit-127", "empty", child, "unavailable", "failed", "unknown"]),
+      ...rootfsCategories.map((rootfs) => ["ok", "exit-127", "empty", "ran", rootfs, "failed", "unknown"]),
+      ...categories.map((direct) => ["ok", "exit-127", "empty", "ran", "present", direct, direct === "ok" ? "none" : "unknown"]),
+      ...absoluteErrors.map((directError) => ["ok", "exit-127", "empty", "ran", "present", "exit-127", directError]),
     ]) {
-      const output = `live postgres container: exec=${exec} absolute=${absolute} absolute-error=${absoluteError} rootfs=${rootfs} direct=${direct} direct-error=${directError} state=running restarts=zero oom=no error=absent\n`;
+      const output = `live postgres container: exec=${exec} absolute=${absolute} absolute-error=${absoluteError} child=${child} rootfs=${rootfs} direct=${direct} direct-error=${directError} state=running restarts=zero oom=no error=absent\n`;
       const records = [...validLiveRecords(), liveOutput(output), livePass];
       expect(parseLiveRecords(records, "diagnostic")).toBe(0);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
@@ -461,12 +463,15 @@ describe("Task4 CI contracts", () => {
       "live postgres container: exec=ok absolute=ok absolute-error=none direct=failed direct-error=unknown rootfs=unavailable state=running restarts=zero oom=no error=absent\n",
       "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=arbitrary direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
       "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=arbitrary state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none child=arbitrary rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable child=ran direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none child=ran child=ran rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
       "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\nlive postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
     ]) {
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
     }
-  });
+  }, 15000);
 
   it("rejects provider failure markers only in the success-only candidate parser", () => {
     const valid = validLiveRecords();
