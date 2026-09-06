@@ -378,12 +378,12 @@ jobs:
               nextMilestone++;
             }
             if (event.Output.includes('live observer:')) {
-              if (event.Output !== 'live observer: observer-error\n' || observer !== 'ok') throw Error('invalid live observer marker');
-              observer = 'observer-error';
+              if (!['live observer: observer-error\n','live observer: observer-inconclusive\n'].includes(event.Output) || observer !== 'ok') throw Error('invalid live observer marker');
+              observer = event.Output.trim().slice('live observer: '.length);
             }
           }
 
-          if (terminal === 'pass' && (nextMilestone !== milestones.length || milestone !== milestones.at(-1) || observer !== 'ok')) throw Error('live observer evidence incomplete');
+          if (terminal === 'pass' && (nextMilestone !== milestones.length || milestone !== milestones.at(-1))) throw Error('live observer evidence incomplete');
           console.log(`${test}: ${terminal ?? 'absent'}`);
           console.log(`${test} stage: ${stage ?? 'none'}`);
           console.log(`${test} milestone: ${milestone ?? 'none'}`);

@@ -280,10 +280,17 @@ describe("Task4 CI contracts", () => {
       [liveOutput("live milestone: unknown\n"), livePass],
       [...valid, liveOutput("live milestone: redis-ready\n"), livePass],
       [...valid, liveOutput("live milestone: undefined\n"), livePass],
-      [...valid, liveOutput("live observer: observer-error\n"), livePass],
       [...valid, livePass, livePass],
     ]) {
       expect(parseLiveRecords(records, "diagnostic")).toBe(1);
+      expect(parseLiveRecords(records, "candidate")).toBe(1);
+    }
+  });
+
+  it("keeps fixed observer diagnostics while rejecting them from a candidate pass", () => {
+    for (const status of ["observer-error", "observer-inconclusive"]) {
+      const records = [...validLiveRecords(), liveOutput(`live observer: ${status}\n`), livePass];
+      expect(parseLiveRecords(records, "diagnostic")).toBe(0);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
   });

@@ -17,13 +17,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
@@ -66,12 +70,12 @@ func TestProviderRuntimeCrossHostDataAdmissionLive(t *testing.T) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
 	cmd.WaitDelay = 4 * time.Minute
-	var output boundedBuffer
-	cmd.Stdout, cmd.Stderr = &output, &output
+	stdout, stderr := newLiveStdoutCapture(), newLiveRecordCapture()
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
-	recordsOK := forwardLiveObserverRecords(os.Stderr, output.Bytes())
+	recordsOK := stderr.forward(os.Stderr)
 	if err != nil {
-		reportLiveNamespaceFailure(liveFailureCategory(ctx, output.Bytes()))
+		reportLiveNamespaceFailure(liveFailureCategory(ctx, stderr.failureBytes(stdout.failureBytes(nil))))
 		t.Fatal("live namespace fixture failed")
 	}
 	if !recordsOK {
@@ -116,22 +120,25 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	resource, target, secrets, ok := liveCheckpointInputs(dataInput)
 	key, keyErr := base64.StdEncoding.DecodeString(ciKey)
 	revision, revisionErr := hostcontract.TargetRevision(hostcontract.RevisionKey(key), resource, target, secrets)
-	if !ok || keyErr != nil || revisionErr != nil || resource != (hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}) {
+	prior, priorErr := hostcontract.TargetRevision(hostcontract.RevisionKey(key), resource, hostcontract.Target{ReleaseArtifact: target.ReleaseArtifact}, hostcontract.Secrets{})
+	if !ok || keyErr != nil || revisionErr != nil || priorErr != nil || resource != (hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}) {
 		t.Fatal("invalid non-secret data observer facts")
 	}
-	observerFacts := liveDataObserverFacts{resource: resource, revision: revision, services: target.DataServices}
+	observerFacts := liveDataObserverFacts{resource: resource, revision: revision, priorRevision: prior, machine: liveMachineIdentity("data"), release: target.ReleaseArtifact, services: target.DataServices}
 	observer := fixture.startLiveDataMilestoneObserver(ctx, observerFacts)
 	dataCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::data", Properties: rpcProperties(t, dataInput)})
 	observerResult := observer.stop()
 	if err != nil || dataCreated == nil || dataCreated.Id == "" {
 		reportLiveStage(liveDataCreateFailureStage(err))
-		if observerResult.observerError {
-			reportLiveObserverError()
-		}
+		reportLiveObserverStatus(liveCreateObserverStatus(false, observerResult))
 		t.Fatal("released Provider Create failed")
 	}
+	ownership, ownershipOK := liveCreateOwnership(unmarshalProperties(t, dataCreated.Properties))
+	observerResult = livePostCreateCompletion(true, ownership, ownershipOK, observerResult, func(ownership string, result liveMilestoneObserverResult) liveMilestoneObserverResult {
+		return fixture.liveDataCompletionObserved(ctx, observerFacts, ownership, result)
+	})
 	if !liveDataCreateObserved(observerResult) {
-		reportLiveObserverError()
+		reportLiveObserverStatus(liveCreateObserverStatus(true, observerResult))
 		t.Fatal("live milestone observer insufficient evidence")
 	}
 	reportLiveStage("data-ready-check")
@@ -650,8 +657,8 @@ func (f *liveFixture) sandboxBestEffort(host string, timeout time.Duration, name
 }
 
 type liveDataContainerExpectation struct {
-	kind, name, image, owner, target string
-	port                             int
+	kind, name, image, owner, target, ownership string
+	port                                        int
 }
 
 type liveContainerInspection struct {
@@ -662,6 +669,9 @@ type liveContainerInspection struct {
 type liveMilestoneObserverResult struct {
 	lastMilestone string
 	observerError bool
+	stateSeen     bool
+	ownership     string
+	milestones    int
 }
 
 func liveDataCreateObserved(result liveMilestoneObserverResult) bool {
@@ -681,27 +691,32 @@ func (o liveMilestoneObserver) run(ctx context.Context) liveMilestoneObserverRes
 	next := 0
 	ticker := time.NewTicker(o.poll)
 	defer ticker.Stop()
-	stateSeen := false
 	var expectedState []liveDataContainerExpectation
 	for {
 		expectations, present, err := o.expectations(ctx)
 		if err != nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return result
+			}
 			result.observerError = true
 			return result
 		}
 		if !present {
-			if stateSeen {
+			if result.stateSeen {
 				result.observerError = true
 				return result
 			}
 		} else if len(expectations) != 2 {
 			result.observerError = true
 			return result
-		} else if stateSeen && !sameLiveDataContainerExpectations(expectations, expectedState) {
+		} else if result.stateSeen && !slices.Equal(expectations, expectedState) {
 			result.observerError = true
 			return result
 		} else {
-			stateSeen = true
+			result.stateSeen = true
+			if result.ownership == "" {
+				result.ownership = expectations[0].ownership
+			}
 			expectedState = expectations
 		}
 		for expectations != nil && next < len(liveMilestones) {
@@ -734,6 +749,7 @@ func (o liveMilestoneObserver) run(ctx context.Context) liveMilestoneObserverRes
 				o.emit(result.lastMilestone)
 			}
 			next++
+			result.milestones = next
 		}
 		if next == len(liveMilestones) {
 			return result
@@ -745,18 +761,6 @@ func (o liveMilestoneObserver) run(ctx context.Context) liveMilestoneObserverRes
 		case <-ticker.C:
 		}
 	}
-}
-
-func sameLiveDataContainerExpectations(got, want []liveDataContainerExpectation) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func exactLiveContainer(got liveContainerInspection, want liveDataContainerExpectation) bool {
@@ -773,10 +777,29 @@ func (o liveDataMilestoneObserver) stop() liveMilestoneObserverResult {
 	return <-o.done
 }
 
+func liveCreateObserverStatus(createSucceeded bool, result liveMilestoneObserverResult) string {
+	if createSucceeded && liveDataCreateObserved(result) {
+		return ""
+	}
+	if result.observerError {
+		return "observer-error"
+	}
+	return "observer-inconclusive"
+}
+
+func reportLiveObserverStatus(status string) {
+	if status != "" {
+		_, _ = os.Stderr.WriteString("live observer: " + status + "\n")
+	}
+}
+
 type liveDataObserverFacts struct {
-	resource hostcontract.ResourceIdentity
-	revision string
-	services []hostcontract.LocalDataServiceTarget
+	resource      hostcontract.ResourceIdentity
+	revision      string
+	priorRevision string
+	machine       hostcontract.MachineIdentity
+	release       string
+	services      []hostcontract.LocalDataServiceTarget
 }
 
 func (f *liveFixture) startLiveDataMilestoneObserver(parent context.Context, facts liveDataObserverFacts) liveDataMilestoneObserver {
@@ -790,10 +813,15 @@ func (f *liveFixture) startLiveDataMilestoneObserver(parent context.Context, fac
 }
 
 func (f *liveFixture) liveDataContainerExpectations(ctx context.Context, facts liveDataObserverFacts) ([]liveDataContainerExpectation, bool, error) {
-	state, present, err := f.liveDataObserverState(ctx, facts.resource, facts.revision)
+	state, present, err := f.liveDataObserverState(ctx, facts)
 	if err != nil || !present {
 		return nil, present, err
 	}
+	expectations, err := liveDataContainerExpectationsForState(facts, state)
+	return expectations, true, err
+}
+
+func liveDataContainerExpectationsForState(facts liveDataObserverFacts, state liveObserverState) ([]liveDataContainerExpectation, error) {
 	expectations := make([]liveDataContainerExpectation, 0, 2)
 	for _, service := range facts.services {
 		image := ""
@@ -803,25 +831,27 @@ func (f *liveFixture) liveDataContainerExpectations(ctx context.Context, facts l
 		case "redis":
 			image = "redis:8-alpine"
 		default:
-			return nil, true, errors.New("invalid observer service")
+			return nil, errors.New("invalid observer service")
 		}
 		id := liveRuntimeToken("local-data", service.ID)
 		containerToken := liveRuntimeToken(facts.resource.Environment, facts.resource.ServerKey, state.ownership, "local-data", id, "live")
+		ownerToken := liveRuntimeToken(facts.resource.Environment, facts.resource.ServerKey, state.ownership, "local-data", id, "")
 		expectations = append(expectations, liveDataContainerExpectation{
 			kind: service.Type, name: "s2h-" + containerToken, image: image,
-			owner:  "s2h1:" + containerToken,
-			target: "s2ht1:" + liveRuntimeToken("local-data", id, "", state.revision, image, service.Type, strconv.Itoa(service.Port), strconv.FormatBool(service.Persistence)), port: service.Port,
+			owner:     "s2h1:" + ownerToken,
+			ownership: state.ownership,
+			target:    "s2ht1:" + liveRuntimeToken("local-data", id, "", state.revision, image, service.Type, strconv.Itoa(service.Port), strconv.FormatBool(service.Persistence)), port: service.Port,
 		})
 	}
 	if len(expectations) != 2 || expectations[0].kind != "postgres" || expectations[1].kind != "redis" {
-		return nil, true, errors.New("invalid observer expectations")
+		return nil, errors.New("invalid observer expectations")
 	}
-	return expectations, true, nil
+	return expectations, nil
 }
 
 type liveObserverState struct{ ownership, revision string }
 
-func (f *liveFixture) liveDataObserverState(ctx context.Context, resource hostcontract.ResourceIdentity, revision string) (liveObserverState, bool, error) {
+func (f *liveFixture) liveDataObserverState(ctx context.Context, facts liveDataObserverFacts) (liveObserverState, bool, error) {
 	b, err := f.sandboxOutputForObserver(ctx, "data", 3*time.Second, "sh", "-c", "test -e /var/lib/sub2api-host/state.json || exit 42; cat /var/lib/sub2api-host/state.json")
 	if err != nil {
 		if liveObserverStateAbsent(err) {
@@ -829,26 +859,188 @@ func (f *liveFixture) liveDataObserverState(ctx context.Context, resource hostco
 		}
 		return liveObserverState{}, false, err
 	}
-	return parseLiveDataObserverState(b, resource, revision)
+	return parseLiveDataObserverState(b, facts)
 }
 
-func parseLiveDataObserverState(b []byte, resource hostcontract.ResourceIdentity, revision string) (liveObserverState, bool, error) {
-	var state struct {
-		Resource  hostcontract.ResourceIdentity  `json:"resource"`
-		Ownership hostcontract.OwnershipIdentity `json:"ownership"`
-		Journal   *struct {
-			Status string `json:"status"`
-			Key    struct {
-				Resource       hostcontract.ResourceIdentity `json:"resource"`
-				Action         hostcontract.Action           `json:"action"`
-				TargetRevision string                        `json:"targetRevision"`
-			} `json:"key"`
-		} `json:"journal"`
-	}
-	if len(b) == 0 || json.Unmarshal(b, &state) != nil || state.Resource != resource || state.Ownership.Value == "" || state.Journal == nil || state.Journal.Key.Resource != resource || state.Journal.Key.Action != hostcontract.ActionReconcile || state.Journal.Status != "pending" || state.Journal.Key.TargetRevision != revision {
+func parseLiveDataObserverState(b []byte, facts liveDataObserverFacts) (liveObserverState, bool, error) {
+	state, err := decodeLiveObserverHostState(b)
+	if err != nil || !livePendingStateMatches(state, facts) {
 		return liveObserverState{}, false, errors.New("invalid observer state")
 	}
 	return liveObserverState{ownership: state.Ownership.Value, revision: state.Journal.Key.TargetRevision}, true, nil
+}
+
+func decodeLiveObserverHostState(b []byte) (hostruntime.State, error) {
+	if len(b) == 0 || len(b) > 1<<20 || liveJSONHasDuplicateKey(b) {
+		return hostruntime.State{}, errors.New("invalid observer state")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.DisallowUnknownFields()
+	var state hostruntime.State
+	if err := decoder.Decode(&state); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return hostruntime.State{}, errors.New("invalid observer state")
+	}
+	return state, nil
+}
+
+func liveJSONHasDuplicateKey(b []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	var value func() bool
+	value = func() bool {
+		token, err := decoder.Token()
+		if err != nil {
+			return true
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return false
+		}
+		switch delim {
+		case '{':
+			seen := map[string]bool{}
+			for decoder.More() {
+				key, err := decoder.Token()
+				name, ok := key.(string)
+				if err != nil || !ok || seen[name] {
+					return true
+				}
+				seen[name] = true
+				if value() {
+					return true
+				}
+			}
+			_, err := decoder.Token()
+			return err != nil
+		case '[':
+			for decoder.More() && !value() {
+			}
+			_, err := decoder.Token()
+			return err != nil
+		default:
+			return true
+		}
+	}
+	if value() {
+		return true
+	}
+	_, err := decoder.Token()
+	return err != io.EOF
+}
+
+func livePendingStateMatches(state hostruntime.State, facts liveDataObserverFacts) bool {
+	ownership := state.Ownership.Value
+	if ownership == "" || !liveObserverHostStateMatches(state, facts, ownership, facts.priorRevision) || len(state.Observation.Apps) != 0 || len(state.Observation.Data) != 0 {
+		return false
+	}
+	journal := state.Journal
+	return journal.Status == "pending" && journal.Result == nil && journal.Approval == nil && liveReconcileKeyMatches(journal.Key, facts)
+}
+
+func (f *liveFixture) liveDataCompletionObserved(parent context.Context, facts liveDataObserverFacts, ownership string, result liveMilestoneObserverResult) liveMilestoneObserverResult {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	b, err := f.sandboxOutputForObserver(ctx, "data", 3*time.Second, "sh", "-c", "cat /var/lib/sub2api-host/state.json")
+	if err != nil {
+		result.observerError = true
+		return result
+	}
+	return liveDataCompletionResult(facts, ownership, result, b, liveDataContainerExpectationsForState, f.inspectLiveDataContainer, f.liveDataReady, reportLiveMilestone, ctx)
+}
+
+func parseLiveCompletedObserverState(b []byte, facts liveDataObserverFacts, ownership string) (liveObserverState, bool, error) {
+	state, err := decodeLiveObserverHostState(b)
+	if err != nil || !liveCompletedHostStateMatches(state, facts, ownership) {
+		return liveObserverState{}, false, errors.New("invalid completed observer state")
+	}
+	return liveObserverState{ownership: state.Ownership.Value, revision: state.Journal.Key.TargetRevision}, true, nil
+}
+
+func liveCompletedHostStateMatches(state hostruntime.State, facts liveDataObserverFacts, ownership string) bool {
+	if !liveObserverHostStateMatches(state, facts, ownership, facts.revision) || len(state.Observation.Apps) != 0 || !exactLiveDataObservations(facts, ownership, state.Observation.Data) {
+		return false
+	}
+	journal := state.Journal
+	result := journal.Result
+	return journal.Status == "complete" && journal.Approval == nil && liveReconcileKeyMatches(journal.Key, facts) && result != nil && result.Status == hostprotocol.ResultApplied && result.AppliedRevision == facts.revision && result.Observation == nil && result.Machine == nil && result.Ownership == nil && result.Retirement == nil && result.OperationEvidence == nil
+}
+
+func liveObserverHostStateMatches(state hostruntime.State, facts liveDataObserverFacts, ownership, appliedRevision string) bool {
+	observation := state.Observation
+	return ownership != "" &&
+		state.Version == 1 &&
+		state.Resource == facts.resource &&
+		state.Machine == facts.machine &&
+		state.Ownership.Value == ownership &&
+		state.AppliedRevision == appliedRevision &&
+		state.Journal != nil &&
+		state.LastOperation == nil &&
+		state.Retirement == nil &&
+		observation.Validate() == nil &&
+		observation.Ready &&
+		!observation.Drifted &&
+		observation.Machine == facts.machine &&
+		observation.Ownership == state.Ownership &&
+		observation.HostRelease == facts.release &&
+		observation.AppliedRevision == appliedRevision
+}
+
+func liveReconcileKeyMatches(key hostcontract.OperationKey, facts liveDataObserverFacts) bool {
+	return facts.priorRevision != "" &&
+		key.Resource == facts.resource &&
+		key.Action == hostcontract.ActionReconcile &&
+		key.TargetRevision == facts.revision &&
+		key.PriorAppliedRevision == facts.priorRevision &&
+		key.PriorObservation == "" &&
+		key.Validate() == nil
+}
+
+func livePostCreateCompletion(createSucceeded bool, ownership string, ownershipOK bool, result liveMilestoneObserverResult, completion func(string, liveMilestoneObserverResult) liveMilestoneObserverResult) liveMilestoneObserverResult {
+	if !createSucceeded {
+		return result
+	}
+	if !ownershipOK {
+		result.observerError = true
+		return result
+	}
+	if liveDataCreateObserved(result) {
+		if !result.stateSeen || result.ownership != ownership {
+			result.observerError = true
+		}
+		return result
+	}
+	return completion(ownership, result)
+}
+
+func liveDataCompletionResult(facts liveDataObserverFacts, ownership string, result liveMilestoneObserverResult, stateBytes []byte, expectations func(liveDataObserverFacts, liveObserverState) ([]liveDataContainerExpectation, error), inspect func(context.Context, liveDataContainerExpectation) (liveContainerInspection, bool, error), ready func(context.Context, liveDataContainerExpectation) (bool, error), emit func(string), ctx context.Context) liveMilestoneObserverResult {
+	state, err := decodeLiveObserverHostState(stateBytes)
+	if err != nil || !liveCompletedHostStateMatches(state, facts, ownership) {
+		result.observerError = true
+		return result
+	}
+	want, err := expectations(facts, liveObserverState{ownership: state.Ownership.Value, revision: state.Journal.Key.TargetRevision})
+	if err != nil {
+		result.observerError = true
+		return result
+	}
+	for i, expected := range want {
+		got, present, err := inspect(ctx, expected)
+		if err != nil || !present || !exactLiveContainer(got, expected) {
+			result.observerError = true
+			return result
+		}
+		ok, err := ready(ctx, expected)
+		if err != nil || !ok {
+			result.observerError = true
+			return result
+		}
+		for result.milestones < i*2+2 {
+			result.lastMilestone = liveMilestones[result.milestones]
+			emit(result.lastMilestone)
+			result.milestones++
+		}
+	}
+	result.observerError, result.stateSeen, result.ownership = false, true, ownership
+	return result
 }
 
 func (f *liveFixture) inspectLiveDataContainer(ctx context.Context, expected liveDataContainerExpectation) (liveContainerInspection, bool, error) {
@@ -1009,6 +1201,24 @@ func (f *liveFixture) createReady(t *testing.T, created *pulumirpc.CreateRespons
 	return len(observation.Data) == 0
 }
 
+func liveCreateOwnership(checkpoint property.Map) (string, bool) {
+	value, ok := checkpoint.GetOk("ownership")
+	if !ok || value.Secret() || value.HasComputed() || value.IsNull() || !value.IsMap() {
+		return "", false
+	}
+	object := value.AsMap()
+	ownership, ok := object.GetOk("value")
+	if !ok || ownership.Secret() || ownership.HasComputed() || ownership.IsNull() || !ownership.IsString() || ownership.AsString() == "" {
+		return "", false
+	}
+	fields := 0
+	object.All(func(_ string, _ property.Value) bool { fields++; return true })
+	if fields != 1 {
+		return "", false
+	}
+	return ownership.AsString(), true
+}
+
 func liveCheckpointInputs(inputs property.Map) (hostcontract.ResourceIdentity, hostcontract.Target, hostcontract.Secrets, bool) {
 	var resource hostcontract.ResourceIdentity
 	var target hostcontract.Target
@@ -1058,6 +1268,24 @@ func exactDataObservations(got []hostcontract.DataObservation, target []hostcont
 	}
 	return seen["postgres"] && seen["redis"]
 }
+
+func exactLiveDataObservations(facts liveDataObserverFacts, ownership string, got []hostcontract.DataObservation) bool {
+	expected, err := liveDataContainerExpectationsForState(facts, liveObserverState{ownership: ownership, revision: facts.revision})
+	if err != nil || len(got) != len(expected) {
+		return false
+	}
+	for i, observation := range got {
+		want := expected[i]
+		database, tlsServerName := "sub2api", want.name
+		if want.kind == "redis" {
+			database, tlsServerName = "0", ""
+		}
+		if !observation.Ready || observation.Identity.Kind != want.kind || observation.Identity.ProviderID != want.name || observation.Identity.Endpoint != want.name || observation.Identity.Port != want.port || observation.Identity.Database != database || observation.Identity.TLSMode != "" || observation.Identity.TLSServerName != tlsServerName {
+			return false
+		}
+	}
+	return true
+}
 func containsLiveCredential(value []byte) bool {
 	for _, canary := range []string{"LivePgAdmin_123", "LivePgClient_123", "LiveRedisAdmin_123", "LiveRedisClient_123"} {
 		if bytes.Contains(value, []byte(canary)) {
@@ -1098,6 +1326,128 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *boundedBuffer) Bytes() []byte { return append([]byte(nil), b.data...) }
+
+type liveRecordCapture struct {
+	mu            sync.Mutex
+	fallback      boundedBuffer
+	line          [160]byte
+	lineLen       int
+	overflow      bool
+	marker        bool
+	rolling       [32]byte
+	rollLen       int
+	stage         string
+	records       []string
+	next          int
+	observerSeen  bool
+	invalid       bool
+	acceptRecords bool
+}
+
+func newLiveRecordCapture() *liveRecordCapture { return &liveRecordCapture{acceptRecords: true} }
+
+func newLiveStdoutCapture() *liveRecordCapture { return &liveRecordCapture{} }
+
+func (c *liveRecordCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, _ = c.fallback.Write(p)
+	for _, b := range p {
+		if b == '\n' {
+			c.finishLine()
+			continue
+		}
+		if c.lineLen < len(c.line) {
+			c.line[c.lineLen] = b
+			c.lineLen++
+		} else {
+			c.overflow = true
+		}
+		if c.rollLen < len(c.rolling) {
+			c.rolling[c.rollLen] = b
+			c.rollLen++
+		} else {
+			copy(c.rolling[:], c.rolling[1:])
+			c.rolling[len(c.rolling)-1] = b
+		}
+		c.marker = c.marker || c.hasMarker()
+	}
+	return len(p), nil
+}
+
+func (c *liveRecordCapture) hasMarker() bool {
+	b := c.rolling[:c.rollLen]
+	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:"))
+}
+
+func (c *liveRecordCapture) finishLine() {
+	record := string(c.line[:c.lineLen]) + "\n"
+	marker := c.marker
+	if marker && !c.acceptRecords {
+		c.invalid = true
+	}
+	if c.overflow && marker {
+		c.invalid = true
+	} else if !c.overflow {
+		if strings.Contains(record, "SUB2API_LIVE_STAGE=") {
+			stage, ok := strings.CutPrefix(record, "SUB2API_LIVE_STAGE=")
+			if !ok || liveFailureCategory(context.Background(), []byte(record)) != strings.TrimSuffix(stage, "\n") {
+				c.invalid = true
+			} else {
+				c.stage = strings.TrimSuffix(stage, "\n")
+			}
+		}
+		if strings.Contains(record, "live milestone:") {
+			expected := ""
+			if c.next < len(liveMilestones) {
+				expected = "live milestone: " + liveMilestones[c.next] + "\n"
+			}
+			if record != expected {
+				c.invalid = true
+			} else {
+				c.records = append(c.records, record)
+				c.next++
+			}
+		}
+		if strings.Contains(record, "live observer:") {
+			if (record != "live observer: observer-error\n" && record != "live observer: observer-inconclusive\n") || c.observerSeen {
+				c.invalid = true
+			} else {
+				c.observerSeen = true
+				c.records = append(c.records, record)
+			}
+		}
+	}
+	c.lineLen, c.overflow, c.marker, c.rollLen = 0, false, false, 0
+}
+
+func (c *liveRecordCapture) failureBytes(stdout []byte) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stage != "" {
+		return []byte("SUB2API_LIVE_STAGE=" + c.stage + "\n")
+	}
+	if out := c.fallback.Bytes(); len(out) != 0 {
+		return out
+	}
+	return stdout
+}
+
+func (c *liveRecordCapture) forward(w io.Writer) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lineLen != 0 && c.marker {
+		c.invalid = true
+	}
+	if c.invalid {
+		_, _ = io.WriteString(w, "live observer: observer-error\n")
+		return false
+	}
+	for _, record := range c.records {
+		_, _ = io.WriteString(w, record)
+	}
+	return true
+}
 
 type liveProvider struct {
 	client pulumirpc.ResourceProviderClient
@@ -1337,41 +1687,8 @@ func reportLiveMilestone(milestone string) {
 	_, _ = os.Stderr.WriteString("live milestone: " + milestone + "\n")
 }
 
-func reportLiveObserverError() {
-	_, _ = os.Stderr.WriteString("live observer: observer-error\n")
-}
-
 func reportLiveNamespaceFailure(stage string) {
 	_, _ = os.Stderr.WriteString("live namespace fixture failed: " + stage + "\n")
-}
-
-func forwardLiveObserverRecords(w io.Writer, output []byte) bool {
-	const observerError = "live observer: observer-error\n"
-	var records []string
-	nextMilestone := 0
-	observerSeen := false
-	for _, record := range strings.SplitAfter(string(output), "\n") {
-		if strings.Contains(record, "live milestone:") {
-			if nextMilestone == len(liveMilestones) || record != "live milestone: "+liveMilestones[nextMilestone]+"\n" {
-				_, _ = io.WriteString(w, observerError)
-				return false
-			}
-			records = append(records, record)
-			nextMilestone++
-		}
-		if strings.Contains(record, "live observer:") {
-			if record != observerError || observerSeen {
-				_, _ = io.WriteString(w, observerError)
-				return false
-			}
-			records = append(records, observerError)
-			observerSeen = true
-		}
-	}
-	for _, record := range records {
-		_, _ = io.WriteString(w, record)
-	}
-	return true
 }
 
 func liveDataCreateFailureStage(err error) string {
@@ -1565,46 +1882,12 @@ func TestLiveMilestoneObserverRequiresExactIdentityAndJoinsBeforeCleanup(t *test
 	}
 }
 
-func TestLiveOuterObserverForwarderEmitsOnlyOrderedFixedRecords(t *testing.T) {
-	const canary = "provider ssh docker sql credential canary"
-	valid := []byte(canary + "\n" +
-		"live milestone: postgres-owned-container\n" +
-		"arbitrary inner output\n" +
-		"live milestone: postgres-ready\n" +
-		"live milestone: redis-owned-container\n" +
-		"live milestone: redis-ready\n")
-	for _, test := range []struct {
-		name  string
-		input []byte
-		want  string
-		ok    bool
-	}{
-		{"valid", valid, "live milestone: postgres-owned-container\nlive milestone: postgres-ready\nlive milestone: redis-owned-container\nlive milestone: redis-ready\n", true},
-		{"observer error", []byte("live observer: observer-error\n"), "live observer: observer-error\n", true},
-		{"duplicate", append(valid, []byte("live milestone: redis-ready\n")...), "live observer: observer-error\n", false},
-		{"out of order", []byte("live milestone: redis-ready\n"), "live observer: observer-error\n", false},
-		{"malformed", []byte("live milestone: postgres-ready extra\n"), "live observer: observer-error\n", false},
-		{"unknown", []byte("live milestone: unknown\n"), "live observer: observer-error\n", false},
-		{"unanchored", []byte("prefix live milestone: postgres-owned-container\n"), "live observer: observer-error\n", false},
-		{"missing newline", []byte("live milestone: postgres-owned-container"), "live observer: observer-error\n", false},
-		{"duplicate observer", []byte("live observer: observer-error\nlive observer: observer-error\n"), "live observer: observer-error\n", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var got bytes.Buffer
-			if ok := forwardLiveObserverRecords(&got, test.input); ok != test.ok || got.String() != test.want {
-				t.Fatalf("forwardLiveObserverRecords() = (%q, %v), want (%q, %v)", got.String(), ok, test.want, test.ok)
-			}
-			if strings.Contains(got.String(), canary) || strings.Contains(got.String(), "arbitrary inner output") {
-				t.Fatalf("forwarded arbitrary inner output: %q", got.String())
-			}
-		})
-	}
-}
-
 func TestLiveDataObserverStateRequiresCurrentPendingReconcile(t *testing.T) {
 	resource := hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}
-	revision := "tr1:key:current"
-	valid := `{"resource":{"environment":"live","serverKey":"data"},"ownership":{"value":"owner"},"journal":{"status":"pending","key":{"resource":{"environment":"live","serverKey":"data"},"action":"reconcile","targetRevision":"tr1:key:current"}}}`
+	revision := liveTestRevision('c')
+	prior := liveTestRevision('b')
+	facts := liveDataObserverFacts{resource: resource, revision: revision, priorRevision: prior, machine: liveMachineIdentity("data"), release: "release"}
+	valid := string(livePendingStateJSON(t, facts, "owner"))
 	for _, test := range []struct {
 		name, state string
 		valid       bool
@@ -1614,10 +1897,29 @@ func TestLiveDataObserverStateRequiresCurrentPendingReconcile(t *testing.T) {
 		{name: "wrong resource", state: strings.Replace(valid, `"data"`, `"other"`, 1)},
 		{name: "wrong action", state: strings.Replace(valid, `"reconcile"`, `"retire-preserve-data"`, 1)},
 		{name: "complete", state: strings.Replace(valid, `"pending"`, `"complete"`, 1)},
-		{name: "stale revision", state: strings.Replace(valid, revision, "tr1:key:stale", 1)},
+		{name: "stale revision", state: strings.Replace(valid, revision, liveTestRevision('d'), 1)},
+		{name: "wrong version", state: strings.Replace(valid, `"version":1`, `"version":2`, 1)},
+		{name: "empty machine", state: strings.Replace(valid, `"machine":{"value":"`+facts.machine.Value+`"}`, `"machine":{"value":""}`, 1)},
+		{name: "wrong applied revision", state: strings.Replace(valid, `"appliedRevision":"`+prior+`"`, `"appliedRevision":"`+liveTestRevision('d')+`"`, 1)},
+		{name: "observation not ready", state: strings.Replace(valid, `"ready":true`, `"ready":false`, 1)},
+		{name: "observation mismatch", state: strings.Replace(valid, `"machine":{"value":"`+facts.machine.Value+`"},"ownership"`, `"machine":{"value":"other"},"ownership"`, 1)},
+		{name: "wrong expected machine", state: strings.ReplaceAll(valid, `"machine":{"value":"`+facts.machine.Value+`"}`, `"machine":{"value":"other"}`)},
+		{name: "wrong release", state: strings.Replace(valid, `"hostRelease":"release"`, `"hostRelease":"other"`, 1)},
+		{name: "drifted", state: strings.Replace(valid, `"ready":true`, `"drifted":true,"ready":true`, 1)},
+		{name: "extra app", state: strings.Replace(valid, `,"journal":`, `,"observation":{"apps":[{"id":"extra","activeImage":"extra","ready":true}]},"journal":`, 1)},
+		{name: "extra data", state: strings.Replace(valid, `,"journal":`, `,"observation":{"data":[{"identity":{"kind":"extra","providerId":"extra","endpoint":"extra","port":1},"ready":true}]},"journal":`, 1)},
+		{name: "stale prior", state: strings.Replace(valid, `"priorAppliedRevision":"`+prior+`"`, `"priorAppliedRevision":"`+liveTestRevision('d')+`"`, 1)},
+		{name: "result", state: strings.Replace(valid, `"status":"pending"`, `"status":"pending","result":{"status":"applied","appliedRevision":"`+revision+`"}`, 1)},
+		{name: "approval", state: strings.Replace(valid, `"status":"pending"`, `"status":"pending","approval":{}`, 1)},
+		{name: "last operation", state: strings.Replace(valid, `"journal":`, `"lastOperation":{},"journal":`, 1)},
+		{name: "retirement", state: strings.Replace(valid, `"journal":`, `"retirement":{},"journal":`, 1)},
+		{name: "unknown", state: strings.Replace(valid, `"version":1`, `"version":1,"unknown":true`, 1)},
+		{name: "duplicate", state: strings.Replace(valid, `"version":1`, `"version":1,"version":1`, 1)},
+		{name: "trailing", state: valid + ` {}`},
+		{name: "oversized", state: valid + strings.Repeat(" ", 1<<20)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, present, err := parseLiveDataObserverState([]byte(test.state), resource, revision)
+			_, present, err := parseLiveDataObserverState([]byte(test.state), facts)
 			if test.valid {
 				if err != nil || !present {
 					t.Fatalf("valid state = present %v, err %v", present, err)
@@ -1755,6 +2057,336 @@ func TestLiveDataCreateRequiresRedisReadyObserverResult(t *testing.T) {
 			t.Fatalf("liveDataCreateObserved(%#v) = %v, want %v", test.result, got, test.want)
 		}
 	}
+}
+
+func TestLiveFailedCreateAlwaysEmitsOneObserverStatus(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		createSucceeded bool
+		result          liveMilestoneObserverResult
+		want            string
+	}{
+		{"failed after redis ready", false, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone}, "observer-inconclusive"},
+		{"failed observer error", false, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone, observerError: true}, "observer-error"},
+		{"successful full observation", true, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone}, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := liveCreateObserverStatus(test.createSucceeded, test.result); got != test.want {
+				t.Fatalf("status = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLiveDataObserverMatchesFrozenRunLocalOwnershipFormula(t *testing.T) {
+	host := mustRead(t, filepath.Join(repositoryRoot(t), "internal", "hostruntime", "reconcile.go"))
+	if !bytes.Contains(host, []byte(`ownershipLabelFor(s.Resource, s.Ownership, o.Role, o.AppToken, "")`)) || !bytes.Contains(host, []byte(`func nameForLocal(s State, token string) string { return objectName(s, "local-data", token, "live") }`)) {
+		t.Fatal("frozen Host runLocal ownership/name slots changed")
+	}
+	facts := liveTestDataObserverFacts(hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}, "revision")
+	expectations, err := liveDataContainerExpectationsForState(facts, liveObserverState{ownership: "owner", revision: "revision"})
+	if err != nil || len(expectations) != 2 {
+		t.Fatalf("expectations = %#v, %v", expectations, err)
+	}
+	id := liveRuntimeToken("local-data", "postgres")
+	wantName := "s2h-" + liveRuntimeToken("live", "data", "owner", "local-data", id, "live")
+	wantOwner := "s2h1:" + liveRuntimeToken("live", "data", "owner", "local-data", id, "")
+	if expectations[0].name != wantName || expectations[0].owner != wantOwner || expectations[0].name == "s2h-"+strings.TrimPrefix(wantOwner, "s2h1:") {
+		t.Fatalf("local-data expectation = %#v", expectations[0])
+	}
+}
+
+func TestLiveOuterCaptureRetainsTrailingFixedRecordsAfterNoise(t *testing.T) {
+	output := newLiveRecordCapture()
+	_, _ = output.Write(append(bytes.Repeat([]byte("canary-noise"), 512), '\n'))
+	_, _ = output.Write([]byte("SUB2API_LIVE_STAGE=data-create-bootstrap-remote\n"))
+	for _, milestone := range liveMilestones {
+		_, _ = output.Write([]byte("live milestone: " + milestone + "\n"))
+	}
+	_, _ = output.Write([]byte("live observer: observer-error\n"))
+	if liveFailureCategory(context.Background(), output.failureBytes(nil)) != "data-create-bootstrap-remote" {
+		t.Fatal("trailing fixed stage was displaced by noise")
+	}
+	var got bytes.Buffer
+	want := "live milestone: " + strings.Join(liveMilestones[:], "\nlive milestone: ") + "\nlive observer: observer-error\n"
+	if ok := output.forward(&got); !ok || got.String() != want {
+		t.Fatalf("fixed records lost or raw output forwarded: %q", got.String())
+	}
+	if strings.Contains(got.String(), "canary-noise") {
+		t.Fatalf("raw canary forwarded: %q", got.String())
+	}
+}
+
+func TestLiveRecordCaptureSeparatesStreamsAndHandlesFragments(t *testing.T) {
+	stdout, stderr := newLiveStdoutCapture(), newLiveRecordCapture()
+	for _, part := range []string{"live milestone: postgres-", "owned-container\n"} {
+		_, _ = stderr.Write([]byte(part))
+	}
+	for _, part := range []string{"live milestone: postgres-", "ready\n", "live milestone: redis-owned-container\n", "live milestone: redis-ready\n"} {
+		_, _ = stderr.Write([]byte(part))
+	}
+	_, _ = stdout.Write([]byte("live milestone: postgres-owned-container\n"))
+	var got bytes.Buffer
+	if !stderr.forward(&got) || got.String() != "live milestone: postgres-owned-container\nlive milestone: postgres-ready\nlive milestone: redis-owned-container\nlive milestone: redis-ready\n" {
+		t.Fatalf("stderr records = %q", got.String())
+	}
+	var stdoutForwarded bytes.Buffer
+	if stdout.forward(&stdoutForwarded) || stdoutForwarded.String() != "live observer: observer-error\n" {
+		t.Fatalf("stdout marker was forwarded: %q", stdoutForwarded.String())
+	}
+}
+
+func TestLiveRecordCaptureFailsClosedForInvalidMarkers(t *testing.T) {
+	valid := []byte("live milestone: postgres-owned-container\nlive milestone: postgres-ready\nlive milestone: redis-owned-container\nlive milestone: redis-ready\n")
+	for _, test := range []struct {
+		name  string
+		input []byte
+	}{
+		{"oversized", append(bytes.Repeat([]byte("x"), 4097), []byte("live milestone: postgres-owned-container\n")...)},
+		{"unanchored", []byte("prefix live milestone: postgres-owned-container\n")},
+		{"duplicate", append(valid, []byte("live milestone: redis-ready\n")...)},
+		{"out of order", []byte("live milestone: redis-ready\n")},
+		{"malformed", []byte("live milestone: postgres-ready extra\n")},
+		{"unknown", []byte("live milestone: unknown\n")},
+		{"missing newline", []byte("live milestone: postgres-owned-container")},
+		{"observer then malformed milestone", []byte("live observer: observer-inconclusive\nmalformed live milestone: nope\n")},
+		{"duplicate observer", []byte("live observer: observer-error\nlive observer: observer-inconclusive\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capture := newLiveRecordCapture()
+			for _, part := range [][]byte{test.input[:len(test.input)/2], test.input[len(test.input)/2:]} {
+				_, _ = capture.Write(part)
+			}
+			var got bytes.Buffer
+			if capture.forward(&got) || got.String() != "live observer: observer-error\n" {
+				t.Fatalf("unsafe record = %q", got.String())
+			}
+		})
+	}
+}
+
+func TestLiveRecordCaptureStateIsBounded(t *testing.T) {
+	capture := newLiveRecordCapture()
+	_, _ = capture.Write(bytes.Repeat([]byte("noise"), 1<<20))
+	if capture.lineLen != len(capture.line) || capture.rollLen > len(capture.rolling) || len(capture.fallback.data) != 4096 {
+		t.Fatalf("unbounded capture state: line %d fallback %d", capture.lineLen, len(capture.fallback.data))
+	}
+}
+
+func TestLiveCompletedStateRequiresCreateOwnership(t *testing.T) {
+	resource := hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}
+	revision := liveTestRevision('c')
+	facts := liveTestDataObserverFacts(resource, revision)
+	valid := string(liveCompletedStateJSON(t, resource, revision, "owner"))
+	machine := liveMachineIdentity("data").Value
+	for _, test := range []struct {
+		name, state, owner string
+		ok                 bool
+	}{
+		{"valid", valid, "owner", true},
+		{"wrong ownership", strings.Replace(valid, `"owner"`, `"other"`, 1), "owner", false},
+		{"stale revision", strings.Replace(valid, revision, liveTestRevision('d'), 1), "owner", false},
+		{"missing result", strings.Replace(valid, `,"result":{"status":"applied","appliedRevision":"`+revision+`"}`, "", 1), "owner", false},
+		{"not ready", strings.Replace(valid, `"ready":true`, `"ready":false`, 1), "owner", false},
+		{"observation mismatch", strings.Replace(valid, `"appliedRevision":"`+revision+`","ready":true`, `"appliedRevision":"`+liveTestRevision('d')+`","ready":true`, 1), "owner", false},
+		{"machine mismatch", strings.Replace(valid, `"machine":{"value":"`+machine+`"},"ownership"`, `"machine":{"value":"other"},"ownership"`, 1), "owner", false},
+		{"arbitrary matching machine", strings.ReplaceAll(valid, `"machine":{"value":"`+machine+`"}`, `"machine":{"value":"arbitrary"}`), "owner", false},
+		{"wrong release", strings.Replace(valid, `"hostRelease":"release"`, `"hostRelease":"other"`, 1), "owner", false},
+		{"empty release", strings.Replace(valid, `"hostRelease":"release"`, `"hostRelease":""`, 1), "owner", false},
+		{"drifted", strings.Replace(valid, `"ready":true`, `"drifted":true,"ready":true`, 1), "owner", false},
+		{"extra app", strings.Replace(valid, `"data":`, `"apps":[{"id":"extra","activeImage":"extra","ready":true}],"data":`, 1), "owner", false},
+		{"missing data", strings.Replace(valid, `"data":[`, `"data":[]`, 1), "owner", false},
+		{"extra data", strings.Replace(valid, `]},"journal"`, `,{"identity":{"kind":"extra","providerId":"extra","endpoint":"extra","port":1},"ready":true}]},"journal"`, 1), "owner", false},
+		{"result observation", strings.Replace(valid, `"appliedRevision":"`+revision+`"}}}`, `"appliedRevision":"`+revision+`","observation":{}}}}`, 1), "owner", false},
+		{"result machine", strings.Replace(valid, `"appliedRevision":"`+revision+`"}}}`, `"appliedRevision":"`+revision+`","machine":{}}}}`, 1), "owner", false},
+		{"result ownership", strings.Replace(valid, `"appliedRevision":"`+revision+`"}}}`, `"appliedRevision":"`+revision+`","ownership":{}}}}`, 1), "owner", false},
+		{"result retirement", strings.Replace(valid, `"appliedRevision":"`+revision+`"}}}`, `"appliedRevision":"`+revision+`","retirement":{}}}}`, 1), "owner", false},
+		{"result operation evidence", strings.Replace(valid, `"appliedRevision":"`+revision+`"}}}`, `"appliedRevision":"`+revision+`","operationEvidence":{}}}}`, 1), "owner", false},
+		{"unknown", strings.Replace(valid, `"version":1`, `"version":1,"unknown":true`, 1), "owner", false},
+		{"duplicate", strings.Replace(valid, `"version":1`, `"version":1,"version":1`, 1), "owner", false},
+		{"trailing", valid + ` {}`, "owner", false},
+		{"oversized", valid + strings.Repeat(" ", 1<<20), "owner", false},
+		{"malformed", `{`, "owner", false},
+		{"absent", ``, "owner", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, present, err := parseLiveCompletedObserverState([]byte(test.state), facts, test.owner)
+			if (err == nil && present) != test.ok {
+				t.Fatalf("present %v err %v", present, err)
+			}
+		})
+	}
+}
+
+func TestLivePostCreateCompletionUsesFallbackOnlyAfterSuccessfulCreate(t *testing.T) {
+	incomplete := liveMilestoneObserverResult{observerError: true}
+	for _, test := range []struct {
+		name            string
+		createSucceeded bool
+		ownership       string
+		ownershipOK     bool
+		initial         liveMilestoneObserverResult
+		callbackResult  liveMilestoneObserverResult
+		wantCalls       int
+		wantObserved    bool
+	}{
+		{"failed Create retains observer result and skips extraction/fallback", false, "", false, incomplete, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone}, 0, false},
+		{"successful Create missing ownership", true, "", false, incomplete, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone}, 0, false},
+		{"successful incomplete completion", true, "owner", true, incomplete, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone, stateSeen: true, ownership: "owner"}, 1, true},
+		{"full matching observation", true, "owner", true, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone, stateSeen: true, ownership: "owner"}, liveMilestoneObserverResult{}, 0, true},
+		{"full mismatched observation", true, "owner", true, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone, stateSeen: true, ownership: "other"}, liveMilestoneObserverResult{}, 0, false},
+		{"full observation missing ownership", true, "owner", true, liveMilestoneObserverResult{lastMilestone: liveFinalMilestone, stateSeen: true}, liveMilestoneObserverResult{}, 0, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			got := livePostCreateCompletion(test.createSucceeded, test.ownership, test.ownershipOK, test.initial, func(ownership string, result liveMilestoneObserverResult) liveMilestoneObserverResult {
+				calls++
+				if ownership != "owner" {
+					t.Fatalf("fallback ownership = %q", ownership)
+				}
+				return test.callbackResult
+			})
+			if calls != test.wantCalls || liveDataCreateObserved(got) != test.wantObserved {
+				t.Fatalf("calls %d, result %#v", calls, got)
+			}
+		})
+	}
+}
+
+func TestLiveCreateOwnershipRequiresExactNonSecretOutput(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		values property.Map
+		want   string
+		ok     bool
+	}{
+		{"valid", property.NewMap(map[string]property.Value{"ownership": property.New(property.NewMap(map[string]property.Value{"value": property.New("owner")}))}), "owner", true},
+		{"missing", property.NewMap(nil), "", false},
+		{"secret", property.NewMap(map[string]property.Value{"ownership": property.New(property.NewMap(map[string]property.Value{"value": property.New("owner")})).WithSecret(true)}), "", false},
+		{"computed", property.NewMap(map[string]property.Value{"ownership": property.New(property.Computed)}), "", false},
+		{"extra field", property.NewMap(map[string]property.Value{"ownership": property.New(property.NewMap(map[string]property.Value{"value": property.New("owner"), "extra": property.New("x")}))}), "", false},
+		{"malformed", property.NewMap(map[string]property.Value{"ownership": property.New("owner")}), "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := liveCreateOwnership(test.values)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("ownership = %q, %v", got, ok)
+			}
+		})
+	}
+}
+
+func TestLiveCompletionFallbackClearsPriorObserverErrorOnlyAfterFullVerification(t *testing.T) {
+	resource, revision := hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}, liveTestRevision('c')
+	facts := liveTestDataObserverFacts(resource, revision)
+	for _, test := range []struct {
+		name       string
+		state      []byte
+		wantStrict bool
+	}{
+		{"strict state", liveCompletedStateJSON(t, resource, revision, "owner"), true},
+		{"wrong release", []byte(strings.Replace(string(liveCompletedStateJSON(t, resource, revision, "owner")), `"hostRelease":"release"`, `"hostRelease":"other"`, 1)), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			emitted := []string{}
+			result := liveDataCompletionResult(facts, "owner", liveMilestoneObserverResult{observerError: true}, test.state, liveDataContainerExpectationsForState, func(_ context.Context, expected liveDataContainerExpectation) (liveContainerInspection, bool, error) {
+				return liveContainerInspection{name: expected.name, image: expected.image, owner: expected.owner, target: expected.target, running: true}, true, nil
+			}, func(context.Context, liveDataContainerExpectation) (bool, error) { return true, nil }, func(record string) { emitted = append(emitted, record) }, context.Background())
+			if liveDataCreateObserved(result) != test.wantStrict || result.observerError == test.wantStrict || (test.wantStrict && len(emitted) != len(liveMilestones)) {
+				t.Fatalf("completion fallback = %#v, emitted %v", result, emitted)
+			}
+		})
+	}
+}
+
+func TestLiveCompletedStateUsesFixedLocalDataIdentityShape(t *testing.T) {
+	resource, revision := hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}, liveTestRevision('c')
+	facts := liveTestDataObserverFacts(resource, revision)
+	var state hostruntime.State
+	if err := json.Unmarshal(liveCompletedStateJSON(t, resource, revision, "owner"), &state); err != nil {
+		t.Fatal(err)
+	}
+	if !exactLiveDataObservations(facts, "owner", state.Observation.Data) {
+		t.Fatalf("completed data observations do not match live local-data contract: %#v", state.Observation.Data)
+	}
+	for _, mutate := range []func([]hostcontract.DataObservation){
+		func(data []hostcontract.DataObservation) {
+			data[0].Identity.ProviderID, data[0].Identity.Endpoint = "other", "other"
+		},
+		func(data []hostcontract.DataObservation) { data[0], data[1] = data[1], data[0] },
+		func(data []hostcontract.DataObservation) { data[1] = data[0] },
+		func(data []hostcontract.DataObservation) { data[0].Identity.Database = "wrong" },
+		func(data []hostcontract.DataObservation) { data[0].Identity.TLSMode = "required" },
+	} {
+		data := append([]hostcontract.DataObservation(nil), state.Observation.Data...)
+		mutate(data)
+		if exactLiveDataObservations(facts, "owner", data) {
+			t.Fatalf("accepted invalid local-data identity: %#v", data)
+		}
+	}
+	if exactLiveDataObservations(facts, "owner", state.Observation.Data[:1]) {
+		t.Fatal("accepted missing local-data identity")
+	}
+	if exactLiveDataObservations(facts, "owner", append(append([]hostcontract.DataObservation(nil), state.Observation.Data...), state.Observation.Data[0])) {
+		t.Fatal("accepted extra local-data identity")
+	}
+}
+
+func liveTestRevision(character rune) string {
+	return "tr1:0123456789abcdef:" + strings.Repeat(string(character), 64)
+}
+
+func liveTestDataObserverFacts(resource hostcontract.ResourceIdentity, revision string) liveDataObserverFacts {
+	return liveDataObserverFacts{
+		resource:      resource,
+		revision:      revision,
+		priorRevision: liveTestRevision('b'),
+		machine:       liveMachineIdentity("data"),
+		release:       "release",
+		services: []hostcontract.LocalDataServiceTarget{
+			{ID: "postgres", Type: "postgres", Port: 5432, Persistence: true},
+			{ID: "redis", Type: "redis", Port: 6379, Persistence: true},
+		},
+	}
+}
+
+func liveCompletedStateJSON(t *testing.T, resource hostcontract.ResourceIdentity, revision, ownership string) []byte {
+	t.Helper()
+	prior := liveTestRevision('b')
+	machine := liveMachineIdentity("data")
+	facts := liveTestDataObserverFacts(resource, revision)
+	state := hostruntime.State{Version: 1, Resource: resource, Machine: machine, Ownership: hostcontract.OwnershipIdentity{Value: ownership}, AppliedRevision: revision, Observation: hostcontract.StableObservation{Machine: machine, Ownership: hostcontract.OwnershipIdentity{Value: ownership}, HostRelease: "release", AppliedRevision: revision, Ready: true, Data: liveLocalDataObservations(facts, ownership)}, Journal: &hostruntime.Journal{Key: hostcontract.OperationKey{Resource: resource, Action: hostcontract.ActionReconcile, TargetRevision: revision, PriorAppliedRevision: prior}, Status: "complete", Result: &hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: revision}}}
+	b, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func livePendingStateJSON(t *testing.T, facts liveDataObserverFacts, ownership string) []byte {
+	t.Helper()
+	state := hostruntime.State{Version: 1, Resource: facts.resource, Machine: facts.machine, Ownership: hostcontract.OwnershipIdentity{Value: ownership}, AppliedRevision: facts.priorRevision, Observation: hostcontract.StableObservation{Machine: facts.machine, Ownership: hostcontract.OwnershipIdentity{Value: ownership}, HostRelease: facts.release, AppliedRevision: facts.priorRevision, Ready: true}, Journal: &hostruntime.Journal{Key: hostcontract.OperationKey{Resource: facts.resource, Action: hostcontract.ActionReconcile, TargetRevision: facts.revision, PriorAppliedRevision: facts.priorRevision}, Status: "pending"}}
+	b, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func liveLocalDataObservations(facts liveDataObserverFacts, ownership string) []hostcontract.DataObservation {
+	expected, err := liveDataContainerExpectationsForState(facts, liveObserverState{ownership: ownership, revision: facts.revision})
+	if err != nil {
+		panic("invalid local data observations")
+	}
+	observations := make([]hostcontract.DataObservation, 0, len(expected))
+	for _, service := range expected {
+		database, tlsServerName := "sub2api", service.name
+		if service.kind == "redis" {
+			database, tlsServerName = "0", ""
+		}
+		observations = append(observations, hostcontract.DataObservation{Identity: hostcontract.DataIdentity{Kind: service.kind, ProviderID: service.name, Endpoint: service.name, Port: service.port, Database: database, TLSServerName: tlsServerName}, Ready: true})
+	}
+	return observations
 }
 
 func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *testing.T) {
