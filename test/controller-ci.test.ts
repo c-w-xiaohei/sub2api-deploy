@@ -408,6 +408,23 @@ describe("Task4 CI contracts", () => {
     }
   });
 
+  it("accepts one fixed postgres readiness diagnostic and rejects it from candidates", () => {
+    for (const pgdata of ["present", "absent", "failed"]) for (const server of ["accepting", "rejecting", "no-response", "failed"]) for (const psql of ["ok", "failed"]) {
+      const output = `live postgres readiness: pgdata=${pgdata} server=${server} psql=${psql}\n`;
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(0);
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
+    }
+    for (const output of [
+      "prefix live postgres readiness: pgdata=present server=accepting psql=ok\n",
+      "live postgres readiness: pgdata=present server=accepting psql=ok extra=field\n",
+      "live postgres readiness: pgdata=unknown server=accepting psql=ok\n",
+      "live postgres readiness: pgdata=present server=accepting psql=ok\nlive postgres readiness: pgdata=present server=accepting psql=ok\n",
+    ]) {
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
+    }
+  });
+
   it("rejects provider failure markers only in the success-only candidate parser", () => {
     const valid = validLiveRecords();
     for (const [marker, diagnostic] of [["live namespace fixture failed: data-create-response\n", 0], ["live namespace fixture failed: unknown detail\n", 1]] as const) {
