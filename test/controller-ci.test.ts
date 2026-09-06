@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
@@ -6,6 +9,8 @@ const liveHostSandbox = readFileSync(new URL("../internal/integration/providerru
 const liveRuntime = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-runtime.sh", import.meta.url), "utf8");
 const liveRuntimeTest = readFileSync(new URL("../internal/integration/providerruntime/live_mx_allowlist_linux_test.go", import.meta.url), "utf8");
 const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
+const liveTest = "TestProviderRuntimeCrossHostDataAdmissionLive";
+const liveMilestones = ["postgres-owned-container", "postgres-ready", "redis-owned-container", "redis-ready"];
 const gateSymbols = {
   verify: ["test/environment-program-target.test.ts::targets the environment program without an infra fallback"],
   "host-controller": ["TestRegisterFoundationGraph", "TestRegisterPreservesComputedUpstashOutputs", "TestConfigAndHostCheckPreservePropertyClassesWithoutEffects", "TestRunUsesFixedSSHArgvAndFramedStdin", "TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry", "TestStdioProcessExitsAfterOneFrameAndRejectsTwo", "TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi"],
@@ -24,6 +29,34 @@ function selectorFor(job: string): string[] {
   const section = jobs.slice(start, next);
   const match = section.match(/tests='\^\(([^']+)\)\$'/);
   return match?.[1].split("|") ?? [];
+}
+
+function parseLiveRecords(records: unknown[], parser: "diagnostic" | "candidate"): number {
+  const directory = mkdtempSync(join(tmpdir(), "sub2api-live-parser-"));
+  const raw = join(directory, "live.jsonl");
+  writeFileSync(raw, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+  const start = parser === "diagnostic"
+    ? workflow.indexOf("const allowedLiveStages = new Set([")
+    : workflow.indexOf("const fs=require('node:fs'),path=require('node:path');", workflow.indexOf("const allowedLiveStages = new Set(["));
+  const end = parser === "diagnostic"
+    ? workflow.indexOf("          NODE", start)
+    : workflow.indexOf(" const files=fs.readdirSync(trace);", start);
+  const source = workflow.slice(start, end).replace(/^ {10}/gm, "");
+  const script = parser === "diagnostic"
+    ? `const fs=require('node:fs'),test='TestProviderRuntimeCrossHostDataAdmissionLive';\n${source}`
+    : `${source};`;
+  try {
+    return spawnSync(process.execPath, ["-", raw], { input: script }).status ?? 1;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+const livePass = { Test: liveTest, Action: "pass" };
+const liveOutput = (Output: string) => ({ Test: liveTest, Output });
+
+function validLiveRecords(): unknown[] {
+  return liveMilestones.map((milestone) => liveOutput(`live milestone: ${milestone}\n`));
 }
 
 describe("Task4 CI contracts", () => {
@@ -218,9 +251,11 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("'app-docker-containerd-exit'");
     expect(workflow).toContain("'data-docker-containerd-booted'");
     expect(workflow).toContain("'app-docker-containerd-plugin'");
-    expect(workflow).toContain("event.Test === test && typeof event.Output === 'string'");
+    expect(workflow).toContain("if (event.Test !== test || typeof event.Output !== 'string') continue;");
     expect(workflow).toContain("live namespace fixture failed: ([a-z-]+)");
-    expect(workflow).toContain("console.log(`${test} stage: ${stage}`)");
+    expect(workflow).toContain("console.log(`${test} observer: ${observer}`)");
+    expect(workflow).toContain("console.log(`${test} stage: ${stage ?? 'none'}`)");
+    expect(workflow).toContain("console.log(`${test} milestone: ${milestone ?? 'none'}`)");
     for (const stage of ["artifact", "bootstrap", "bootstrap-remote", "host", "observation", "response", "timeout", "transport", "unknown"]) {
       expect(workflow).toContain(`'data-create-${stage}'`);
     }
@@ -231,6 +266,35 @@ describe("Task4 CI contracts", () => {
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).not.toContain("-race -json -count=1 -timeout=15m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$");
     expect(workflow).toContain("test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$'");
+  });
+
+  it("executes both live workflow parsers as full ordered observer gates", () => {
+    const valid = validLiveRecords();
+    const validPass = [...valid, livePass];
+    expect(parseLiveRecords(validPass, "diagnostic")).toBe(0);
+    expect(parseLiveRecords(validPass, "candidate")).toBe(0);
+    for (const records of [
+      [livePass],
+      [liveOutput("live milestone: redis-ready\n"), livePass],
+      [liveOutput("prefix live milestone: postgres-owned-container\n"), livePass],
+      [liveOutput("live milestone: unknown\n"), livePass],
+      [...valid, liveOutput("live milestone: redis-ready\n"), livePass],
+      [...valid, liveOutput("live milestone: undefined\n"), livePass],
+      [...valid, liveOutput("live observer: observer-error\n"), livePass],
+      [...valid, livePass, livePass],
+    ]) {
+      expect(parseLiveRecords(records, "diagnostic")).toBe(1);
+      expect(parseLiveRecords(records, "candidate")).toBe(1);
+    }
+  });
+
+  it("rejects provider failure markers only in the success-only candidate parser", () => {
+    const valid = validLiveRecords();
+    for (const [marker, diagnostic] of [["live namespace fixture failed: data-create-response\n", 0], ["live namespace fixture failed: unknown detail\n", 1]] as const) {
+      const records = [...valid, liveOutput(marker), livePass];
+      expect(parseLiveRecords(records, "diagnostic")).toBe(diagnostic);
+      expect(parseLiveRecords(records, "candidate")).toBe(1);
+    }
   });
 
   it("hands the tested candidate to Target Release without rebuilding it", () => {
