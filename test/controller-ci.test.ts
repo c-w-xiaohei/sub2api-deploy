@@ -426,11 +426,8 @@ describe("Task4 CI contracts", () => {
   });
 
   it("accepts one fixed postgres lifecycle diagnostic and rejects it from candidates", () => {
-    for (const output of [
-      "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=failed state=restarting restarts=nonzero oom=yes error=present\n",
-      "live postgres container: exec=failed state=failed restarts=unknown oom=unknown error=unknown\n",
-    ]) {
+    for (const exec of ["ok", "timeout", "exit-1", "exit-126", "exit-127", "exit-other", "failed"]) {
+      const output = `live postgres container: exec=${exec} state=running restarts=zero oom=no error=absent\n`;
       const records = [...validLiveRecords(), liveOutput(output), livePass];
       expect(parseLiveRecords(records, "diagnostic")).toBe(0);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
@@ -438,6 +435,7 @@ describe("Task4 CI contracts", () => {
     for (const output of [
       "prefix live postgres container: exec=ok state=running restarts=zero oom=no error=absent\n",
       "live postgres container: exec=ok state=running restarts=zero oom=no error=absent extra=field\n",
+      "live postgres container: exec=exit-37 state=running restarts=zero oom=no error=absent\n",
       "live postgres container: exec=ok state=running restarts=zero oom=no error=absent\nlive postgres container: exec=ok state=running restarts=zero oom=no error=absent\n",
     ]) {
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);

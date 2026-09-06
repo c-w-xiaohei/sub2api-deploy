@@ -402,7 +402,7 @@ jobs:
               postgresReadiness = { pgdata: match[1], server: match[2], psql: match[3] };
             }
             if (event.Output.includes('live postgres container:')) {
-              const match = event.Output.match(/^live postgres container: exec=(ok|failed) state=(running|restarting|exited|created|paused|dead|removing|failed) restarts=(zero|nonzero|unknown) oom=(yes|no|unknown) error=(present|absent|unknown)\n$/);
+              const match = event.Output.match(/^live postgres container: exec=(ok|timeout|exit-1|exit-126|exit-127|exit-other|failed) state=(running|restarting|exited|created|paused|dead|removing|failed) restarts=(zero|nonzero|unknown) oom=(yes|no|unknown) error=(present|absent|unknown)\n$/);
               if (!match || postgresLifecycle) throw Error('invalid live postgres lifecycle');
               postgresLifecycle = { exec: match[1], state: match[2], restarts: match[3], oom: match[4], error: match[5] };
             }
