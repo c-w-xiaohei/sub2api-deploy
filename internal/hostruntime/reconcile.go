@@ -52,6 +52,8 @@ const (
 		"exec /usr/local/bin/docker-entrypoint.sh redis-server " + redisConfigStagingPath
 	localDataReadinessBudget   = time.Minute
 	localDataReadinessInterval = time.Second
+	appReadinessBudget         = time.Minute
+	appReadinessInterval       = time.Second
 )
 
 var routeWriteHook func() error
@@ -59,6 +61,7 @@ var routeRestoreHook func() error
 var artifactRemoveHook func(string) error
 var artifactRemoveSyncHook func(int) error
 var routeRemoveHook func(string) error
+var newAppReadinessContext = context.WithTimeout
 
 type commandError struct{ ExitCode int }
 
@@ -979,7 +982,16 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 			kept = append(kept, managedObject{Role: "app-data", AppToken: o.AppToken, Data: o.Data})
 		}
 	}
+	appReadyCtx := ctx
+	cancelAppReadiness := func() {}
+	if len(q.Target.Apps) != 0 {
+		appReadyCtx, cancelAppReadiness = newAppReadinessContext(ctx, appReadinessBudget)
+	}
+	defer cancelAppReadiness()
 	for _, a := range q.Target.Apps {
+		if appReadyCtx.Err() != nil {
+			return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
+		}
 		token := appToken(a.ID)
 		old := findApp(inv, token)
 		if old.Name != "" && old.Image == a.Image && old.Revision == q.TargetRevision && r.routeMatches(inv, old) && r.inspectOwned(ctx, inv, old) == nil && r.ready(ctx, old.Name, a.ReadinessPath) == nil {
@@ -1021,7 +1033,15 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
 			}
 		}
-		if e = r.ready(ctx, candidate.Name, a.ReadinessPath); e != nil {
+		if e = r.waitAppReady(appReadyCtx, candidate.Name, a.ReadinessPath, appReadinessInterval); e == nil {
+			e = appReadyCtx.Err()
+		}
+		if e != nil {
+			if r.routeMatches(inv, candidate) {
+				if e = r.restorePriorRoute(inv, old, candidate); e != nil {
+					return hostprotocol.Result{}, hostcontract.StableObservation{}, e
+				}
+			}
 			if e = r.removeOwned(ctx, inv, candidate); e != nil {
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, e
 			}
@@ -1030,20 +1050,31 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 			}
 			return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
 		}
-		oldRoute, routeExisted := r.routeBytes(token)
+		if appReadyCtx.Err() != nil {
+			if r.routeMatches(inv, candidate) {
+				if e = r.restorePriorRoute(inv, old, candidate); e != nil {
+					return hostprotocol.Result{}, hostcontract.StableObservation{}, e
+				}
+			}
+			if e = r.removeOwned(ctx, inv, candidate); e != nil {
+				return hostprotocol.Result{}, hostcontract.StableObservation{}, e
+			}
+			if e = r.removeEnv(candidate.Env); e != nil {
+				return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
+			}
+			return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
+		}
 		if !r.routeMatches(inv, candidate) {
 			if e = r.writeRoute(inv, candidate); e != nil {
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, operationFailed()
 			}
 		}
-		if e = r.postRouteReady(ctx, proxy, candidate, a.ReadinessPath); e != nil {
-			var restoreErr error
-			restoreErr = r.restoreRoute(token, oldRoute, routeExisted)
-			if restoreErr != nil {
-				return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
-			}
-			if routeExisted && !bytes.Equal(mustRouteBytes(inv, old), func() []byte { b, _ := r.routeBytes(token); return b }()) {
-				return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
+		if e = r.postRouteReady(appReadyCtx, proxy, candidate, a.ReadinessPath); e == nil {
+			e = appReadyCtx.Err()
+		}
+		if e != nil {
+			if restoreErr := r.restorePriorRoute(inv, old, candidate); restoreErr != nil {
+				return hostprotocol.Result{}, hostcontract.StableObservation{}, restoreErr
 			}
 			if e = r.removeOwned(ctx, inv, candidate); e != nil {
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, e
@@ -1622,10 +1653,6 @@ func (r *Runtime) removeNetworkProgress(ctx context.Context, s State, allowAbsen
 	}
 	return nil
 }
-func mustRouteBytes(inv inventory, o managedObject) []byte {
-	b, _ := routeBytesFor(inv, o)
-	return b
-}
 func (r *Runtime) removeOwned(ctx context.Context, inv inventory, o managedObject) error {
 	if e := r.inspectOwned(ctx, inv, o); e != nil {
 		return e
@@ -1693,6 +1720,23 @@ func (r *Runtime) postRouteReady(ctx context.Context, proxy, candidate managedOb
 		return r.ready(ctx, candidate.Name, path)
 	}
 	return r.docker(ctx, "exec", candidate.Name, "wget", "-q", "-O", "/dev/null", "--header", "Host:"+candidate.Hostname, "http://"+proxy.Name+":8081"+path)
+}
+func (r *Runtime) waitAppReady(ctx context.Context, name, path string, interval time.Duration) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.ready(ctx, name, path); err == nil {
+			return ctx.Err()
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 func (r *Runtime) localReady(ctx context.Context, o managedObject) error {
 	if o.Type == "postgres" {
@@ -2798,6 +2842,28 @@ func (r *Runtime) restoreRoute(token string, oldRoute []byte, existed bool) erro
 		err = routeRestoreHook()
 	}
 	return err
+}
+func (r *Runtime) restorePriorRoute(inv inventory, old, candidate managedObject) error {
+	if old.Name == "" {
+		if r.restoreRoute(candidate.AppToken, nil, false) != nil {
+			return recovery()
+		}
+		if _, err := r.readArtifactBytes(routeName(candidate.AppToken)); !errors.Is(err, os.ErrNotExist) {
+			return recovery()
+		}
+		return nil
+	}
+	prior, err := routeBytesFor(inv, old)
+	if err != nil {
+		return recovery()
+	}
+	if err := r.restoreRoute(candidate.AppToken, prior, true); err != nil {
+		return recovery()
+	}
+	if !r.routeMatches(inv, old) {
+		return recovery()
+	}
+	return nil
 }
 func (r *Runtime) removeRoute(inv inventory, o managedObject) error {
 	if !r.routeMatches(inv, o) {

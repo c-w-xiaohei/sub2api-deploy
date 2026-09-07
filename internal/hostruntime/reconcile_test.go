@@ -1000,6 +1000,153 @@ func TestWaitLocalReadyRetriesRedisUntilExactPONG(t *testing.T) {
 	}
 }
 
+func TestWaitAppReadyRetriesUntilHTTPProbeSucceeds(t *testing.T) {
+	rt, _ := initialized(t)
+	attempts := 0
+	rt.runner = readinessRunner(func(_ context.Context, argv []string, _ []byte) ([]byte, error) {
+		if reflect.DeepEqual(argv, []string{"exec", "candidate", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/ready"}) {
+			attempts++
+			if attempts < 3 {
+				return nil, errors.New("not ready")
+			}
+		}
+		return nil, nil
+	})
+	if err := rt.waitAppReady(t.Context(), "candidate", "/ready", time.Millisecond); err != nil || attempts != 3 {
+		t.Fatalf("wait=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestWaitAppReadyStopsOnDeadline(t *testing.T) {
+	rt, _ := initialized(t)
+	attempts := 0
+	rt.runner = readinessRunner(func(context.Context, []string, []byte) ([]byte, error) {
+		attempts++
+		return nil, errors.New("not ready")
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
+	defer cancel()
+	if err := rt.waitAppReady(ctx, "candidate", "/ready", time.Millisecond); !errors.Is(err, context.DeadlineExceeded) || attempts < 1 {
+		t.Fatalf("wait=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestReconcileUsesOneReadinessDeadlineForAllApps(t *testing.T) {
+	rt, state := initialized(t)
+	rt.runner = &recordingRunner{}
+	contexts := 0
+	newAppReadinessContext = func(ctx context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+		contexts++
+		if budget != appReadinessBudget {
+			t.Fatalf("readiness budget = %v", budget)
+		}
+		return context.WithTimeout(ctx, budget)
+	}
+	t.Cleanup(func() { newAppReadinessContext = context.WithTimeout })
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionB(), app("one", "one"), app("two", "two"))); err != nil || contexts != 1 {
+		t.Fatalf("reconcile=%v contexts=%d", err, contexts)
+	}
+}
+
+func TestReadinessDeadlineDuringRoutePublicationRollsBackAndCleansCandidate(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	ready := newExpiringReadinessContext(t.Context(), appReadinessBudget)
+	newAppReadinessContext = func(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+		return ready, func() {}
+	}
+	t.Cleanup(func() { newAppReadinessContext = context.WithTimeout })
+	routeWriteHook = func() error {
+		ready.expire()
+		return nil
+	}
+	t.Cleanup(func() { routeWriteHook = nil })
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionB(), app("one", "new"))); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("reconcile = %v", err)
+	}
+	candidate := objectName(state, "app", appToken("one"), "green")
+	if !runner.mutated(candidate) {
+		t.Fatalf("candidate was not cleaned: %#v", runner.calls)
+	}
+	if _, err := rt.readArtifactBytes(routeName(appToken("one"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("route remains after readiness deadline: %v", err)
+	}
+	if mustState(t, rt).Journal.Status != journalPending {
+		t.Fatal("readiness deadline completed journal")
+	}
+}
+
+func TestReadinessDeadlineRetryRestoresStableRouteBeforeCandidateCleanup(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionB(), app("one", "old"))); err != nil {
+		t.Fatal(err)
+	}
+	state = mustState(t, rt)
+	inv := mustInventory(t, rt)
+	old := findApp(inv, appToken("one"))
+	candidate := appObject(state, app("one", "new"), revisionC(), "blue")
+	routeWriteHook = func() error { return errors.New("unknown after route write") }
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionC(), app("one", "new"))); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("initial reconcile = %v", err)
+	}
+	routeWriteHook = nil
+	t.Cleanup(func() { routeWriteHook = nil })
+	if !rt.routeMatches(inv, candidate) {
+		t.Fatal("uncertain write did not leave the candidate route")
+	}
+	ready := newExpiringReadinessContext(t.Context(), appReadinessBudget)
+	newAppReadinessContext = func(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+		return ready, func() {}
+	}
+	t.Cleanup(func() { newAppReadinessContext = context.WithTimeout })
+	runner.calls = nil
+	runner.event = func(argv []string) {
+		if reflect.DeepEqual(argv, []string{"exec", candidate.Name, "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"}) {
+			ready.expire()
+		}
+	}
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionC(), app("one", "new"))); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("retry = %v", err)
+	}
+	if !rt.routeMatches(inv, old) || !runner.mutated(candidate.Name) {
+		t.Fatalf("stable route was not restored before cleanup: %#v", runner.calls)
+	}
+	if mustState(t, rt).Journal.Status != journalPending {
+		t.Fatal("deadline retry completed journal")
+	}
+}
+
+func TestSharedReadinessDeadlineStopsBeforeSecondApp(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	ready := newExpiringReadinessContext(t.Context(), appReadinessBudget)
+	first := objectName(state, "app", appToken("one"), "green")
+	second := objectName(state, "app", appToken("two"), "green")
+	firstProbes := 0
+	runner.event = func(argv []string) {
+		if len(argv) > 1 && argv[0] == "exec" && argv[1] == first {
+			firstProbes++
+			if firstProbes == 2 {
+				ready.expire()
+			}
+		}
+	}
+	rt.runner = runner
+	newAppReadinessContext = func(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+		return ready, func() {}
+	}
+	t.Cleanup(func() { newAppReadinessContext = context.WithTimeout })
+	if _, err := rt.Reconcile(t.Context(), requestFor(state, revisionB(), app("one", "one"), app("two", "two"))); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("reconcile = %v", err)
+	}
+	if firstProbes != 2 || !runner.mutated(first) || runner.mutated(second) || runner.mutations("run") != 1 {
+		t.Fatalf("first probes=%d calls=%#v", firstProbes, runner.calls)
+	}
+}
+
 func TestWaitLocalReadyStopsOnDeadlineAndCancellation(t *testing.T) {
 	t.Run("deadline", func(t *testing.T) {
 		rt, state := initialized(t)
@@ -2594,6 +2741,12 @@ func TestCandidateFailureCleanupRemovesEnvAndRestoreFailureRetainsIt(t *testing.
 			if restoreFails {
 				routeRestoreHook = func() error { return errors.New("restore failed") }
 				t.Cleanup(func() { routeRestoreHook = nil })
+			}
+			if !restoreFails {
+				newAppReadinessContext = func(ctx context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+					return context.WithTimeout(ctx, 5*time.Millisecond)
+				}
+				t.Cleanup(func() { newAppReadinessContext = context.WithTimeout })
 			}
 			if _, err := rt.Reconcile(context.Background(), requestFor(state, revisionB(), app("one", "new"))); err == nil {
 				t.Fatal("reconcile unexpectedly succeeded")
