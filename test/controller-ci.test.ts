@@ -12,6 +12,7 @@ const { parse: parseYAML } = createRequire(import.meta.url)("yaml") as {
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const liveHostSandbox = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-host-sandbox.sh", import.meta.url), "utf8");
 const liveRuntime = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-runtime.sh", import.meta.url), "utf8");
+const liveApp = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-app.sh", import.meta.url), "utf8");
 const liveRuntimeTest = readFileSync(new URL("../internal/integration/providerruntime/live_mx_allowlist_linux_test.go", import.meta.url), "utf8");
 const hostRuntimeTest = readFileSync(new URL("../internal/hostruntime/runtime_test.go", import.meta.url), "utf8");
 const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
@@ -278,6 +279,19 @@ describe("Task4 CI contracts", () => {
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).not.toContain("-race -json -count=1 -timeout=15m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$");
     expect(workflow).toContain("test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$'");
+    expect(workflow).toContain('[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]\n          safe="$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA"');
+    expect(liveApp).toContain(': "${LIVE_PROGRESS_ID:?}"');
+    expect(liveApp).toContain('rm -f "/app/data/.live-$LIVE_PROGRESS_ID-start"');
+    expect(liveApp).toContain('REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --user "$REDIS_USERNAME"');
+    expect(liveApp).not.toContain('redis-cli --user "$REDIS_USERNAME" --pass');
+    expect(liveApp.indexOf("busybox httpd -f -p 8080 -h /srv &")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));
+    expect(liveApp.indexOf("http://127.0.0.1:8080/ready")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));
+    expect(liveRuntimeTest).toContain("newLiveStdoutCapture() *liveRecordCapture { return &liveRecordCapture{rejectOutput: true} }");
+    expect(liveRuntimeTest).toContain("stdoutOK := stdout.forward(io.Discard)");
+    expect(liveRuntimeTest).toContain("if !recordsOK || !stdoutOK {");
+    expect(liveRuntimeTest).toContain('test -L " + path + " || ! test -d');
+    expect(liveRuntimeTest).toContain('test ! -L \\"$file\\" && test -f \\"$file\\"');
+    expect(liveRuntimeTest).not.toContain('"--pass", "LiveRedisClient_123"');
   });
 
   it("runs each Host dockerd in its private mounts with a dockerd-managed containerd", () => {
@@ -436,6 +450,26 @@ describe("Task4 CI contracts", () => {
       "live postgres readiness: pgdata=present server=accepting psql=ok extra=field\n",
       "live postgres readiness: pgdata=unknown server=accepting psql=ok\n",
       "live postgres readiness: pgdata=present server=accepting psql=ok\nlive postgres readiness: pgdata=present server=accepting psql=ok\n",
+    ]) {
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
+    }
+  });
+
+  it("accepts one fixed app progress diagnostic and rejects it from candidates", () => {
+    for (const output of [
+      "live app progress: start=present postgres=present redis=absent http=absent\n",
+      "live app progress: start=absent postgres=absent redis=absent http=absent\n",
+      "live app progress: start=unavailable postgres=unavailable redis=unavailable http=unavailable\n",
+    ]) {
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(0);
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
+    }
+    for (const output of [
+      "prefix live app progress: start=present postgres=present redis=absent http=absent\n",
+      "live app progress: start=present postgres=present redis=absent http=absent extra=field\n",
+      "live app progress: start=present postgres=unknown redis=absent http=absent\n",
+      "live app progress: start=present postgres=present redis=absent http=absent\nlive app progress: start=present postgres=present redis=absent http=absent\n",
     ]) {
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);

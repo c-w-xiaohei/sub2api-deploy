@@ -75,11 +75,12 @@ func TestProviderRuntimeCrossHostDataAdmissionLive(t *testing.T) {
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	recordsOK := stderr.forward(os.Stderr)
+	stdoutOK := stdout.forward(io.Discard)
 	if err != nil {
 		reportLiveNamespaceFailure(liveFailureCategory(ctx, stderr.failureBytes(stdout.failureBytes(nil))))
 		t.Fatal("live namespace fixture failed")
 	}
-	if !recordsOK {
+	if !recordsOK || !stdoutOK {
 		t.Fatal("live namespace observer records invalid")
 	}
 	if ctx.Err() != nil {
@@ -149,10 +150,12 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	reportLiveStage("data-ready-check")
 	dataHostPass := fixture.createReady(t, dataCreated, dataInput, liveMachineIdentity("data"), artifacts.release, []hostcontract.AppObservation{}, true)
 	fixture.recordOwnedTable(t, "data")
-	appInput := liveAppInputs(artifacts.release, fixture.dataIP)
+	appProgressID := liveToken("app-progress")
+	appInput := liveAppInputs(artifacts.release, fixture.dataIP, appProgressID)
 	reportLiveStage("app-create")
 	appCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::app", Properties: rpcProperties(t, appInput)})
 	if err != nil || appCreated == nil || appCreated.Id == "" {
+		reportLiveAppProgress(t.Context(), &fixture, appProgressID)
 		reportLiveStage(liveAppCreateFailureStage(err))
 		t.Fatal("released App Host Create failed")
 	}
@@ -542,7 +545,7 @@ func (f *liveFixture) redisACL(t *testing.T) bool {
 	if id == "" || strings.ContainsAny(id, " \t\r\n") {
 		return false
 	}
-	acl := string(f.sandboxOutput(t, "data", 8*time.Second, "docker", "exec", id, "redis-cli", "--user", "api_user", "--pass", "LiveRedisClient_123", "ACL", "GETUSER", "api_user"))
+	acl := string(f.sandboxOutput(t, "data", 8*time.Second, "docker", "exec", id, "redis-cli", "ACL", "GETUSER", "api_user"))
 	return aclFieldEquals(acl, "flags", "on") && aclFieldEquals(acl, "keys", "~*") && aclFieldEquals(acl, "channels", "&*") && aclFieldEquals(acl, "commands", "+@all")
 }
 
@@ -1949,17 +1952,22 @@ type liveRecordCapture struct {
 	readinessSeen bool
 	lifecycleSeen bool
 	preflightSeen bool
+	appProgressSeen bool
 	invalid       bool
 	acceptRecords bool
+	rejectOutput  bool
 }
 
 func newLiveRecordCapture() *liveRecordCapture { return &liveRecordCapture{acceptRecords: true} }
 
-func newLiveStdoutCapture() *liveRecordCapture { return &liveRecordCapture{} }
+func newLiveStdoutCapture() *liveRecordCapture { return &liveRecordCapture{rejectOutput: true} }
 
 func (c *liveRecordCapture) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.rejectOutput && len(p) != 0 {
+		c.invalid = true
+	}
 	_, _ = c.fallback.Write(p)
 	for _, b := range p {
 		if b == '\n' {
@@ -1986,7 +1994,7 @@ func (c *liveRecordCapture) Write(p []byte) (int, error) {
 
 func (c *liveRecordCapture) hasMarker() bool {
 	b := c.rolling[:c.rollLen]
-	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker)) || bytes.Contains(b, []byte(livePostgresReadinessMarker)) || bytes.Contains(b, []byte(livePostgresLifecycleMarker)) || bytes.Contains(b, []byte(liveSSHDockerPreflightMarker))
+	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker)) || bytes.Contains(b, []byte(livePostgresReadinessMarker)) || bytes.Contains(b, []byte(livePostgresLifecycleMarker)) || bytes.Contains(b, []byte(liveSSHDockerPreflightMarker)) || bytes.Contains(b, []byte(liveAppProgressMarker))
 }
 
 func (c *liveRecordCapture) finishLine() {
@@ -2055,6 +2063,14 @@ func (c *liveRecordCapture) finishLine() {
 				c.invalid = true
 			} else {
 				c.preflightSeen = true
+				c.records = append(c.records, record)
+			}
+		}
+		if strings.Contains(record, liveAppProgressMarker) {
+			if !liveAppProgressRecord(record) || c.appProgressSeen {
+				c.invalid = true
+			} else {
+				c.appProgressSeen = true
 				c.records = append(c.records, record)
 			}
 		}
@@ -2202,6 +2218,43 @@ func liveSSHDockerPreflightRecord(record string) bool {
 	context, contextOK := strings.CutPrefix(fields[10], "docker-context=")
 	config, configOK := strings.CutPrefix(fields[11], "docker-config=")
 	return socketOK && containerOK && networkOK && containerDiscoveryOK && networkDiscoveryOK && hostOK && contextOK && configOK && liveSSHDockerPreflightSockets[socket] && liveSSHDockerPreflightDocker[container] && liveSSHDockerPreflightDocker[network] && liveBootstrapDiscoveryCategories[containerDiscovery] && liveBootstrapDiscoveryCategories[networkDiscovery] && liveSSHDockerPreflightOverride[host] && liveSSHDockerPreflightOverride[context] && liveSSHDockerPreflightOverride[config] && record == fmt.Sprintf("%s socket=%s container=%s network=%s container-discovery=%s network-discovery=%s docker-host=%s docker-context=%s docker-config=%s\n", liveSSHDockerPreflightMarker, socket, container, network, containerDiscovery, networkDiscovery, host, context, config)
+}
+
+const liveAppProgressMarker = "live app progress:"
+
+var liveAppProgressCategories = map[string]bool{"present": true, "absent": true, "unavailable": true}
+
+func reportLiveAppProgress(parent context.Context, f *liveFixture, progressID string) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	if len(progressID) != 8 || strings.Trim(progressID, "0123456789abcdef") != "" {
+		_, _ = os.Stderr.WriteString(fmt.Sprintf("%s start=unavailable postgres=unavailable redis=unavailable http=unavailable\n", liveAppProgressMarker))
+		return
+	}
+	dataToken := liveRuntimeToken("app-data", liveRuntimeToken("app", "api"))
+	path := "/var/lib/sub2api-host/runtime/data/" + dataToken
+	script := "if test -L " + path + " || ! test -d " + path + " || ! test -x " + path + "; then for marker in start postgres redis http; do printf '%s=unavailable ' \"$marker\"; done; else for marker in start postgres redis http; do file=" + path + "/.live-" + progressID + "-$marker; if test ! -L \"$file\" && test -f \"$file\"; then printf '%s=present ' \"$marker\"; else printf '%s=absent ' \"$marker\"; fi; done; fi"
+	out, err := f.sandboxOutputForObserver(ctx, "app", 5*time.Second, "sh", "-c", script)
+	record := fmt.Sprintf("%s start=unavailable postgres=unavailable redis=unavailable http=unavailable\n", liveAppProgressMarker)
+	if err == nil {
+		candidate := liveAppProgressMarker + " " + strings.TrimSpace(string(out)) + "\n"
+		if liveAppProgressRecord(candidate) {
+			record = candidate
+		}
+	}
+	_, _ = os.Stderr.WriteString(record)
+}
+
+func liveAppProgressRecord(record string) bool {
+	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
+	if len(fields) != 7 || strings.Join(fields[:3], " ") != liveAppProgressMarker {
+		return false
+	}
+	start, startOK := strings.CutPrefix(fields[3], "start=")
+	postgres, postgresOK := strings.CutPrefix(fields[4], "postgres=")
+	redis, redisOK := strings.CutPrefix(fields[5], "redis=")
+	http, httpOK := strings.CutPrefix(fields[6], "http=")
+	return startOK && postgresOK && redisOK && httpOK && liveAppProgressCategories[start] && liveAppProgressCategories[postgres] && liveAppProgressCategories[redis] && liveAppProgressCategories[http] && record == fmt.Sprintf("%s start=%s postgres=%s redis=%s http=%s\n", liveAppProgressMarker, start, postgres, redis, http)
 }
 
 func livePostCreateSnapshotRecord(record string) bool {
@@ -2405,9 +2458,10 @@ func liveDataInputs(release, destination, source string) property.Map {
 	}
 	return property.NewMap(map[string]property.Value{"resource": jsonProperty(hostcontract.ResourceIdentity{Environment: "live", ServerKey: "data"}), "server": jsonProperty(hostcontract.ServerTarget{SSHAlias: "live-data"}), "target": jsonProperty(target), "secrets": jsonProperty(secrets).WithSecret(true)})
 }
-func liveAppInputs(release, dataIP string) property.Map {
+func liveAppInputs(release, dataIP, progressID string) property.Map {
 	target := hostcontract.Target{ReleaseArtifact: release, Apps: []hostcontract.AppTarget{{
 		ID: "api", Image: "sub2api-live-app:mx-allowlist", Hostname: "live-app.example", ReadinessPath: "/ready", InitialAdminEmail: "admin@example.test",
+		RuntimeSettings: map[string]string{"LIVE_PROGRESS_ID": progressID},
 		DataLinks: []hostcontract.DataLink{
 			{Name: "postgres", Identity: hostcontract.DataIdentity{Kind: "postgres", ProviderID: "live-postgres", Endpoint: dataIP, Port: 5432, Database: "api_db", TLSMode: "disable"}},
 			{Name: "redis", Identity: hostcontract.DataIdentity{Kind: "redis", ProviderID: "live-redis", Endpoint: dataIP, Port: 6379, Database: "0", TLSMode: "disable"}},
@@ -4007,6 +4061,36 @@ func TestLiveRecordCaptureSeparatesStreamsAndHandlesFragments(t *testing.T) {
 	var stdoutForwarded bytes.Buffer
 	if stdout.forward(&stdoutForwarded) || stdoutForwarded.String() != "live observer: observer-error\n" {
 		t.Fatalf("stdout marker was forwarded: %q", stdoutForwarded.String())
+	}
+}
+
+func TestLiveAppProgressCaptureIsStrictAndFailureOnly(t *testing.T) {
+	valid := "live app progress: start=present postgres=present redis=absent http=absent\n"
+	capture := newLiveRecordCapture()
+	for _, part := range []string{valid[:31], valid[31:]} {
+		_, _ = capture.Write([]byte(part))
+	}
+	var got bytes.Buffer
+	if !capture.forward(&got) || got.String() != valid {
+		t.Fatalf("app progress capture = %q", got.String())
+	}
+	stdout := newLiveStdoutCapture()
+	_, _ = stdout.Write([]byte(valid))
+	got.Reset()
+	if stdout.forward(&got) || got.String() != "live observer: observer-error\n" {
+		t.Fatalf("app progress accepted from stdout: %q", got.String())
+	}
+	for _, invalid := range []string{
+		"prefix " + valid,
+		"live app progress: start=present postgres=unknown redis=absent http=absent\n",
+		valid + valid,
+	} {
+		capture := newLiveRecordCapture()
+		_, _ = capture.Write([]byte(invalid))
+		got.Reset()
+		if capture.forward(&got) || got.String() != "live observer: observer-error\n" {
+			t.Fatalf("unsafe app progress = %q", got.String())
+		}
 	}
 }
 
