@@ -1729,6 +1729,9 @@ func TestPostgresClientSQLUsesStableOwnersAndStdinContainment(t *testing.T) {
 	if err != nil || databaseErr != nil || strings.Contains(sql, "DO $$") || strings.Contains(sql, "DROP ") || !strings.Contains(sql, "ALTER ROLE") || !strings.Contains(sql, "\\gexec") || !strings.Contains(databaseSQL, "SET ROLE") || !strings.Contains(sql, owner) {
 		t.Fatalf("sql=%q database=%q err=%v/%v", sql, databaseSQL, err, databaseErr)
 	}
+	if !strings.Contains(sql, "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE") || strings.Contains(sql, "WITH INHERIT FALSE SET TRUE") {
+		t.Fatalf("PostgreSQL role membership options are invalid: %q", sql)
+	}
 }
 
 func TestPostgresRecoveryMarkersBindHostServiceAndOperation(t *testing.T) {

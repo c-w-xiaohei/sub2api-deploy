@@ -2064,7 +2064,7 @@ func postgresClientSQL(s State, serviceID, revision string, clients []hostcontra
 		b.WriteString("SELECT format('ALTER ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', owner_name) FROM (SELECT DISTINCT owner_name FROM s2h_clients) x \\gexec\n")
 		b.WriteString("SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD %L', username, password) FROM (SELECT DISTINCT username, password FROM s2h_clients) c WHERE NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = c.username) \\gexec\n")
 		b.WriteString("SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD %L', username, password) FROM (SELECT DISTINCT username, password FROM s2h_clients) c \\gexec\n")
-		b.WriteString("SELECT format('GRANT %I TO %I WITH INHERIT FALSE SET TRUE', owner_name, username) FROM (SELECT DISTINCT owner_name, username FROM s2h_clients) c \\gexec\n")
+		b.WriteString("SELECT format('GRANT %I TO %I WITH ADMIN FALSE, INHERIT FALSE, SET TRUE', owner_name, username) FROM (SELECT DISTINCT owner_name, username FROM s2h_clients) c \\gexec\n")
 		for _, client := range clients {
 			b.WriteString("SELECT format('COMMENT ON ROLE %I IS %L', '" + postgresOwner(serviceID, client.Database) + "', '" + postgresOwnerMarker(s, serviceID, revision, client.Database) + "') \\gexec\n")
 			b.WriteString("SELECT format('COMMENT ON ROLE %I IS %L', '" + client.Username + "', '" + postgresClientMarker(s, serviceID, revision, client.AppID) + "') \\gexec\n")
@@ -2215,7 +2215,7 @@ func postgresProtocolRoleSQL(e postgresCatalogProtocolExpected, secret hostcontr
 	}
 	for _, c := range e.Desired {
 		owner := postgresOwner(e.Binding.Service, c.Database)
-		b.WriteString("SELECT format('GRANT %I TO %I WITH INHERIT FALSE SET TRUE', " + sqlQuote(owner) + ", " + sqlQuote(c.Username) + ") \\gexec\n")
+		b.WriteString("SELECT format('GRANT %I TO %I WITH ADMIN FALSE, INHERIT FALSE, SET TRUE', " + sqlQuote(owner) + ", " + sqlQuote(c.Username) + ") \\gexec\n")
 	}
 	for _, c := range e.Previous {
 		if !containsPostgresCatalogProtocolDatabase(postgresCatalogProtocolUserDatabases(e.Desired, c.Username), c.Database) {

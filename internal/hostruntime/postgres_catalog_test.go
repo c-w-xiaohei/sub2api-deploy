@@ -287,6 +287,24 @@ func TestPostgresCatalogProtocolSQLModelsBootstrapAndExactScopedTopology(t *test
 	}
 }
 
+func TestPostgresProtocolRoleSQLUsesExactMembershipOptions(t *testing.T) {
+	e := postgresCatalogProtocolFixture(t)
+	sql, err := postgresProtocolRoleSQL(e, hostcontract.LocalDataServiceSecrets{
+		AdminPassword: "admin",
+		ClientPasswords: map[string]string{
+			"api-one":    "one",
+			"worker-two": "two",
+			"jobs-app":   "jobs",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sql, "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE") || strings.Contains(sql, "WITH INHERIT FALSE SET TRUE") {
+		t.Fatalf("PostgreSQL role membership options are invalid: %q", sql)
+	}
+}
+
 func TestPostgresCatalogProtocolWriterHandoffIsCompleteAndDataDerived(t *testing.T) {
 	e := postgresCatalogProtocolFixture(t)
 	got := postgresCatalogProtocolWriterHandoff(e)
@@ -320,7 +338,7 @@ func TestPostgresCatalogProtocolWriterHandoffIsCompleteAndDataDerived(t *testing
 		"ENSURE ROLE " + sharedUser + " WHEN ABSENT",
 		"ALTER ROLE " + sharedUser + " LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS",
 		"COMMENT ON ROLE " + sharedUser + " IS " + postgresCatalogProtocolClientMarker(e, sharedUser),
-		"GRANT <desired owner memberships> WITH ADMIN FALSE INHERIT FALSE SET TRUE",
+		"GRANT <desired owner memberships> WITH ADMIN FALSE, INHERIT FALSE, SET TRUE",
 		"REVOKE <removed or moved owner> FROM <client>",
 		"RESET obsolete client role settings",
 		"ALTER ROLE <removed client> NOLOGIN",

@@ -762,7 +762,7 @@ func postgresCatalogProtocolWriterHandoff(e postgresCatalogProtocolExpected) []s
 		values = append(values, "ENSURE ROLE "+username+" WHEN ABSENT", "ALTER ROLE "+username+" LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS", "COMMENT ON ROLE "+username+" IS "+marker)
 	}
 	values = append(values,
-		"GRANT <desired owner memberships> WITH ADMIN FALSE INHERIT FALSE SET TRUE",
+		"GRANT <desired owner memberships> WITH ADMIN FALSE, INHERIT FALSE, SET TRUE",
 		"REVOKE <removed or moved owner> FROM <client>",
 		"RESET obsolete client role settings",
 		"ALTER ROLE <removed client> NOLOGIN",
