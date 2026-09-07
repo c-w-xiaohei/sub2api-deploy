@@ -439,7 +439,7 @@ describe("Task4 CI contracts", () => {
     const absoluteErrors = ["none", "empty", "not-found", "permission", "cgroup", "namespace", "rootfs", "runtime", "daemon", "unknown"];
     const rootfsCategories = ["present", "absent", "nonregular", "nonexecutable", "unavailable"];
     const childStatuses = ["ok", "timeout", "canceled", "exit-1", "exit-126", "exit-127", "exit-other", "failed"];
-    const childOutputs = ["sentinel", "empty", "other", "overflow"];
+    const childOutputs = ["sentinel", "empty", "not-found", "permission", "cgroup", "namespace", "rootfs", "runtime", "daemon", "cwd", "user", "security", "resource", "other", "overflow"];
     const childStderrCategories = ["empty", "present", "overflow"];
     for (const [exec, absolute, absoluteError, childStatus, childOutput, childStderr, rootfs, direct, directError] of [
       ...categories.map((exec) => [exec, "ok", "none", "exit-127", "sentinel", "empty", "unavailable", "failed", "unknown"]),

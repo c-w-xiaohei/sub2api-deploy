@@ -1227,7 +1227,7 @@ var livePostgresServerCategories = map[string]bool{"accepting": true, "rejecting
 var livePostgresPSQLCategories = map[string]bool{"ok": true, "failed": true}
 var livePostgresLifecycleExecCategories = map[string]bool{"ok": true, "timeout": true, "exit-1": true, "exit-126": true, "exit-127": true, "exit-other": true, "failed": true}
 var livePostgresChildStatusCategories = map[string]bool{"ok": true, "timeout": true, "canceled": true, "exit-1": true, "exit-126": true, "exit-127": true, "exit-other": true, "failed": true}
-var livePostgresChildOutputCategories = map[string]bool{"sentinel": true, "empty": true, "other": true, "overflow": true}
+var livePostgresChildOutputCategories = map[string]bool{"sentinel": true, "empty": true, "not-found": true, "permission": true, "cgroup": true, "namespace": true, "rootfs": true, "runtime": true, "daemon": true, "cwd": true, "user": true, "security": true, "resource": true, "other": true, "overflow": true}
 var livePostgresChildStderrCategories = map[string]bool{"empty": true, "present": true, "overflow": true}
 var livePostgresRootfsCategories = map[string]bool{"present": true, "absent": true, "nonregular": true, "nonexecutable": true, "unavailable": true}
 var livePostgresLifecycleStates = map[string]bool{"running": true, "restarting": true, "exited": true, "created": true, "paused": true, "dead": true, "removing": true, "failed": true}
@@ -1629,7 +1629,7 @@ func livePostgresExecSentinelDiagnostic(result liveObserverCommandResult) livePo
 	} else if bytes.Equal(result.stdout.data, []byte("S2H_EXEC_SENTINEL")) {
 		diagnostic.output = "sentinel"
 	} else if len(result.stdout.data) != 0 {
-		diagnostic.output = "other"
+		diagnostic.output = livePostgresChildOutputCategory(result.stdout.data)
 	}
 	if result.stderr.overflow {
 		diagnostic.stderr = "overflow"
@@ -1637,6 +1637,33 @@ func livePostgresExecSentinelDiagnostic(result liveObserverCommandResult) livePo
 		diagnostic.stderr = "present"
 	}
 	return diagnostic
+}
+
+func livePostgresChildOutputCategory(stdout []byte) string {
+	text := strings.ToLower(string(stdout))
+	for _, category := range []struct {
+		name    string
+		phrases []string
+	}{
+		{"cwd", []string{"chdir ", "current working directory", "working directory is not"}},
+		{"user", []string{"setuid", "setgid", "supplementary groups", "user lookup", "group lookup"}},
+		{"security", []string{"apparmor", "seccomp", "capabilities", "no new privileges"}},
+		{"permission", []string{"permission denied", "operation not permitted"}},
+		{"cgroup", []string{"cgroup"}},
+		{"namespace", []string{"setns", "namespace"}},
+		{"rootfs", []string{"rootfs", "root filesystem"}},
+		{"not-found", []string{"executable file not found", "file not found", "enoent", "no such file"}},
+		{"resource", []string{"resource exhaustion", "resource temporarily unavailable", "cannot allocate memory", "out of memory", "too many open files", "no space left"}},
+		{"daemon", []string{"docker daemon", "error response from daemon"}},
+		{"runtime", []string{"runc", "oci runtime", "containerd", "shim", "unable to start container process"}},
+	} {
+		for _, phrase := range category.phrases {
+			if strings.Contains(text, phrase) {
+				return category.name
+			}
+		}
+	}
+	return "other"
 }
 
 type liveObserverCommandError struct {
@@ -3318,7 +3345,7 @@ func TestLivePostgresLifecycleRecordAndInspectionFailClosed(t *testing.T) {
 		livePostgresLongestCategory(livePostgresLifecycleOOMCategories),
 		livePostgresLongestCategory(livePostgresLifecycleErrorCategories),
 	)
-	const livePostgresLifecycleMaximumRecordLength = 248
+	const livePostgresLifecycleMaximumRecordLength = 250
 	if len(maximum) != livePostgresLifecycleMaximumRecordLength || len(maximum) >= liveRecordLineLimit || !livePostgresLifecycleRecordValid(maximum) {
 		t.Fatalf("maximum lifecycle record len=%d valid=%t", len(maximum), livePostgresLifecycleRecordValid(maximum))
 	}
@@ -3352,6 +3379,36 @@ func TestLivePostgresExecSentinelClassifiesPrivateLocalOutput(t *testing.T) {
 			}
 		})
 	}
+	for _, test := range []struct {
+		name, stdout, want string
+	}{
+		{"cwd", "OCI runtime create failed: chdir to the requested directory", "cwd"},
+		{"user", "unable to set supplementary groups", "user"},
+		{"security", "runc create failed: apparmor denied", "security"},
+		{"namespace", "setns failed for mount namespace", "namespace"},
+		{"cgroup", "failed to create cgroup", "cgroup"},
+		{"rootfs", "failed to mount root filesystem", "rootfs"},
+		{"not found", "executable file not found", "not-found"},
+		{"permission", "operation not permitted", "permission"},
+		{"resource", "resource exhaustion while starting", "resource"},
+		{"daemon", "Error response from daemon: internal error", "daemon"},
+		{"runtime", "unable to start container process: runc create failed", "runtime"},
+		{"fallback", "private diagnostic token", "other"},
+		{"specific before runtime", "unable to start container process: executable file not found", "not-found"},
+		{"permission before rootfs", "unable to start container process: mount root filesystem: permission denied", "permission"},
+		{"unrelated cwd letters", "private cwd token", "other"},
+		{"unrelated API response", "private API response token", "other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := livePostgresExecSentinelDiagnostic(liveObserverCommandResult{stdout: boundedBuffer{data: []byte(test.stdout)}})
+			if got.output != test.want {
+				t.Fatalf("stdout category = %q, want %q", got.output, test.want)
+			}
+		})
+	}
+	if got := livePostgresExecSentinelDiagnostic(liveObserverCommandResult{stdout: boundedBuffer{data: []byte("S2H_EXEC_SENTINEL"), overflow: true}}); got.output != "overflow" {
+		t.Fatalf("overflow must win over sentinel: %#v", got)
+	}
 	if got := livePostgresExecSentinelDiagnostic(liveObserverCommandResult{ctxErr: context.DeadlineExceeded, stdout: boundedBuffer{data: []byte("S2H_EXEC_SENTINEL")}}); got != (livePostgresChildDiagnostic{status: "timeout", output: "sentinel", stderr: "empty"}) {
 		t.Fatalf("timeout diagnostic = %#v", got)
 	}
@@ -3363,9 +3420,9 @@ func TestLivePostgresExecSentinelClassifiesPrivateLocalOutput(t *testing.T) {
 	if got := livePostgresExecSentinelDiagnostic(liveObserverLocalCommand(t.Context(), "/definitely-missing-command")); got != (livePostgresChildDiagnostic{status: "failed", output: "empty", stderr: "empty"}) {
 		t.Fatalf("start diagnostic = %#v", got)
 	}
-	private := livePostgresExecSentinelDiagnostic(liveObserverLocalCommand(t.Context(), "sh", "-c", "printf private-stdout; printf private-stderr >&2; exit 127"))
+	private := livePostgresExecSentinelDiagnostic(liveObserverLocalCommand(t.Context(), "sh", "-c", "printf 'private current working directory token'; printf private-stderr >&2; exit 127"))
 	record := livePostgresLifecycleFailedRecord(nil, nil, private)
-	if private != (livePostgresChildDiagnostic{status: "exit-127", output: "other", stderr: "present"}) || strings.Contains(record, "private-") || strings.Contains(record, livePostgresExecSentinelScript) || !livePostgresLifecycleRecordValid(record) {
+	if private != (livePostgresChildDiagnostic{status: "exit-127", output: "cwd", stderr: "present"}) || strings.Contains(record, "private-") || strings.Contains(record, "working directory token") || strings.Contains(record, livePostgresExecSentinelScript) || !livePostgresLifecycleRecordValid(record) {
 		t.Fatal("private sentinel output escaped its fixed category")
 	}
 }
