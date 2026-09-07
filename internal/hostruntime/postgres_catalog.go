@@ -294,12 +294,13 @@ func postgresCatalogProtocolRolesSQL(e postgresCatalogProtocolExpected) string {
 		foreignClauses = append(foreignClauses, "EXISTS (SELECT 1 FROM pg_roles x WHERE x.rolname="+sqlQuote(binding.Name)+" AND (EXISTS (SELECT 1 FROM pg_shdescription d WHERE d.objoid=x.oid AND d.classoid='pg_authid'::regclass AND d.description NOT IN ("+strings.Join(markers, ",")+")) OR "+unmarked+"))")
 	}
 	foreign := strings.Join(foreignClauses, " OR ")
-	admin := "EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname='s2h_admin' AND r.rolcanlogin AND r.rolinherit AND r.rolsuper AND r.rolcreatedb AND r.rolcreaterole AND NOT r.rolreplication AND NOT r.rolbypassrls)"
+	targetAdmin := "EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname='s2h_admin' AND r.rolcanlogin AND r.rolinherit AND r.rolsuper AND r.rolcreatedb AND r.rolcreaterole AND NOT r.rolreplication AND NOT r.rolbypassrls)"
+	bootstrapAdmin := "EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname='s2h_admin' AND r.rolcanlogin AND r.rolinherit AND r.rolsuper AND r.rolcreatedb AND r.rolcreaterole AND r.rolreplication AND r.rolbypassrls)"
 	managedAbsent := "TRUE"
 	if len(managedNames) != 0 {
 		managedAbsent = "NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname IN (" + strings.Join(managedNames, ",") + "))"
 	}
-	initialSafe := admin + " AND " + managedAbsent + " AND NOT EXISTS (SELECT 1 FROM pg_shdescription d JOIN pg_roles r ON r.oid=d.objoid WHERE d.classoid='pg_authid'::regclass AND r.rolname IN (" + strings.Join(roleNames, ",") + ") AND left(d.description,7)='s2hpg2:') AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=(SELECT oid FROM pg_roles WHERE rolname='s2h_admin') OR m.roleid=(SELECT oid FROM pg_roles WHERE rolname='s2h_admin')) AND NOT EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole WHERE r.rolname='s2h_admin')"
+	initialSafe := bootstrapAdmin + " AND " + managedAbsent + " AND NOT EXISTS (SELECT 1 FROM pg_shdescription d JOIN pg_roles r ON r.oid=d.objoid WHERE d.classoid='pg_authid'::regclass AND r.rolname IN (" + strings.Join(roleNames, ",") + ") AND left(d.description,7)='s2hpg2:') AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=(SELECT oid FROM pg_roles WHERE rolname='s2h_admin') OR m.roleid=(SELECT oid FROM pg_roles WHERE rolname='s2h_admin')) AND NOT EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole WHERE r.rolname='s2h_admin')"
 	state := "CASE WHEN " + foreign + " THEN 'foreign' WHEN " + roleComment("r.oid", target) + " THEN 'target' WHEN " + func() string {
 		if prior == "" {
 			return "FALSE"
@@ -311,7 +312,7 @@ func postgresCatalogProtocolRolesSQL(e postgresCatalogProtocolExpected) string {
 			return "FALSE"
 		}
 		return roleComment("r.oid", prior)
-	}() + " THEN " + sqlQuote(postgresCatalogProtocolOperation(e.PreviousRevision)) + " ELSE '-' END FROM pg_roles r WHERE r.rolname='s2h_admin'),'-')", bit(admin), bit("CASE WHEN " + func() string {
+	}() + " THEN " + sqlQuote(postgresCatalogProtocolOperation(e.PreviousRevision)) + " ELSE '-' END FROM pg_roles r WHERE r.rolname='s2h_admin'),'-')", bit(targetAdmin), bit("CASE WHEN " + func() string {
 		if prior != "" {
 			return roleComment("r.oid", prior)
 		}
@@ -778,8 +779,8 @@ func postgresCatalogProtocolWriterHandoff(e postgresCatalogProtocolExpected) []s
 			"ALTER SCHEMA public OWNER TO "+owner,
 			"REVOKE CREATE ON SCHEMA public FROM PUBLIC",
 			"GRANT USAGE, CREATE ON SCHEMA public TO "+owner,
+			"REVOKE ALL DATABASE privileges from owner and managed clients",
 			"GRANT owner and desired clients CONNECT ON DATABASE "+db,
-			"REVOKE unintended managed CONNECT ON DATABASE "+db,
 			"REVOKE unintended managed schema grants ON SCHEMA public",
 			"SET ROLE for each desired client IN DATABASE "+db+" TO "+owner,
 			"COMMENT ON DATABASE "+db+" IS "+postgresCatalogProtocolDatabaseMarker(e, db),

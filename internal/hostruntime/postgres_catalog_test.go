@@ -64,6 +64,9 @@ func TestPostgresCatalogProtocolSQLUsesExactCatalogObjectsAndBooleanBits(t *test
 	if !strings.Contains(queries[0], "NOT r.rolinherit") || !strings.Contains(queries[0], "NOT m.admin_option AND NOT m.inherit_option AND m.set_option") {
 		t.Fatal("role predicates are not exact")
 	}
+	if !strings.Contains(queries[0], "r.rolreplication AND r.rolbypassrls") || !strings.Contains(queries[0], "NOT r.rolreplication AND NOT r.rolbypassrls") {
+		t.Fatal("bootstrap and target admin predicates are not distinct")
+	}
 	if !strings.Contains(queries[2], "setconfig") || !strings.Contains(queries[2], "ARRAY[") || !strings.Contains(queries[2], "aclexplode") {
 		t.Fatal("database detail does not use exact settings and grants")
 	}
@@ -305,6 +308,23 @@ func TestPostgresProtocolRoleSQLUsesExactMembershipOptions(t *testing.T) {
 	}
 }
 
+func TestPostgresProtocolFinalizeSQLResetsManagedDatabaseACLsBeforeExactGrants(t *testing.T) {
+	e := postgresCatalogProtocolFixture(t)
+	database := "app_db"
+	owner := postgresOwner(e.Binding.Service, database)
+	sql := postgresProtocolFinalizeSQL(e, database)
+	ownerRevoke := "REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I', " + sqlQuote(database) + ", " + sqlQuote(owner)
+	ownerGrant := "GRANT CONNECT ON DATABASE %I TO %I', " + sqlQuote(database) + ", " + sqlQuote(owner)
+	clientRevoke := "REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I', " + sqlQuote(database) + ", 'shared_user'"
+	clientGrant := "GRANT CONNECT ON DATABASE %I TO %I', " + sqlQuote(database) + ", 'shared_user'"
+	if strings.Count(sql, "REVOKE ALL PRIVILEGES ON DATABASE %I FROM %I") != 4 ||
+		strings.Index(sql, ownerRevoke) < 0 || strings.Index(sql, ownerRevoke) >= strings.Index(sql, ownerGrant) ||
+		strings.Index(sql, clientRevoke) < 0 || strings.Index(sql, clientRevoke) >= strings.Index(sql, clientGrant) ||
+		strings.Contains(sql, "REVOKE CONNECT ON DATABASE") {
+		t.Fatalf("PostgreSQL database ACL convergence is not exact: %q", sql)
+	}
+}
+
 func TestPostgresCatalogProtocolWriterHandoffIsCompleteAndDataDerived(t *testing.T) {
 	e := postgresCatalogProtocolFixture(t)
 	got := postgresCatalogProtocolWriterHandoff(e)
@@ -350,8 +370,8 @@ func TestPostgresCatalogProtocolWriterHandoffIsCompleteAndDataDerived(t *testing
 		"ALTER SCHEMA public OWNER TO " + postgresOwner(e.Binding.Service, "app_db"),
 		"REVOKE CREATE ON SCHEMA public FROM PUBLIC",
 		"GRANT USAGE, CREATE ON SCHEMA public TO " + postgresOwner(e.Binding.Service, "app_db"),
+		"REVOKE ALL DATABASE privileges from owner and managed clients",
 		"GRANT owner and desired clients CONNECT ON DATABASE app_db",
-		"REVOKE unintended managed CONNECT ON DATABASE app_db",
 		"REVOKE unintended managed schema grants ON SCHEMA public",
 		"SET ROLE for each desired client IN DATABASE app_db TO " + postgresOwner(e.Binding.Service, "app_db"),
 		"COMMENT ON DATABASE app_db IS " + postgresCatalogProtocolDatabaseMarker(e, "app_db"),
@@ -362,8 +382,8 @@ func TestPostgresCatalogProtocolWriterHandoffIsCompleteAndDataDerived(t *testing
 		"ALTER SCHEMA public OWNER TO " + postgresOwner(e.Binding.Service, "jobs_db"),
 		"REVOKE CREATE ON SCHEMA public FROM PUBLIC",
 		"GRANT USAGE, CREATE ON SCHEMA public TO " + postgresOwner(e.Binding.Service, "jobs_db"),
+		"REVOKE ALL DATABASE privileges from owner and managed clients",
 		"GRANT owner and desired clients CONNECT ON DATABASE jobs_db",
-		"REVOKE unintended managed CONNECT ON DATABASE jobs_db",
 		"REVOKE unintended managed schema grants ON SCHEMA public",
 		"SET ROLE for each desired client IN DATABASE jobs_db TO " + postgresOwner(e.Binding.Service, "jobs_db"),
 		"COMMENT ON DATABASE jobs_db IS " + postgresCatalogProtocolDatabaseMarker(e, "jobs_db"),
