@@ -13,6 +13,7 @@ const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta
 const liveHostSandbox = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-host-sandbox.sh", import.meta.url), "utf8");
 const liveRuntime = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-runtime.sh", import.meta.url), "utf8");
 const liveApp = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-app.sh", import.meta.url), "utf8");
+const liveAppDockerfile = readFileSync(new URL("../internal/integration/providerruntime/testdata/live-app.Dockerfile", import.meta.url), "utf8");
 const liveRuntimeTest = readFileSync(new URL("../internal/integration/providerruntime/live_mx_allowlist_linux_test.go", import.meta.url), "utf8");
 const hostRuntimeTest = readFileSync(new URL("../internal/hostruntime/runtime_test.go", import.meta.url), "utf8");
 const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
@@ -291,7 +292,10 @@ describe("Task4 CI contracts", () => {
     expect(liveApp).toContain('if [ "$redis" != ready ] && REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli');
     expect(liveApp).toContain('REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --user "$REDIS_USERNAME"');
     expect(liveApp).not.toContain('redis-cli --user "$REDIS_USERNAME" --pass');
-    expect(liveApp.indexOf("busybox httpd -f -p 8080 -h /srv &")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));
+    expect(liveAppDockerfile).toContain("apk add --no-cache busybox-extras redis");
+    expect(liveApp).toContain("busybox-extras httpd -f -p 8080 -h /srv &");
+    expect(liveApp).not.toContain("busybox httpd");
+    expect(liveApp.indexOf("busybox-extras httpd -f -p 8080 -h /srv &")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));
     expect(liveApp.indexOf("http://127.0.0.1:8080/ready")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));
     expect(liveRuntimeTest).toContain("newLiveStdoutCapture() *liveRecordCapture { return &liveRecordCapture{rejectOutput: true} }");
     expect(liveRuntimeTest).toContain("stdoutOK := stdout.forward(io.Discard)");

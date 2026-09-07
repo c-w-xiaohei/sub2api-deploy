@@ -26,7 +26,7 @@ done
 : > "/app/data/.live-$LIVE_PROGRESS_ID-gate"
 mkdir -p /srv
 : > /srv/ready
-busybox httpd -f -p 8080 -h /srv &
+busybox-extras httpd -f -p 8080 -h /srv &
 httpd=$!
 trap 'kill "$httpd" 2>/dev/null || true' EXIT INT TERM
 : > "/app/data/.live-$LIVE_PROGRESS_ID-launched"
