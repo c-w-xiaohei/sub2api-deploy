@@ -487,6 +487,21 @@ describe("Task4 CI contracts", () => {
     }
   });
 
+  it("accepts one fixed assertion diagnostic and rejects it from candidates", () => {
+    const valid = "live assertions: data=yes app=yes env=yes pg=yes pg-deny=yes pg-catalog=yes redis=yes redis-deny=yes redis-default=yes redis-acl=no pg-drop=yes redis-drop=yes foreign=yes\n";
+    expect(parseLiveRecords([...validLiveRecords(), liveOutput(valid), livePass], "diagnostic")).toBe(0);
+    expect(parseLiveRecords([...validLiveRecords(), liveOutput(valid), livePass], "candidate")).toBe(1);
+    for (const output of [
+      "prefix " + valid,
+      valid.replace("redis-acl=no", "redis-acl=unknown"),
+      valid.replace("foreign=yes", "foreign=yes extra=yes"),
+      valid + valid,
+    ]) {
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
+      expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
+    }
+  });
+
   it("accepts one fixed postgres lifecycle diagnostic and rejects it from candidates", () => {
     const categories = ["ok", "timeout", "exit-1", "exit-126", "exit-127", "exit-other", "failed"];
     const absoluteErrors = ["none", "empty", "not-found", "permission", "cgroup", "namespace", "rootfs", "runtime", "daemon", "unknown"];

@@ -210,6 +210,7 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 		ForeignTableSHA256:              foreignAfter,
 	})
 	if !allChecksPass {
+		reportLiveAssertions(dataHostPass, appHostPass, appEnvironmentAuthenticated, postgresPass, postgresWrongPasswordDenied, postgresCatalog, redisPass, redisWrongPasswordDenied, redisDefaultDenied, redisACL, postgresDrop, redisDrop, foreignUnchanged)
 		t.Fatal("live MX-ALLOWLIST-01 assertion failed")
 	}
 	reportLiveStage("complete")
@@ -1953,6 +1954,7 @@ type liveRecordCapture struct {
 	lifecycleSeen bool
 	preflightSeen bool
 	appProgressSeen bool
+	assertionsSeen  bool
 	invalid       bool
 	acceptRecords bool
 	rejectOutput  bool
@@ -1994,7 +1996,7 @@ func (c *liveRecordCapture) Write(p []byte) (int, error) {
 
 func (c *liveRecordCapture) hasMarker() bool {
 	b := c.rolling[:c.rollLen]
-	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker)) || bytes.Contains(b, []byte(livePostgresReadinessMarker)) || bytes.Contains(b, []byte(livePostgresLifecycleMarker)) || bytes.Contains(b, []byte(liveSSHDockerPreflightMarker)) || bytes.Contains(b, []byte(liveAppProgressMarker))
+	return bytes.Contains(b, []byte("SUB2API_LIVE_STAGE=")) || bytes.Contains(b, []byte("live milestone:")) || bytes.Contains(b, []byte("live observer:")) || bytes.Contains(b, []byte(livePostCreateSnapshotMarker)) || bytes.Contains(b, []byte(livePostgresReadinessMarker)) || bytes.Contains(b, []byte(livePostgresLifecycleMarker)) || bytes.Contains(b, []byte(liveSSHDockerPreflightMarker)) || bytes.Contains(b, []byte(liveAppProgressMarker)) || bytes.Contains(b, []byte(liveAssertionsMarker))
 }
 
 func (c *liveRecordCapture) finishLine() {
@@ -2071,6 +2073,14 @@ func (c *liveRecordCapture) finishLine() {
 				c.invalid = true
 			} else {
 				c.appProgressSeen = true
+				c.records = append(c.records, record)
+			}
+		}
+		if strings.Contains(record, liveAssertionsMarker) {
+			if !liveAssertionsRecord(record) || c.assertionsSeen {
+				c.invalid = true
+			} else {
+				c.assertionsSeen = true
 				c.records = append(c.records, record)
 			}
 		}
@@ -2257,6 +2267,41 @@ func liveAppProgressRecord(record string) bool {
 	launched, launchedOK := strings.CutPrefix(fields[7], "launched=")
 	http, httpOK := strings.CutPrefix(fields[8], "http=")
 	return startOK && postgresOK && redisOK && gateOK && launchedOK && httpOK && liveAppProgressCategories[start] && liveAppProgressCategories[postgres] && liveAppProgressCategories[redis] && liveAppProgressCategories[gate] && liveAppProgressCategories[launched] && liveAppProgressCategories[http] && record == fmt.Sprintf("%s start=%s postgres=%s redis=%s gate=%s launched=%s http=%s\n", liveAppProgressMarker, start, postgres, redis, gate, launched, http)
+}
+
+const liveAssertionsMarker = "live assertions:"
+
+func reportLiveAssertions(values ...bool) {
+	if len(values) != 13 {
+		return
+	}
+	category := func(value bool) string {
+		if value {
+			return "yes"
+		}
+		return "no"
+	}
+	record := fmt.Sprintf("%s data=%s app=%s env=%s pg=%s pg-deny=%s pg-catalog=%s redis=%s redis-deny=%s redis-default=%s redis-acl=%s pg-drop=%s redis-drop=%s foreign=%s\n", liveAssertionsMarker, category(values[0]), category(values[1]), category(values[2]), category(values[3]), category(values[4]), category(values[5]), category(values[6]), category(values[7]), category(values[8]), category(values[9]), category(values[10]), category(values[11]), category(values[12]))
+	if liveAssertionsRecord(record) {
+		_, _ = os.Stderr.WriteString(record)
+	}
+}
+
+func liveAssertionsRecord(record string) bool {
+	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
+	if len(fields) != 15 || strings.Join(fields[:2], " ") != liveAssertionsMarker {
+		return false
+	}
+	names := []string{"data", "app", "env", "pg", "pg-deny", "pg-catalog", "redis", "redis-deny", "redis-default", "redis-acl", "pg-drop", "redis-drop", "foreign"}
+	values := make([]string, len(names))
+	for i, name := range names {
+		value, ok := strings.CutPrefix(fields[i+2], name+"=")
+		if !ok || (value != "yes" && value != "no") {
+			return false
+		}
+		values[i] = value
+	}
+	return record == fmt.Sprintf("%s data=%s app=%s env=%s pg=%s pg-deny=%s pg-catalog=%s redis=%s redis-deny=%s redis-default=%s redis-acl=%s pg-drop=%s redis-drop=%s foreign=%s\n", liveAssertionsMarker, values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9], values[10], values[11], values[12])
 }
 
 func livePostCreateSnapshotRecord(record string) bool {
