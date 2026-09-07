@@ -320,9 +320,17 @@ describe("Task4 CI contracts", () => {
     expect(runtimeCleanup).not.toMatch(/printf|echo/);
   });
 
+  it("starts dockerd with a private inherited runtime directory", () => {
+    const runtimeDirectoryPermissions = "chmod 0700 /var/run/sub2api-runtime";
+    const dockerdStart = "XDG_RUNTIME_DIR=/var/run/sub2api-runtime setsid dockerd";
+
+    expect(liveHostSandbox).toMatch(/^mkdir -p \/usr\/local\/libexec \/var\/run\/sshd \/var\/run\/sub2api-runtime$/m);
+    expect(liveHostSandbox).toMatch(/^chmod 0700 \/var\/run\/sub2api-runtime$/m);
+    expect(liveHostSandbox.indexOf(dockerdStart)).toBeGreaterThan(liveHostSandbox.indexOf(runtimeDirectoryPermissions));
+  });
+
   it("leaves the fresh Host root exclusively to Bootstrap", () => {
     expect(liveHostSandbox).toContain("mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib");
-    expect(liveHostSandbox).toMatch(/^mkdir -p \/usr\/local\/libexec \/var\/run\/sshd$/m);
     expect(liveHostSandbox).not.toMatch(/^mkdir\b[^\n]*\/var\/lib\/sub2api-host/m);
     expect(liveHostSandbox.indexOf("setsid /usr/sbin/sshd")).toBeGreaterThan(liveHostSandbox.indexOf("mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib"));
     expect(hostRuntimeTest).toContain("TestBootstrapRejectsExistingSecureRootWithoutStateAsNonFresh");

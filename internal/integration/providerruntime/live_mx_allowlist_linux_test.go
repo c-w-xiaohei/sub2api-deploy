@@ -4221,6 +4221,21 @@ func liveLocalDataObservations(facts liveDataObserverFacts, ownership string) []
 	return observations
 }
 
+func TestLiveHostSandboxEstablishesPrivateDockerRuntimeBeforeDaemon(t *testing.T) {
+	script := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "live-host-sandbox.sh")
+	source, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDirectorySetup := []byte("mkdir -p /usr/local/libexec /var/run/sshd /var/run/sub2api-runtime\nchmod 0700 /var/run/sub2api-runtime")
+	dockerdStart := []byte("XDG_RUNTIME_DIR=/var/run/sub2api-runtime setsid dockerd")
+	runtimeDirectorySetupIndex := bytes.Index(source, runtimeDirectorySetup)
+	dockerdStartIndex := bytes.Index(source, dockerdStart)
+	if runtimeDirectorySetupIndex < 0 || dockerdStartIndex < 0 || runtimeDirectorySetupIndex >= dockerdStartIndex {
+		t.Fatal("live Docker runtime directory is not private and established before daemon startup")
+	}
+}
+
 func TestLiveDockerFailureReasonUsesSpecificPrecedenceAndExplicitFallback(t *testing.T) {
 	script := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "live-host-sandbox.sh")
 	tests := []struct {

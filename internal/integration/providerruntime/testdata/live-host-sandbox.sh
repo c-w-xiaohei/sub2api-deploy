@@ -168,11 +168,12 @@ mount --bind "$root/cgroup-host" /sys/fs/cgroup
 mount -t tmpfs -o mode=0755,size=32m tmpfs /usr/local
 mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
 mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
-mkdir -p /usr/local/libexec /var/run/sshd
+mkdir -p /usr/local/libexec /var/run/sshd /var/run/sub2api-runtime
+chmod 0700 /var/run/sub2api-runtime
 printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
 printf '%s\n' '{}' >"$root/$name/daemon.json"
 stage=docker-start
-setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root /var/run/sub2api-docker --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
+XDG_RUNTIME_DIR=/var/run/sub2api-runtime setsid dockerd --config-file "$root/$name/daemon.json" --storage-driver vfs --data-root "$root/$name/docker" --exec-root /var/run/sub2api-docker --pidfile "$root/$name/dockerd.pid" --host unix:///var/run/docker.sock --iptables=true --ip-forward=true --ip-masq=true --icc=false >"$log" 2>&1 &
 dockerd=$!
 i=0
 until docker_cli info >/dev/null 2>&1; do
