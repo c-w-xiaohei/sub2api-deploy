@@ -438,35 +438,41 @@ describe("Task4 CI contracts", () => {
     const categories = ["ok", "timeout", "exit-1", "exit-126", "exit-127", "exit-other", "failed"];
     const absoluteErrors = ["none", "empty", "not-found", "permission", "cgroup", "namespace", "rootfs", "runtime", "daemon", "unknown"];
     const rootfsCategories = ["present", "absent", "nonregular", "nonexecutable", "unavailable"];
-    const children = ["ran", "not-run", "timeout", "invalid", "failed"];
-    for (const [exec, absolute, absoluteError, child, rootfs, direct, directError] of [
-      ...categories.map((exec) => [exec, "ok", "none", "ran", "unavailable", "failed", "unknown"]),
-      ...categories.slice(1).map((absolute) => ["ok", absolute, "none", "ran", "unavailable", "failed", "unknown"]),
-      ...absoluteErrors.map((absoluteError) => ["ok", "exit-127", absoluteError, "ran", "unavailable", "failed", "unknown"]),
-      ...children.map((child) => ["ok", "exit-127", "empty", child, "unavailable", "failed", "unknown"]),
-      ...rootfsCategories.map((rootfs) => ["ok", "exit-127", "empty", "ran", rootfs, "failed", "unknown"]),
-      ...categories.map((direct) => ["ok", "exit-127", "empty", "ran", "present", direct, direct === "ok" ? "none" : "unknown"]),
-      ...absoluteErrors.map((directError) => ["ok", "exit-127", "empty", "ran", "present", "exit-127", directError]),
+    const childStatuses = ["ok", "timeout", "canceled", "exit-1", "exit-126", "exit-127", "exit-other", "failed"];
+    const childOutputs = ["sentinel", "empty", "other", "overflow"];
+    const childStderrCategories = ["empty", "present", "overflow"];
+    for (const [exec, absolute, absoluteError, childStatus, childOutput, childStderr, rootfs, direct, directError] of [
+      ...categories.map((exec) => [exec, "ok", "none", "exit-127", "sentinel", "empty", "unavailable", "failed", "unknown"]),
+      ...categories.slice(1).map((absolute) => ["ok", absolute, "none", "exit-127", "sentinel", "empty", "unavailable", "failed", "unknown"]),
+      ...absoluteErrors.map((absoluteError) => ["ok", "exit-127", absoluteError, "exit-127", "sentinel", "empty", "unavailable", "failed", "unknown"]),
+      ...childStatuses.map((childStatus) => ["ok", "exit-127", "empty", childStatus, "sentinel", "empty", "unavailable", "failed", "unknown"]),
+      ...childOutputs.map((childOutput) => ["ok", "exit-127", "empty", "exit-127", childOutput, "empty", "unavailable", "failed", "unknown"]),
+      ...childStderrCategories.map((childStderr) => ["ok", "exit-127", "empty", "exit-127", "sentinel", childStderr, "unavailable", "failed", "unknown"]),
+      ...rootfsCategories.map((rootfs) => ["ok", "exit-127", "empty", "exit-127", "sentinel", "empty", rootfs, "failed", "unknown"]),
+      ...categories.map((direct) => ["ok", "exit-127", "empty", "exit-127", "sentinel", "empty", "present", direct, direct === "ok" ? "none" : "unknown"]),
+      ...absoluteErrors.map((directError) => ["ok", "exit-127", "empty", "exit-127", "sentinel", "empty", "present", "exit-127", directError]),
     ]) {
-      const output = `live postgres container: exec=${exec} absolute=${absolute} absolute-error=${absoluteError} child=${child} rootfs=${rootfs} direct=${direct} direct-error=${directError} state=running restarts=zero oom=no error=absent\n`;
+      const output = `live postgres container: exec=${exec} absolute=${absolute} absolute-error=${absoluteError} cs=${childStatus} co=${childOutput} ce=${childStderr} rootfs=${rootfs} direct=${direct} direct-error=${directError} state=running restarts=zero oom=no error=absent\n`;
       const records = [...validLiveRecords(), liveOutput(output), livePass];
       expect(parseLiveRecords(records, "diagnostic")).toBe(0);
       expect(parseLiveRecords(records, "candidate")).toBe(1);
     }
     for (const output of [
-      "prefix live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent extra=field\n",
-      "live postgres container: exec=exit-37 absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=exit-37 absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: absolute=ok exec=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none direct=failed direct-error=unknown rootfs=unavailable state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=arbitrary direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=arbitrary state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none child=arbitrary rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable child=ran direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none child=ran child=ran rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
-      "live postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\nlive postgres container: exec=ok absolute=ok absolute-error=none rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "prefix live postgres container: exec=ok absolute=ok absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent extra=field\n",
+      "live postgres container: exec=exit-37 absolute=ok absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=exit-37 absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: absolute=ok exec=ok absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none co=sentinel cs=exit-127 ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=arbitrary direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none cs=exit-127 co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=arbitrary state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none cs=arbitrary co=sentinel ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none cs=exit-127 co=arbitrary ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none cs=exit-127 co=sentinel ce=arbitrary rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none cs=exit-127 co=sentinel ce=empty ce=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none child-status=exit-127 child-output=sentinel child-stderr=empty rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
+      "live postgres container: exec=ok absolute=ok absolute-error=none child=ran rootfs=unavailable direct=failed direct-error=unknown state=running restarts=zero oom=no error=absent\n",
     ]) {
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
