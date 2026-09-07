@@ -489,7 +489,13 @@ describe("Task4 CI contracts", () => {
 
   it("rejects provider failure markers only in the success-only candidate parser", () => {
     const valid = validLiveRecords();
-    for (const [marker, diagnostic] of [["live namespace fixture failed: data-create-response\n", 0], ["live namespace fixture failed: unknown detail\n", 1]] as const) {
+    for (const [marker, diagnostic] of [
+      ["live namespace fixture failed: data-create-response\n", 0],
+      ["live namespace fixture failed: app-create-timeout\n", 0],
+      ["live namespace fixture failed: app-create-bootstrap-remote\n", 0],
+      ["live namespace fixture failed: app-create-sensitive-detail\n", 1],
+      ["live namespace fixture failed: unknown detail\n", 1],
+    ] as const) {
       const records = [...valid, liveOutput(marker), livePass];
       expect(parseLiveRecords(records, "diagnostic")).toBe(diagnostic);
       expect(parseLiveRecords(records, "candidate")).toBe(1);

@@ -153,6 +153,7 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	reportLiveStage("app-create")
 	appCreated, err := provider.client.Create(ctx, &pulumirpc.CreateRequest{Urn: "urn:pulumi:live::mx-allowlist::sub2api-host:index:Host::app", Properties: rpcProperties(t, appInput)})
 	if err != nil || appCreated == nil || appCreated.Id == "" {
+		reportLiveStage(liveAppCreateFailureStage(err))
 		t.Fatal("released App Host Create failed")
 	}
 	reportLiveStage("app-ready-check")
@@ -2515,6 +2516,15 @@ func liveFailureCategory(ctx context.Context, output []byte) string {
 		"data-create-unknown":            true,
 		"data-ready-check":               true,
 		"app-create":                     true,
+		"app-create-artifact":            true,
+		"app-create-bootstrap":           true,
+		"app-create-bootstrap-remote":    true,
+		"app-create-host":                true,
+		"app-create-observation":         true,
+		"app-create-response":            true,
+		"app-create-timeout":             true,
+		"app-create-transport":           true,
+		"app-create-unknown":             true,
 		"app-ready-check":                true,
 		"post-create-assertions":         true,
 		"complete":                       true,
@@ -2548,7 +2558,14 @@ func reportLiveNamespaceFailure(stage string) {
 }
 
 func liveDataCreateFailureStage(err error) string {
-	const prefix = "data-create-"
+	return liveCreateFailureStage("data-create-", err)
+}
+
+func liveAppCreateFailureStage(err error) string {
+	return liveCreateFailureStage("app-create-", err)
+}
+
+func liveCreateFailureStage(prefix string, err error) string {
 	if err == nil {
 		return prefix + "response"
 	}
@@ -2640,6 +2657,31 @@ func TestLiveDataCreateFailureStageReportsOnlyFixedClasses(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := liveDataCreateFailureStage(test.err); got != test.want {
 				t.Fatalf("liveDataCreateFailureStage() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLiveAppCreateFailureStageReportsOnlyFixedClasses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "missing response", want: "app-create-response"},
+		{name: "timeout", err: errors.New("rpc error: context deadline exceeded"), want: "app-create-timeout"},
+		{name: "transport", err: errors.New("rpc error: transport failed"), want: "app-create-transport"},
+		{name: "artifact", err: errors.New("rpc error: host artifact unavailable"), want: "app-create-artifact"},
+		{name: "host", err: errors.New("rpc error: unsupported host"), want: "app-create-host"},
+		{name: "bootstrap", err: errors.New("rpc error: invalid bootstrap response"), want: "app-create-bootstrap"},
+		{name: "bootstrap remote", err: errors.New("rpc error: bootstrap remote response"), want: "app-create-bootstrap-remote"},
+		{name: "observation", err: errors.New("rpc error: unsafe remote observation"), want: "app-create-observation"},
+		{name: "unknown redacts detail", err: errors.New("credential canary"), want: "app-create-unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := liveAppCreateFailureStage(test.err); got != test.want {
+				t.Fatalf("liveAppCreateFailureStage() = %q, want %q", got, test.want)
 			}
 		})
 	}
