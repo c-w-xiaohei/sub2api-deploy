@@ -488,7 +488,7 @@ describe("Task4 CI contracts", () => {
   });
 
   it("accepts one fixed assertion diagnostic and rejects it from candidates", () => {
-    const valid = "live assertions: data=yes app=yes env=yes pg=yes pg-deny=yes pg-catalog=yes redis=yes redis-deny=yes redis-default=yes redis-acl=no pg-drop=yes redis-drop=yes foreign=yes pa=o ra=o pb=t rb=t pp=yes rp=yes\n";
+    const valid = "live assertions: data=yes app=yes env=yes pg=yes pg-deny=yes pg-catalog=yes redis=yes redis-deny=yes redis-default=yes redis-acl=no pg-drop=yes redis-drop=yes foreign=yes pa=o ra=o pb=t rb=t pp=yes rp=yes pc=11111111\n";
     expect(parseLiveRecords([...validLiveRecords(), liveOutput(valid), livePass], "diagnostic")).toBe(0);
     expect(parseLiveRecords([...validLiveRecords(), liveOutput(valid), livePass], "candidate")).toBe(1);
     for (const output of [
@@ -496,6 +496,7 @@ describe("Task4 CI contracts", () => {
       valid.replace("redis-acl=no", "redis-acl=unknown"),
       valid.replace("pa=o", "pa=unknown"),
       valid.replace("rp=yes", "rp=unknown"),
+      valid.replace("pc=11111111", "pc=unknown"),
       valid.replace("foreign=yes", "foreign=yes extra=yes"),
       valid + valid,
     ]) {
