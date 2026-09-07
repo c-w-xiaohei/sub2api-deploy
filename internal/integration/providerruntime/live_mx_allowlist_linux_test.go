@@ -170,8 +170,14 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 	redisWrongPasswordDenied := fixture.redisClientFails(t, fixture.appNS, "wrong-password")
 	redisDefaultDenied := fixture.redisDefaultDenied(t, fixture.appNS)
 	redisACL := fixture.redisACL(t)
-	postgresDrop := fixture.socketDropped(t, fixture.badNS, "5432") && fixture.exactDataAdmissionPolicy(t, "5432")
-	redisDrop := fixture.socketDropped(t, fixture.badNS, "6379") && fixture.exactDataAdmissionPolicy(t, "6379")
+	postgresAppSocket := fixture.socketProbe(t, fixture.appNS, "5432")
+	redisAppSocket := fixture.socketProbe(t, fixture.appNS, "6379")
+	postgresBadSocket := fixture.socketProbe(t, fixture.badNS, "5432")
+	redisBadSocket := fixture.socketProbe(t, fixture.badNS, "6379")
+	postgresPolicy := fixture.exactDataAdmissionPolicy(t, "5432")
+	redisPolicy := fixture.exactDataAdmissionPolicy(t, "6379")
+	postgresDrop := postgresBadSocket == "timeout" && postgresPolicy
+	redisDrop := redisBadSocket == "timeout" && redisPolicy
 	foreignAfter := fixture.nftDigest(t, fixture.foreignTable)
 	foreignUnchanged := foreignBefore == foreignAfter
 	appEnvironmentAuthenticated := appHostPass && fixture.appContainerReady(t)
@@ -210,7 +216,7 @@ func runProviderRuntimeLiveNamespace(t *testing.T) {
 		ForeignTableSHA256:              foreignAfter,
 	})
 	if !allChecksPass {
-		reportLiveAssertions(dataHostPass, appHostPass, appEnvironmentAuthenticated, postgresPass, postgresWrongPasswordDenied, postgresCatalog, redisPass, redisWrongPasswordDenied, redisDefaultDenied, redisACL, postgresDrop, redisDrop, foreignUnchanged)
+		reportLiveAssertions([]bool{dataHostPass, appHostPass, appEnvironmentAuthenticated, postgresPass, postgresWrongPasswordDenied, postgresCatalog, redisPass, redisWrongPasswordDenied, redisDefaultDenied, redisACL, postgresDrop, redisDrop, foreignUnchanged}, postgresAppSocket, redisAppSocket, postgresBadSocket, redisBadSocket, postgresPolicy, redisPolicy)
 		t.Fatal("live MX-ALLOWLIST-01 assertion failed")
 	}
 	reportLiveStage("complete")
@@ -461,14 +467,20 @@ func (f *liveFixture) redisClientFails(t *testing.T, ns, password string) bool {
 func (f *liveFixture) redisDefaultDenied(t *testing.T, ns string) bool {
 	return !f.netnsShellOK(t, 8*time.Second, ns, "redis-cli -h "+f.dataIP+" -p 6379 PING | grep -qx PONG")
 }
-func (f *liveFixture) socketDropped(t *testing.T, ns, port string) bool {
+func (f *liveFixture) socketProbe(t *testing.T, ns, port string) string {
 	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ip", "netns", "exec", ns, "bash", "-ceu", "exec 3<>/dev/tcp/"+f.dataIP+"/"+port)
 	var out boundedBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	_ = cmd.Run()
-	return ctx.Err() == context.DeadlineExceeded
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "timeout"
+	}
+	if err != nil {
+		return "failed"
+	}
+	return "ok"
 }
 func (f *liveFixture) exactDataAdmissionPolicy(t *testing.T, port string) bool {
 	b := f.sandboxOutput(t, "data", 8*time.Second, "nft", "-j", "list", "table", "inet", f.ownedTable)
@@ -539,7 +551,7 @@ func nftAction(raw json.RawMessage, action string) bool {
 	return json.Unmarshal(raw, &v) == nil && len(v) == 1 && v[action] != nil
 }
 func (f *liveFixture) postgresCatalog(t *testing.T) bool {
-	return f.sandboxShellOK(t, "data", 10*time.Second, `id=$(docker ps --filter ancestor=postgres:18-alpine -q); [ -n "$id" ]; docker exec --user postgres "$id" psql -X -U s2h_admin -d postgres -tAc "SELECT bool_and(v) FROM (VALUES ((SELECT rolcanlogin AND NOT rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls FROM pg_roles WHERE rolname='api_user')), ((SELECT NOT pg_has_role('api_user', 's2h_admin', 'member'))), ((SELECT pg_has_role('api_user', datdba, 'member') FROM pg_database WHERE datname='api_db')), ((SELECT datdba=(SELECT oid FROM pg_roles WHERE rolname LIKE 's2h_%') FROM pg_database WHERE datname='api_db')), ((SELECT (SELECT nspowner=(SELECT datdba FROM pg_database WHERE datname='api_db') FROM pg_namespace WHERE nspname='public'))), ((SELECT has_schema_privilege('api_user','public','USAGE') AND NOT has_schema_privilege('api_user','public','CREATE'))), ((SELECT EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole WHERE r.rolname='api_user'))), ((SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE type='host' AND auth_method='trust'))) ) x(v)" | grep -qx t`)
+	return f.sandboxShellOK(t, "data", 10*time.Second, `id=$(docker ps --filter ancestor=postgres:18-alpine -q); [ -n "$id" ]; docker exec --user postgres "$id" psql -X -U s2h_admin -d postgres -tAc "SELECT bool_and(v IS TRUE) FROM (VALUES ((SELECT rolcanlogin AND NOT rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls FROM pg_roles WHERE rolname='api_user')), ((SELECT NOT pg_has_role('api_user', 's2h_admin', 'member'))), ((SELECT pg_has_role('api_user', datdba, 'member') FROM pg_database WHERE datname='api_db')), ((SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid=datdba AND r.rolname ~ '^s2h_owner_[0-9a-f]{24}$') FROM pg_database WHERE datname='api_db')), ((SELECT (SELECT nspowner=(SELECT datdba FROM pg_database WHERE datname='api_db') FROM pg_namespace WHERE nspname='public'))), ((SELECT has_schema_privilege('api_user','public','USAGE') AND NOT has_schema_privilege('api_user','public','CREATE'))), ((SELECT EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole WHERE r.rolname='api_user'))), ((SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE type='host' AND auth_method='trust'))) ) x(v)" | grep -qx t`)
 }
 func (f *liveFixture) redisACL(t *testing.T) bool {
 	id := strings.TrimSpace(string(f.sandboxOutput(t, "data", 8*time.Second, "docker", "ps", "--filter", "ancestor=redis:8-alpine", "-q")))
@@ -2271,7 +2283,7 @@ func liveAppProgressRecord(record string) bool {
 
 const liveAssertionsMarker = "live assertions:"
 
-func reportLiveAssertions(values ...bool) {
+func reportLiveAssertions(values []bool, postgresAppSocket, redisAppSocket, postgresBadSocket, redisBadSocket string, postgresPolicy, redisPolicy bool) {
 	if len(values) != 13 {
 		return
 	}
@@ -2281,7 +2293,10 @@ func reportLiveAssertions(values ...bool) {
 		}
 		return "no"
 	}
-	record := fmt.Sprintf("%s data=%s app=%s env=%s pg=%s pg-deny=%s pg-catalog=%s redis=%s redis-deny=%s redis-default=%s redis-acl=%s pg-drop=%s redis-drop=%s foreign=%s\n", liveAssertionsMarker, category(values[0]), category(values[1]), category(values[2]), category(values[3]), category(values[4]), category(values[5]), category(values[6]), category(values[7]), category(values[8]), category(values[9]), category(values[10]), category(values[11]), category(values[12]))
+	socketCategory := func(value string) string {
+		return map[string]string{"ok": "o", "timeout": "t", "failed": "f"}[value]
+	}
+	record := fmt.Sprintf("%s data=%s app=%s env=%s pg=%s pg-deny=%s pg-catalog=%s redis=%s redis-deny=%s redis-default=%s redis-acl=%s pg-drop=%s redis-drop=%s foreign=%s pa=%s ra=%s pb=%s rb=%s pp=%s rp=%s\n", liveAssertionsMarker, category(values[0]), category(values[1]), category(values[2]), category(values[3]), category(values[4]), category(values[5]), category(values[6]), category(values[7]), category(values[8]), category(values[9]), category(values[10]), category(values[11]), category(values[12]), socketCategory(postgresAppSocket), socketCategory(redisAppSocket), socketCategory(postgresBadSocket), socketCategory(redisBadSocket), category(postgresPolicy), category(redisPolicy))
 	if liveAssertionsRecord(record) {
 		_, _ = os.Stderr.WriteString(record)
 	}
@@ -2289,19 +2304,20 @@ func reportLiveAssertions(values ...bool) {
 
 func liveAssertionsRecord(record string) bool {
 	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
-	if len(fields) != 15 || strings.Join(fields[:2], " ") != liveAssertionsMarker {
+	if len(fields) != 21 || strings.Join(fields[:2], " ") != liveAssertionsMarker {
 		return false
 	}
-	names := []string{"data", "app", "env", "pg", "pg-deny", "pg-catalog", "redis", "redis-deny", "redis-default", "redis-acl", "pg-drop", "redis-drop", "foreign"}
+	names := []string{"data", "app", "env", "pg", "pg-deny", "pg-catalog", "redis", "redis-deny", "redis-default", "redis-acl", "pg-drop", "redis-drop", "foreign", "pa", "ra", "pb", "rb", "pp", "rp"}
 	values := make([]string, len(names))
 	for i, name := range names {
 		value, ok := strings.CutPrefix(fields[i+2], name+"=")
-		if !ok || (value != "yes" && value != "no") {
+		isSocket := i >= 13 && i <= 16
+		if !ok || (!isSocket && value != "yes" && value != "no") || (isSocket && value != "o" && value != "t" && value != "f") {
 			return false
 		}
 		values[i] = value
 	}
-	return record == fmt.Sprintf("%s data=%s app=%s env=%s pg=%s pg-deny=%s pg-catalog=%s redis=%s redis-deny=%s redis-default=%s redis-acl=%s pg-drop=%s redis-drop=%s foreign=%s\n", liveAssertionsMarker, values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9], values[10], values[11], values[12])
+	return record == fmt.Sprintf("%s data=%s app=%s env=%s pg=%s pg-deny=%s pg-catalog=%s redis=%s redis-deny=%s redis-default=%s redis-acl=%s pg-drop=%s redis-drop=%s foreign=%s pa=%s ra=%s pb=%s rb=%s pp=%s rp=%s\n", liveAssertionsMarker, values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9], values[10], values[11], values[12], values[13], values[14], values[15], values[16], values[17], values[18])
 }
 
 func livePostCreateSnapshotRecord(record string) bool {
