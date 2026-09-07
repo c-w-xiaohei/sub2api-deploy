@@ -282,6 +282,13 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain('[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]\n          safe="$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA"');
     expect(liveApp).toContain(': "${LIVE_PROGRESS_ID:?}"');
     expect(liveApp).toContain('rm -f "/app/data/.live-$LIVE_PROGRESS_ID-start"');
+    expect(liveApp).toContain("postgres=failed\nredis=failed\nwhile :; do");
+    expect(liveApp.match(/^postgres=failed$/gm)).toHaveLength(1);
+    expect(liveApp.match(/^redis=failed$/gm)).toHaveLength(1);
+    expect(liveApp.indexOf("postgres=failed")).toBeLessThan(liveApp.indexOf("while :; do"));
+    expect(liveApp.indexOf("redis=failed")).toBeLessThan(liveApp.indexOf("while :; do"));
+    expect(liveApp).toContain('if [ "$postgres" != ready ] && PGPASSWORD="$DATABASE_PASSWORD" psql');
+    expect(liveApp).toContain('if [ "$redis" != ready ] && REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli');
     expect(liveApp).toContain('REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --user "$REDIS_USERNAME"');
     expect(liveApp).not.toContain('redis-cli --user "$REDIS_USERNAME" --pass');
     expect(liveApp.indexOf("busybox httpd -f -p 8080 -h /srv &")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));

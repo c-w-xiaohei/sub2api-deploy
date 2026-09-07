@@ -7,14 +7,14 @@ set -eu
 rm -f "/app/data/.live-$LIVE_PROGRESS_ID-start" "/app/data/.live-$LIVE_PROGRESS_ID-postgres" "/app/data/.live-$LIVE_PROGRESS_ID-redis" "/app/data/.live-$LIVE_PROGRESS_ID-http"
 : > "/app/data/.live-$LIVE_PROGRESS_ID-start"
 i=0
+postgres=failed
+redis=failed
 while :; do
-  postgres=failed
-  redis=failed
-  if PGPASSWORD="$DATABASE_PASSWORD" psql "host=$DATABASE_HOST port=$DATABASE_PORT dbname=$DATABASE_DBNAME user=$DATABASE_USER sslmode=$DATABASE_SSLMODE connect_timeout=3" -X -tAc 'SELECT 1' >/dev/null 2>&1; then
+  if [ "$postgres" != ready ] && PGPASSWORD="$DATABASE_PASSWORD" psql "host=$DATABASE_HOST port=$DATABASE_PORT dbname=$DATABASE_DBNAME user=$DATABASE_USER sslmode=$DATABASE_SSLMODE connect_timeout=3" -X -tAc 'SELECT 1' >/dev/null 2>&1; then
     : > "/app/data/.live-$LIVE_PROGRESS_ID-postgres"
     postgres=ready
   fi
-  if REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --user "$REDIS_USERNAME" -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" PING 2>/dev/null | grep -qx PONG; then
+  if [ "$redis" != ready ] && REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --user "$REDIS_USERNAME" -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" PING 2>/dev/null | grep -qx PONG; then
     : > "/app/data/.live-$LIVE_PROGRESS_ID-redis"
     redis=ready
   fi
