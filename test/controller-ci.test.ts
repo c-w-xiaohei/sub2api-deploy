@@ -465,18 +465,18 @@ describe("Task4 CI contracts", () => {
 
   it("accepts one fixed app progress diagnostic and rejects it from candidates", () => {
     for (const output of [
-      "live app progress: start=present postgres=present redis=absent http=absent\n",
-      "live app progress: start=absent postgres=absent redis=absent http=absent\n",
-      "live app progress: start=unavailable postgres=unavailable redis=unavailable http=unavailable\n",
+      "live app progress: start=present postgres=present redis=absent gate=absent launched=absent http=absent\n",
+      "live app progress: start=absent postgres=absent redis=absent gate=absent launched=absent http=absent\n",
+      "live app progress: start=unavailable postgres=unavailable redis=unavailable gate=unavailable launched=unavailable http=unavailable\n",
     ]) {
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(0);
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);
     }
     for (const output of [
-      "prefix live app progress: start=present postgres=present redis=absent http=absent\n",
-      "live app progress: start=present postgres=present redis=absent http=absent extra=field\n",
-      "live app progress: start=present postgres=unknown redis=absent http=absent\n",
-      "live app progress: start=present postgres=present redis=absent http=absent\nlive app progress: start=present postgres=present redis=absent http=absent\n",
+      "prefix live app progress: start=present postgres=present redis=absent gate=absent launched=absent http=absent\n",
+      "live app progress: start=present postgres=present redis=absent gate=absent launched=absent http=absent extra=field\n",
+      "live app progress: start=present postgres=unknown redis=absent gate=absent launched=absent http=absent\n",
+      "live app progress: start=present postgres=present redis=absent gate=absent launched=absent http=absent\nlive app progress: start=present postgres=present redis=absent gate=absent launched=absent http=absent\n",
     ]) {
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "diagnostic")).toBe(1);
       expect(parseLiveRecords([...validLiveRecords(), liveOutput(output), livePass], "candidate")).toBe(1);

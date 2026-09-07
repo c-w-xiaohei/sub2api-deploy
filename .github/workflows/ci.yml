@@ -411,9 +411,9 @@ jobs:
                 preflight = { socket: match[1], container: match[2], network: match[3], containerDiscovery: match[4], networkDiscovery: match[5], dockerHost: match[6], dockerContext: match[7], dockerConfig: match[8] };
               }
             if (event.Output.includes('live app progress:')) {
-              const match = event.Output.match(/^live app progress: start=(present|absent|unavailable) postgres=(present|absent|unavailable) redis=(present|absent|unavailable) http=(present|absent|unavailable)\n$/);
+              const match = event.Output.match(/^live app progress: start=(present|absent|unavailable) postgres=(present|absent|unavailable) redis=(present|absent|unavailable) gate=(present|absent|unavailable) launched=(present|absent|unavailable) http=(present|absent|unavailable)\n$/);
               if (!match || appProgress) throw Error('invalid live app progress');
-              appProgress = { start: match[1], postgres: match[2], redis: match[3], http: match[4] };
+              appProgress = { start: match[1], postgres: match[2], redis: match[3], gate: match[4], launched: match[5], http: match[6] };
             }
           }
 
@@ -427,7 +427,7 @@ jobs:
           if (postgresReadiness) console.log(`${test} postgres readiness: pgdata=${postgresReadiness.pgdata} server=${postgresReadiness.server} psql=${postgresReadiness.psql}`);
           if (postgresLifecycle) console.log(`${test} postgres lifecycle: exec=${postgresLifecycle.exec} absolute=${postgresLifecycle.absolute} absolute-error=${postgresLifecycle.absoluteError} cs=${postgresLifecycle.cs} co=${postgresLifecycle.co} ce=${postgresLifecycle.ce} rootfs=${postgresLifecycle.rootfs} direct=${postgresLifecycle.direct} direct-error=${postgresLifecycle.directError} state=${postgresLifecycle.state} restarts=${postgresLifecycle.restarts} oom=${postgresLifecycle.oom} error=${postgresLifecycle.error}`);
           if (preflight) console.log(`${test} ssh docker preflight: socket=${preflight.socket} container=${preflight.container} network=${preflight.network} container-discovery=${preflight.containerDiscovery} network-discovery=${preflight.networkDiscovery} docker-host=${preflight.dockerHost} docker-context=${preflight.dockerContext} docker-config=${preflight.dockerConfig}`);
-          if (appProgress) console.log(`${test} app progress: start=${appProgress.start} postgres=${appProgress.postgres} redis=${appProgress.redis} http=${appProgress.http}`);
+          if (appProgress) console.log(`${test} app progress: start=${appProgress.start} postgres=${appProgress.postgres} redis=${appProgress.redis} gate=${appProgress.gate} launched=${appProgress.launched} http=${appProgress.http}`);
           NODE
           sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" node - "$raw" "$trace" "$safe" "$candidate/consumer-trace.json" <<'NODE'
            for(const l of require('node:fs').readFileSync(process.argv[2],'utf8').split('\n')){if(!l)continue;const e=JSON.parse(l);if(typeof e.Output==='string'&&(e.Output.includes('live post-create snapshot:')||e.Output.includes('live postgres readiness:')||e.Output.includes('live postgres container:')||e.Output.includes('live app progress:')))throw Error('failure-only diagnostic marker on candidate pass')}

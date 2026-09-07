@@ -4,7 +4,7 @@ set -eu
 : "${DATABASE_HOST:?}" "${DATABASE_PORT:?}" "${DATABASE_USER:?}" "${DATABASE_PASSWORD:?}" "${DATABASE_DBNAME:?}" "${DATABASE_SSLMODE:?}"
 : "${REDIS_HOST:?}" "${REDIS_PORT:?}" "${REDIS_USERNAME:?}" "${REDIS_PASSWORD:?}" "${REDIS_DB:?}" "${REDIS_ENABLE_TLS:?}"
 : "${LIVE_PROGRESS_ID:?}"
-rm -f "/app/data/.live-$LIVE_PROGRESS_ID-start" "/app/data/.live-$LIVE_PROGRESS_ID-postgres" "/app/data/.live-$LIVE_PROGRESS_ID-redis" "/app/data/.live-$LIVE_PROGRESS_ID-http"
+rm -f "/app/data/.live-$LIVE_PROGRESS_ID-start" "/app/data/.live-$LIVE_PROGRESS_ID-postgres" "/app/data/.live-$LIVE_PROGRESS_ID-redis" "/app/data/.live-$LIVE_PROGRESS_ID-gate" "/app/data/.live-$LIVE_PROGRESS_ID-launched" "/app/data/.live-$LIVE_PROGRESS_ID-http"
 : > "/app/data/.live-$LIVE_PROGRESS_ID-start"
 i=0
 postgres=failed
@@ -23,11 +23,13 @@ while :; do
   [ "$i" -lt 20 ] || exit 1
   sleep 1
 done
+: > "/app/data/.live-$LIVE_PROGRESS_ID-gate"
 mkdir -p /srv
 : > /srv/ready
 busybox httpd -f -p 8080 -h /srv &
 httpd=$!
 trap 'kill "$httpd" 2>/dev/null || true' EXIT INT TERM
+: > "/app/data/.live-$LIVE_PROGRESS_ID-launched"
 i=0
 until wget -q -O /dev/null http://127.0.0.1:8080/ready; do
   kill -0 "$httpd" 2>/dev/null || wait "$httpd"

@@ -2228,14 +2228,14 @@ func reportLiveAppProgress(parent context.Context, f *liveFixture, progressID st
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	if len(progressID) != 8 || strings.Trim(progressID, "0123456789abcdef") != "" {
-		_, _ = os.Stderr.WriteString(fmt.Sprintf("%s start=unavailable postgres=unavailable redis=unavailable http=unavailable\n", liveAppProgressMarker))
+		_, _ = os.Stderr.WriteString(fmt.Sprintf("%s start=unavailable postgres=unavailable redis=unavailable gate=unavailable launched=unavailable http=unavailable\n", liveAppProgressMarker))
 		return
 	}
 	dataToken := liveRuntimeToken("app-data", liveRuntimeToken("app", "api"))
 	path := "/var/lib/sub2api-host/runtime/data/" + dataToken
-	script := "if test -L " + path + " || ! test -d " + path + " || ! test -x " + path + "; then for marker in start postgres redis http; do printf '%s=unavailable ' \"$marker\"; done; else for marker in start postgres redis http; do file=" + path + "/.live-" + progressID + "-$marker; if test ! -L \"$file\" && test -f \"$file\"; then printf '%s=present ' \"$marker\"; else printf '%s=absent ' \"$marker\"; fi; done; fi"
+	script := "if test -L " + path + " || ! test -d " + path + " || ! test -x " + path + "; then for marker in start postgres redis gate launched http; do printf '%s=unavailable ' \"$marker\"; done; else for marker in start postgres redis gate launched http; do file=" + path + "/.live-" + progressID + "-$marker; if test ! -L \"$file\" && test -f \"$file\"; then printf '%s=present ' \"$marker\"; else printf '%s=absent ' \"$marker\"; fi; done; fi"
 	out, err := f.sandboxOutputForObserver(ctx, "app", 5*time.Second, "sh", "-c", script)
-	record := fmt.Sprintf("%s start=unavailable postgres=unavailable redis=unavailable http=unavailable\n", liveAppProgressMarker)
+	record := fmt.Sprintf("%s start=unavailable postgres=unavailable redis=unavailable gate=unavailable launched=unavailable http=unavailable\n", liveAppProgressMarker)
 	if err == nil {
 		candidate := liveAppProgressMarker + " " + strings.TrimSpace(string(out)) + "\n"
 		if liveAppProgressRecord(candidate) {
@@ -2247,14 +2247,16 @@ func reportLiveAppProgress(parent context.Context, f *liveFixture, progressID st
 
 func liveAppProgressRecord(record string) bool {
 	fields := strings.Fields(strings.TrimSuffix(record, "\n"))
-	if len(fields) != 7 || strings.Join(fields[:3], " ") != liveAppProgressMarker {
+	if len(fields) != 9 || strings.Join(fields[:3], " ") != liveAppProgressMarker {
 		return false
 	}
 	start, startOK := strings.CutPrefix(fields[3], "start=")
 	postgres, postgresOK := strings.CutPrefix(fields[4], "postgres=")
 	redis, redisOK := strings.CutPrefix(fields[5], "redis=")
-	http, httpOK := strings.CutPrefix(fields[6], "http=")
-	return startOK && postgresOK && redisOK && httpOK && liveAppProgressCategories[start] && liveAppProgressCategories[postgres] && liveAppProgressCategories[redis] && liveAppProgressCategories[http] && record == fmt.Sprintf("%s start=%s postgres=%s redis=%s http=%s\n", liveAppProgressMarker, start, postgres, redis, http)
+	gate, gateOK := strings.CutPrefix(fields[6], "gate=")
+	launched, launchedOK := strings.CutPrefix(fields[7], "launched=")
+	http, httpOK := strings.CutPrefix(fields[8], "http=")
+	return startOK && postgresOK && redisOK && gateOK && launchedOK && httpOK && liveAppProgressCategories[start] && liveAppProgressCategories[postgres] && liveAppProgressCategories[redis] && liveAppProgressCategories[gate] && liveAppProgressCategories[launched] && liveAppProgressCategories[http] && record == fmt.Sprintf("%s start=%s postgres=%s redis=%s gate=%s launched=%s http=%s\n", liveAppProgressMarker, start, postgres, redis, gate, launched, http)
 }
 
 func livePostCreateSnapshotRecord(record string) bool {
@@ -4065,7 +4067,7 @@ func TestLiveRecordCaptureSeparatesStreamsAndHandlesFragments(t *testing.T) {
 }
 
 func TestLiveAppProgressCaptureIsStrictAndFailureOnly(t *testing.T) {
-	valid := "live app progress: start=present postgres=present redis=absent http=absent\n"
+	valid := "live app progress: start=present postgres=present redis=absent gate=absent launched=absent http=absent\n"
 	capture := newLiveRecordCapture()
 	for _, part := range []string{valid[:31], valid[31:]} {
 		_, _ = capture.Write([]byte(part))
@@ -4082,7 +4084,7 @@ func TestLiveAppProgressCaptureIsStrictAndFailureOnly(t *testing.T) {
 	}
 	for _, invalid := range []string{
 		"prefix " + valid,
-		"live app progress: start=present postgres=unknown redis=absent http=absent\n",
+		"live app progress: start=present postgres=unknown redis=absent gate=absent launched=absent http=absent\n",
 		valid + valid,
 	} {
 		capture := newLiveRecordCapture()
