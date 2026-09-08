@@ -69,6 +69,14 @@ function validLiveRecords(): unknown[] {
 }
 
 describe("Task4 CI contracts", () => {
+  it("bounds CrossHost credential scans to one identifier", () => {
+    const credential = /CrossHost[A-Za-z0-9_]*(?:Password|Secret)/i;
+    expect(credential.test('{"test":"TestProviderRuntimeCrossHostDataAdmissionLive","postgresWrongPasswordDenied":true}')).toBe(false);
+    for (const value of ["CrossHostPassword", "CrossHostDatabasePassword", "crossHostRedisSecret"]) {
+      expect(credential.test(value)).toBe(true);
+    }
+  });
+
   it("frames live diagnostic and candidate Node heredocs in the parsed workflow script", () => {
     const parsedWorkflow = parseYAML(workflow) as {
       jobs: {
@@ -256,6 +264,7 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("if: always()\n        uses: actions/upload-artifact@v4");
     expect(workflow).toContain("- name: Upload exact-SHA intermediate candidate\n        if: success()");
     expect(workflow).toContain("invalid live evidence");
+    expect(workflow).toContain("CrossHost[A-Za-z0-9_]*(?:Password|Secret)");
     for (const category of ["file", "schema", "identity", "booleans", "hashes", "safety"]) {
       expect(workflow).toContain(`invalid='${category}'`);
     }

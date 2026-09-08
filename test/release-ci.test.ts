@@ -30,10 +30,11 @@ describe("release promotion contract", () => {
     expect(workflow).toContain("metadata.runId !== runId");
     expect(workflow).toContain("metadata.runUrl !== runUrl");
     expect(workflow).toContain("process.env.GITHUB_SERVER_URL");
-    expect(workflow).toContain("CrossHost.*(?:Password|Secret)");
+    expect(workflow).toContain("CrossHost[A-Za-z0-9_]*(Password|Secret)");
+    expect(workflow).toContain('grep -qiE "$forbidden"');
     expect(workflow).toContain('generated_ip=\'(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\'');
     expect(workflow).toContain('for evidence_file in "$private/artifact/metadata.json" "$private/artifact/consumer-trace.json"');
-    expect(workflow).not.toContain("CrossHost.*(?:Password|Secret)|(?:[0-9]{1,3}");
+    expect(workflow).not.toContain("CrossHost[A-Za-z0-9_]*(Password|Secret)|(?:[0-9]{1,3}");
     expect(workflow).not.toContain("argv|frame|sql|acl|nft|state");
     expect(workflow).toContain("gh release create");
   });
