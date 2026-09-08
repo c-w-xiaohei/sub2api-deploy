@@ -256,6 +256,9 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("if: always()\n        uses: actions/upload-artifact@v4");
     expect(workflow).toContain("- name: Upload exact-SHA intermediate candidate\n        if: success()");
     expect(workflow).toContain("invalid live evidence");
+    for (const category of ["file", "schema", "identity", "booleans", "hashes", "safety"]) {
+      expect(workflow).toContain(`invalid='${category}'`);
+    }
     expect(workflow).toContain("const allowedLiveStages = new Set([");
     expect(workflow).toContain("'app-docker-network'");
     expect(workflow).toContain("'data-docker-cgroup'");
