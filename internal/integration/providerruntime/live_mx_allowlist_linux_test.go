@@ -4195,7 +4195,12 @@ func TestLiveStdoutCaptureAcceptsOnlyNestedGoPassToken(t *testing.T) {
 		capture := newLiveStdoutCapture()
 		_, _ = capture.Write([]byte(test.output))
 		var out bytes.Buffer
-		if got := capture.forwardExpected(&out, "PASS\n"); got != test.want || out.Len() != 0 {
+		got := capture.forwardExpected(&out, "PASS\n")
+		wantOutput := "live observer: observer-error\n"
+		if test.want {
+			wantOutput = ""
+		}
+		if got != test.want || out.String() != wantOutput {
 			t.Fatalf("stdout %q accepted=%t output=%q, want %t", test.output, got, out.String(), test.want)
 		}
 	}
