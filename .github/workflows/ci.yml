@@ -259,8 +259,9 @@ jobs:
           mkdir -p "$consumer"; mkdir -m 0700 "$trace"; sudo chown root:root "$trace"; chmod a+rX "$candidate" "$candidate/sub2api-controller-$TARGET_SHA.tar.gz"; tar -xzf "$candidate/sub2api-controller-$TARGET_SHA.tar.gz" -C "$consumer"; chmod -R a+rX "$consumer"
           provider="$consumer/bundle/bin/pulumi-resource-sub2api-host"; provider_sha="$(sha256sum "$provider" | cut -d ' ' -f1)"
           go_bin="$(command -v go)"
+          if ! gomodcache="$(go env GOMODCACHE 2>/dev/null)" || ! test -d "$gomodcache"; then printf '%s\n' 'live Go module cache unavailable'; exit 1; fi
           set +e
-          sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOMODCACHE,GOPATH,GOENV env SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"
+          sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOPATH,GOENV env GOMODCACHE="$gomodcache" SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"
           status=$?
           set -e
           printf '%s\n' "TestProviderRuntimeCrossHostDataAdmissionLive: go-test-exit-$status"
@@ -443,10 +444,7 @@ jobs:
           sudo chown "$USER:$USER" "$candidate/consumer-trace.json"
           chmod 0600 "$candidate/consumer-trace.json"
           if test -s "$stderr"; then
-            if ! category="$(node - "$stderr" 2>/dev/null <<'NODE'
-          try{const text=require('node:fs').readFileSync(process.argv[2],'utf8'),lines=text.split('\n').filter(Boolean);let category='non-go';if(lines.length&&lines.every(line=>line.startsWith('go: downloading ')))category='go-download';else if(lines.length&&lines.every(line=>line.startsWith('go: ')))category=/cache/i.test(text)?'go-cache':/warning/i.test(text)?'go-warning':'go-other';process.stdout.write(category)}catch{}
-          NODE
-            )"; then category=; fi
+            if ! category="$(node -e "try{const text=require('node:fs').readFileSync(process.argv[1],'utf8'),lines=text.split('\\n').filter(Boolean);let category='non-go';if(lines.length&&lines.every(line=>line.startsWith('go: downloading ')))category='go-download';else if(lines.length&&lines.every(line=>line.startsWith('go: ')))category=/cache/i.test(text)?'go-cache':/warning/i.test(text)?'go-warning':'go-other';process.stdout.write(category)}catch{}" "$stderr" 2>/dev/null)"; then category=; fi
             case "$category" in go-download|go-cache|go-warning|go-other|non-go) ;; *) category=classifier-error ;; esac
             printf '%s\n' "TestProviderRuntimeCrossHostDataAdmissionLive stderr: $category"
             exit 1

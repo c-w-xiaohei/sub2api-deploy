@@ -196,7 +196,9 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("sub2api-live-app:mx-allowlist");
     expect(workflow).toContain("internal/integration/providerruntime/testdata/live-app.Dockerfile");
     expect(workflow).toContain("sudo docker save postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist");
-    expect(workflow).toContain("sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOMODCACHE,GOPATH,GOENV env");
+    expect(workflow).toContain('gomodcache="$(go env GOMODCACHE 2>/dev/null)"');
+    expect(workflow).toContain("live Go module cache unavailable");
+    expect(workflow).toContain("sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOPATH,GOENV env GOMODCACHE=\"$gomodcache\"");
     expect(workflow).toContain('mkdir -m 0700 "$trace"');
     expect(workflow).toContain("(stat.mode&0o777)!==0o600");
     expect(workflow).toContain("dataHostPass");
@@ -271,7 +273,8 @@ describe("Task4 CI contracts", () => {
     for (const category of ["go-download", "go-cache", "go-warning", "go-other", "non-go", "classifier-error"]) {
       expect(classifier).toContain(category);
     }
-    expect(classifier).toContain('node - "$stderr" 2>/dev/null');
+    expect(classifier).toContain('node -e "try{');
+    expect(classifier).toContain('" "$stderr" 2>/dev/null');
     expect(classifier).toContain("try{");
     expect(classifier).toContain("catch{}");
     expect(classifier).toContain('*) category=classifier-error');
