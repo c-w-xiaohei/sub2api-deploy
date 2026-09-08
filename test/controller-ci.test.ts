@@ -46,9 +46,13 @@ function parseLiveRecords(records: unknown[], parser: "diagnostic" | "candidate"
   const start = parser === "diagnostic"
     ? workflow.indexOf("const allowedLiveStages = new Set([")
     : workflow.indexOf("for(const l of require('node:fs').readFileSync(process.argv[2],'utf8').split('\\n'))", workflow.indexOf("const allowedLiveStages = new Set(["));
-  const end = parser === "diagnostic"
-    ? workflow.indexOf("          NODE", start)
-    : workflow.indexOf(" const files=fs.readdirSync(trace);", start);
+  const heredocEnd = workflow.indexOf("\n          NODE", start);
+  const candidateBoundary = "const files=fs.readdirSync(trace);";
+  const end = parser === "diagnostic" ? heredocEnd : workflow.indexOf(candidateBoundary, start);
+  const duplicateBoundary = parser === "candidate" ? workflow.indexOf(candidateBoundary, end + candidateBoundary.length) : -1;
+  if (start < 0 || heredocEnd < start || end < start || end > heredocEnd || (duplicateBoundary >= 0 && duplicateBoundary < heredocEnd)) {
+    throw new Error(`live ${parser} parser boundary invalid`);
+  }
   const source = workflow.slice(start, end).replace(/^ {10}/gm, "");
   const script = parser === "diagnostic"
     ? `const fs=require('node:fs'),test='TestProviderRuntimeCrossHostDataAdmissionLive';\n${source}`
@@ -259,6 +263,21 @@ describe("Task4 CI contracts", () => {
     expect(liveRuntimeTest).toContain("syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)");
     expect(liveRuntimeTest).toContain("cmd.WaitDelay = 4 * time.Minute");
     expect(workflow).toContain("Finalize Provider Runtime private files");
+    const classifierStart = workflow.indexOf('if test -s "$stderr"; then');
+    const classifierEnd = workflow.indexOf('\n          fi\n          test ! -s "$stderr"', classifierStart);
+    expect(classifierStart).toBeGreaterThan(-1);
+    expect(classifierEnd).toBeGreaterThan(classifierStart);
+    const classifier = workflow.slice(classifierStart, classifierEnd);
+    for (const category of ["go-download", "go-cache", "go-warning", "go-other", "non-go", "classifier-error"]) {
+      expect(classifier).toContain(category);
+    }
+    expect(classifier).toContain('node - "$stderr" 2>/dev/null');
+    expect(classifier).toContain("try{");
+    expect(classifier).toContain("catch{}");
+    expect(classifier).toContain('*) category=classifier-error');
+    expect(classifier).toContain('printf \'%s\\n\' "TestProviderRuntimeCrossHostDataAdmissionLive stderr: $category"');
+    expect(classifier).toContain("exit 1");
+    expect(classifier).not.toMatch(/console\.(?:log|error)\(text\)|process\.(?:stdout|stderr)\.write\(text\)/);
     expect(workflow).toContain('sudo chown "$USER:$USER" "$candidate/consumer-trace.json"');
     expect(workflow).toContain('chmod 0600 "$candidate/consumer-trace.json"');
     expect(workflow).toContain("if: always()\n        uses: actions/upload-artifact@v4");

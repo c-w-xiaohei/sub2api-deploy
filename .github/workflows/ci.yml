@@ -442,6 +442,15 @@ jobs:
           NODE
           sudo chown "$USER:$USER" "$candidate/consumer-trace.json"
           chmod 0600 "$candidate/consumer-trace.json"
+          if test -s "$stderr"; then
+            if ! category="$(node - "$stderr" 2>/dev/null <<'NODE'
+          try{const text=require('node:fs').readFileSync(process.argv[2],'utf8'),lines=text.split('\n').filter(Boolean);let category='non-go';if(lines.length&&lines.every(line=>line.startsWith('go: downloading ')))category='go-download';else if(lines.length&&lines.every(line=>line.startsWith('go: ')))category=/cache/i.test(text)?'go-cache':/warning/i.test(text)?'go-warning':'go-other';process.stdout.write(category)}catch{}
+          NODE
+            )"; then category=; fi
+            case "$category" in go-download|go-cache|go-warning|go-other|non-go) ;; *) category=classifier-error ;; esac
+            printf '%s\n' "TestProviderRuntimeCrossHostDataAdmissionLive stderr: $category"
+            exit 1
+          fi
           test ! -s "$stderr"
           test "$status" -eq 0
           test "$(find "$safe" -type f | wc -l)" -eq 4
