@@ -298,7 +298,8 @@ describe("Task4 CI contracts", () => {
     expect(liveApp.indexOf("busybox-extras httpd -f -p 8080 -h /srv &")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));
     expect(liveApp.indexOf("http://127.0.0.1:8080/ready")).toBeLessThan(liveApp.indexOf(': > "/app/data/.live-$LIVE_PROGRESS_ID-http"'));
     expect(liveRuntimeTest).toContain("newLiveStdoutCapture() *liveRecordCapture { return &liveRecordCapture{rejectOutput: true} }");
-    expect(liveRuntimeTest).toContain("stdoutOK := stdout.forward(io.Discard)");
+    expect(liveRuntimeTest).toContain('stdoutOK := stdout.forwardExpected(io.Discard, "PASS\\n")');
+    expect(liveRuntimeTest).toContain('c.invalid = c.fallback.overflow || string(c.fallback.Bytes()) != expected');
     expect(liveRuntimeTest).toContain("if !recordsOK || !stdoutOK {");
     expect(liveRuntimeTest).toContain('test -L " + path + " || ! test -d');
     expect(liveRuntimeTest).toContain('test ! -L \\"$file\\" && test -f \\"$file\\"');

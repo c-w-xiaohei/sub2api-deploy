@@ -75,7 +75,7 @@ func TestProviderRuntimeCrossHostDataAdmissionLive(t *testing.T) {
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	recordsOK := stderr.forward(os.Stderr)
-	stdoutOK := stdout.forward(io.Discard)
+	stdoutOK := stdout.forwardExpected(io.Discard, "PASS\n")
 	if err != nil {
 		reportLiveNamespaceFailure(liveFailureCategory(ctx, stderr.failureBytes(stdout.failureBytes(nil))))
 		t.Fatal("live namespace fixture failed")
@@ -2465,8 +2465,15 @@ func (c *liveRecordCapture) failureBytes(stdout []byte) []byte {
 }
 
 func (c *liveRecordCapture) forward(w io.Writer) bool {
+	return c.forwardExpected(w, "")
+}
+
+func (c *liveRecordCapture) forwardExpected(w io.Writer, expected string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.rejectOutput {
+		c.invalid = c.fallback.overflow || string(c.fallback.Bytes()) != expected
+	}
 	if c.lineLen != 0 && c.marker {
 		c.invalid = true
 	}
@@ -4170,6 +4177,27 @@ func TestLiveRecordCaptureSeparatesStreamsAndHandlesFragments(t *testing.T) {
 	var stdoutForwarded bytes.Buffer
 	if stdout.forward(&stdoutForwarded) || stdoutForwarded.String() != "live observer: observer-error\n" {
 		t.Fatalf("stdout marker was forwarded: %q", stdoutForwarded.String())
+	}
+}
+
+func TestLiveStdoutCaptureAcceptsOnlyNestedGoPassToken(t *testing.T) {
+	for _, test := range []struct {
+		output string
+		want   bool
+	}{
+		{output: "PASS\n", want: true},
+		{output: ""},
+		{output: "PASS"},
+		{output: "PASS\nPASS\n"},
+		{output: "prefix PASS\n"},
+		{output: "PASS\nsuffix\n"},
+	} {
+		capture := newLiveStdoutCapture()
+		_, _ = capture.Write([]byte(test.output))
+		var out bytes.Buffer
+		if got := capture.forwardExpected(&out, "PASS\n"); got != test.want || out.Len() != 0 {
+			t.Fatalf("stdout %q accepted=%t output=%q, want %t", test.output, got, out.String(), test.want)
+		}
 	}
 }
 
