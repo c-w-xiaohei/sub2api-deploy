@@ -30,6 +30,7 @@ import (
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime/testonly"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/integration/automationtest"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/program"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
