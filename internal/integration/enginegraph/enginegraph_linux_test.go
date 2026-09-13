@@ -1334,9 +1334,9 @@ func assertCrossHostTargets(t *testing.T, snapshot *automationtest.Checkpoint, b
 		case hostProviderType:
 			switch state.ID {
 			case "host-alpha":
-				alpha = state
+				alpha = &state
 			case "host-bravo":
-				bravo = state
+				bravo = &state
 			}
 		case "cloudflare:index/dnsRecord:DnsRecord":
 			dnsRecords++

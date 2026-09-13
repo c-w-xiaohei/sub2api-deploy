@@ -35,6 +35,30 @@ The cache was restored and vet ran before this command. GNU time's maximum RSS
 does not establish concurrent process-tree aggregate memory. These numbers
 cannot authorize local compilation or prove the effect of the migration.
 
+## First Integrated CI Attempt
+
+- Revision: `919e3394100921c76de6dba8de27c636af245846`.
+- Functional run: https://github.com/c-w-xiaohei/sub2api-deploy/actions/runs/34745867920.
+- Verify stopped at the committed module graph check; the migration requires
+  adopting the new CI-generated tidy artifact.
+- Engine Graph compilation found a value-to-pointer assignment regression.
+  Provider Import also has an undefined fixture variable. Neither suite has
+  established migrated runtime behavior at this revision.
+- Resource run: https://github.com/c-w-xiaohei/sub2api-deploy/actions/runs/34745867951.
+  Engine and Import compilation failed, so the overall comparison failed closed.
+
+The successful CLI pair from this run is a regression, not a reduction:
+
+| Cold CLI compilation | Baseline `46be3e2` | Candidate `919e339` |
+| --- | --- | --- |
+| Wall seconds | 30.428839374 | 40.787013561 |
+| Cgroup peak bytes, including accounted file cache | 1,216,000,000 | 2,206,711,808 |
+
+Both commands exited zero on the same runner with Go 1.25.11, linux/amd64,
+CGO disabled, GOMAXPROCS 2, `-p=2`, and separate cold build caches. This pair
+does not measure runtime Engine memory, total CI duration, or test compilation.
+Later fixes require a new exact-SHA functional and resource comparison.
+
 ## Resource Decision
 
 The separate comparison workflow measures baseline and candidate compilation on

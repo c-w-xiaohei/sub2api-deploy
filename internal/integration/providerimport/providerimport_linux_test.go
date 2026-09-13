@@ -155,11 +155,11 @@ func newHarness(t *testing.T) *harness {
 			provider = filepath.Join(releaseRoot, "bin", "pulumi-resource-sub2api-host")
 		}
 	}
-	if provider == "" {
+	if provider == "" || !filepath.IsAbs(provider) {
 		t.Fatal("provider binary is required")
 	}
 	providerInfo, err := os.Stat(provider)
-	if err != nil || providerInfo.IsDir() || providerInfo.Mode()&0o111 == 0 {
+	if err != nil || !providerInfo.Mode().IsRegular() || providerInfo.Mode()&0o111 == 0 {
 		t.Fatal("provider binary is unavailable")
 	}
 	versionOutput, err := exec.Command(cli, "version").Output()
@@ -281,17 +281,14 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (apitype.Untyped
 		settings.Config = config.Map{}
 	}
 	settings.Config[config.MustMakeKey("sub2api-host", "revisionKey")] = config.NewSecureValue(ciphertext)
+	hostImportTargetKey := config.MustMakeKey("sub2api-environment", "hostImportTarget")
+	if importTarget {
+		settings.Config[hostImportTargetKey] = config.NewValue("edge")
+	} else {
+		delete(settings.Config, hostImportTargetKey)
+	}
 	if err := h.stack.Workspace().SaveStackSettings(t.Context(), h.stack.Name(), settings); err != nil {
 		return apitype.UntypedDeployment{}, err
-	}
-	if importTarget {
-		if err := h.stack.SetConfig(t.Context(), "sub2api-environment:hostImportTarget", auto.ConfigValue{Value: "edge"}); err != nil {
-			return apitype.UntypedDeployment{}, err
-		}
-	} else if _, err := h.stack.Workspace().GetConfig(t.Context(), h.stack.Name(), "sub2api-environment:hostImportTarget"); err == nil {
-		if err := h.stack.Workspace().RemoveConfig(t.Context(), h.stack.Name(), "sub2api-environment:hostImportTarget"); err != nil {
-			return apitype.UntypedDeployment{}, err
-		}
 	}
 	if preview {
 		_, err = h.stack.Preview(t.Context(), optpreview.Parallel(1), optpreview.Color(colors.Never), optpreview.SuppressProgress(), optpreview.SuppressOutputs())
@@ -713,7 +710,7 @@ func fixtureNetworkLabel(resourceValue hostcontract.ResourceIdentity, ownership 
 	return "s2hnet1:" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value)
 }
 func fixtureAppEnv(secrets hostcontract.Secrets) []byte {
-	app := secretValues.Apps["app"]
+	app := secrets.Apps["app"]
 	return []byte("ADMIN_EMAIL=admin@example.test\nFEATURE_FLAG=enabled\nINITIAL_ADMIN_PASSWORD=" + app.InitialAdminPassword + "\nJWT_SECRET=" + app.JWTSecret + "\nTOTP_ENCRYPTION_KEY=" + app.TOTPEncryptionKey + "\nPOSTGRES_USERNAME=" + app.Postgres.Username + "\nPOSTGRES_PASSWORD=" + app.Postgres.Password + "\nREDIS_USERNAME=" + app.Redis.Username + "\nREDIS_PASSWORD=" + app.Redis.Password + "\n")
 }
 func fixtureProxyConfig(email string) []byte {
@@ -1212,7 +1209,7 @@ func resourceRPCProperties(t *testing.T, values resource.PropertyMap) *structpb.
 func unmarshalProperties(value *structpb.Struct) resource.PropertyMap {
 	decoded, err := sdkplugin.UnmarshalProperties(value, sdkplugin.MarshalOptions{KeepUnknowns: true, KeepSecrets: true, KeepResources: true})
 	if err != nil {
-		panic(err)
+		panic("invalid provider property payload")
 	}
 	return decoded
 }

@@ -1,4 +1,4 @@
-//go:build linux && sub2api_ci
+//go:build linux
 
 package main
 
