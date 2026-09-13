@@ -114,8 +114,8 @@ func TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi(t *testing
 	}
 	data := pulumiRunRead(t, logs.pulumi)
 	for _, want := range []string{
-		"cwd=" + workdir,
-		"args=<up><--stack=production><--config-file=", "<--yes><--message=release>",
+		"cwd=",
+		"args=<--non-interactive><up><--stack=production><--config-file=", "<--yes><--message=release>",
 		"fd3=no",
 		"approval=",
 	} {
@@ -252,7 +252,7 @@ func pulumiRunFixture(t *testing.T, sopsOutput []byte, pulumiMode string) (strin
 	if err := os.MkdirAll(filepath.Join(workdir, "environments", "production"), 0o700); err != nil { t.Fatal(err) }
 	if err := os.WriteFile(filepath.Join(workdir, "environments", "production", "config.yaml"), []byte("apps: {}\n"), 0o600); err != nil { t.Fatal(err) }
 	if err := os.WriteFile(filepath.Join(workdir, "environments", "production", "secrets.yaml"), []byte("encrypted placeholder\n"), 0o600); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(workdir, "Pulumi.yaml"), []byte("name: sub2api-environment\nruntime: go\n"), 0o600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(workdir, "Pulumi.yaml"), []byte("name: sub2api-environment\nruntime:\n  name: go\n  options:\n    binary: ./bin/pulumi-program\n"), 0o600); err != nil { t.Fatal(err) }
 	_, sourceBytes, manager, _ := stagedStackFixture(t)
 	source := filepath.Join(workdir, "Pulumi.production.yaml")
 	if err := os.WriteFile(source, sourceBytes, 0o600); err != nil { t.Fatal(err) }
@@ -263,7 +263,7 @@ func pulumiRunFixture(t *testing.T, sopsOutput []byte, pulumiMode string) (strin
 	writeAttachedExecutable(t, filepath.Join(bin, "sops"), "#!/bin/sh\n[ \"$SOPS_AGE_KEY\" = '"+pulumiRunSOPSKey+"' ] || exit 24\nprintf '%s' '"+strings.ReplaceAll(string(sopsOutput), "'", "'\\''")+"'\n")
 	// The delay is longer than the old immediate escalation path but shorter than the EOF grace period.
 	writeAttachedExecutable(t, filepath.Join(bin, "pulumi-resource-sub2api-host"), "#!/bin/sh\nif env | grep -q '"+pulumiRunSOPSKey+"'; then exit 25; fi\nif env | grep -q '^PULUMI_'; then exit 27; fi\nprintf '%s/%s\\n' \"${PULUMI_CONFIG_PASSPHRASE+x}\" \"${PULUMI_CONFIG_PASSPHRASE_FILE+x}\" > '"+logs.providerEnv+"'\nprintf x > '"+logs.providerStarted+"'\nprintf '%s\\n' 43123\ncat <&3 >/dev/null\nsleep 0.25\nprintf '%s\\n' closed > '"+logs.cleanup+"'\n")
-	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; esac; done\n[ -n \"$PULUMI_CONFIG_PASSPHRASE_FILE\" ] && [ \"$(cat \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = '"+pulumiRunPassphrase+"' ] && [ \"$(stat -c %a \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = 600 ] || exit 26\nprintf '\\nfd3=no\\napproval=\\ndebug=%s\\npassphrase-file=%s\\n' \"$PULUMI_DEBUG_PROVIDERS\" \"${PULUMI_CONFIG_PASSPHRASE_FILE:+set}\" >> '"+logs.pulumi+"'\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
+	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nif [ \"$1\" = version ]; then printf 'v3.256.0\\n'; exit 0; fi\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; esac; done\n[ -n \"$PULUMI_CONFIG_PASSPHRASE_FILE\" ] && [ \"$(cat \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = '"+pulumiRunPassphrase+"' ] && [ \"$(stat -c %a \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = 600 ] || exit 26\nprintf '\\nfd3=no\\napproval=\\ndebug=%s\\npassphrase-file=%s\\n' \"$PULUMI_DEBUG_PROVIDERS\" \"${PULUMI_CONFIG_PASSPHRASE_FILE:+set}\" >> '"+logs.pulumi+"'\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SOPS_AGE_KEY", pulumiRunSOPSKey)
 	t.Setenv("PULUMI_DEBUG_PROVIDERS", "existing:123")

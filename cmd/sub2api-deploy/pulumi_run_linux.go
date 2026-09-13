@@ -143,9 +143,26 @@ func runPulumiPlan(ctx context.Context, plan pulumiPlan, workdir, cliPath string
 	if err != nil {
 		return errInvalidPulumiInputs
 	}
-	err = withStagedStack(ctx, project, filepath.Join(resolvedWorkdir, "Pulumi."+plan.environment+".yaml"), passphrase, values, func(stagedPath string) error {
+	projectYAML, err := readBoundedPulumiFile(filepath.Join(resolvedWorkdir, "Pulumi.yaml"))
+	if err != nil {
+		return errInvalidPulumiInputs
+	}
+	projectYAML, err = stagedProjectYAML(projectYAML, resolvedWorkdir)
+	if err != nil {
+		return errInvalidPulumiInputs
+	}
+	err = withNamedStagedStack(ctx, project, filepath.Join(resolvedWorkdir, "Pulumi."+plan.environment+".yaml"), "Pulumi."+plan.environment+".yaml", passphrase, values, func(stagedPath string) error {
 		pulumiEnv := append(childEnv, "PULUMI_CONFIG_PASSPHRASE_FILE="+filepath.Join(filepath.Dir(stagedPath), "passphrase"))
-		return runAttachedIn(ctx, executables, resolvedWorkdir, plan.arguments(stagedPath), pulumiEnv, stdout, stderr, decide)
+		command, err := newAttachedPulumiCommand(ctx, executables, pulumiEnv, decide)
+		if err != nil {
+			return errInvalidStagedStack
+		}
+		workspace, err := newStagedPulumiWorkspace(ctx, stagedPath, plan.environment, projectYAML, command)
+		if err != nil {
+			return errInvalidStagedStack
+		}
+		_, _, _, err = workspace.PulumiCommand().Run(ctx, workspace.WorkDir(), nil, []io.Writer{stdout}, []io.Writer{stderr}, nil, plan.arguments(stagedPath)...)
+		return err
 	})
 	if err != nil && errors.Is(err, errInvalidStagedStack) {
 		return errInvalidPulumiInputs

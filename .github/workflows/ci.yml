@@ -101,7 +101,11 @@ jobs:
 
   engine-graph:
     name: Engine Graph
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      PULUMI_HOME: ${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}
+      PULUMI_PLUGIN_PATH: ${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}/plugins
+      PULUMI_SKIP_UPDATE_CHECK: "true"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,19 +115,41 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
       - run: go mod verify
+      - name: Install pinned official Pulumi CLI
+        uses: pulumi/actions@8582a9e8cc630786854029b4e09281acd6794b58 # v6
+        with: { pulumi-version: "3.256.0" }
+      - name: Provision isolated Pulumi CLI and future test-Provider discovery
+        run: |
+          set -euo pipefail
+          source="$(command -v pulumi)"
+          test -n "$source"
+          test "$("$source" version)" = "v3.256.0"
+          cli_dir="$RUNNER_TEMP/engine-graph-cli-$TARGET_SHA"
+          rm -rf "$cli_dir" "$PULUMI_HOME"
+          mkdir -m 0700 "$cli_dir" "$PULUMI_HOME" "$PULUMI_PLUGIN_PATH"
+          target="$cli_dir/pulumi"
+          cp "$source" "$target"
+          chmod 0755 "$target"
+          test "$("$target" version)" = "v3.256.0"
+          printf '%s\n' "ENGINE_GRAPH_PULUMI_CLI=$target" >> "$GITHUB_ENV"
+          # TODO(Task 3): the migrated external Engine harness must invoke this absolute CLI and use PULUMI_PLUGIN_PATH with this runner, sampler, schema, and label; only implementation changes to external-engine.
       - name: Vet Engine Graph
         run: go vet ./internal/integration/enginegraph
       - name: Record required sanitized Engine Graph evidence
         run: |
           set -euo pipefail
-          raw="$RUNNER_TEMP/engine-graph-${TARGET_SHA}.jsonl"; stderr="$RUNNER_TEMP/engine-graph-${TARGET_SHA}.stderr"; safe="$RUNNER_TEMP/engine-graph-safe-${TARGET_SHA}"
-          trap 'rm -f "$raw" "$stderr"' EXIT
+          raw="$RUNNER_TEMP/engine-graph-${TARGET_SHA}.jsonl"; stderr="$RUNNER_TEMP/engine-graph-${TARGET_SHA}.stderr"; rss="$RUNNER_TEMP/engine-graph-${TARGET_SHA}.rss"; safe="$RUNNER_TEMP/engine-graph-safe-${TARGET_SHA}"
           tests='^(TestEngineGraphFailureStopsPublication|TestEngineGraphReadyPublishesAfterOrderedHosts|TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication|TestEngineConfiguredServerCountZero|TestEngineConfiguredServerCountOneTwo|TestEngineAppPlacementOneReadyFailure|TestEngineManagedUpstashPreviewPreservesComputedSecretProjection|TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor|TestEngineManagedUpstashStateIsProtectedAndRetained|TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop|TestEngineGraphCrossHostDataRemovalIsReverseStaged|TestEngineGraphTraceArtifactIsSanitizedJSONL)$'
           trace="$RUNNER_TEMP/engine-graph-trace-${TARGET_SHA}"; mkdir -m 0700 "$trace"; mkdir -m 0700 "$safe"
+          test -x "$ENGINE_GRAPH_PULUMI_CLI"
+          test "$("$ENGINE_GRAPH_PULUMI_CLI" version)" = "v3.256.0"
+          # This is the before-migration embedded-engine baseline; it does not execute the provisioned CLI.
+          start_ms="$(date +%s%3N)"
           set +e
-          ENGINE_GRAPH_TRACE_DIR="$trace" go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$raw" 2> "$stderr"
+          /usr/bin/time -f '%M' -o "$rss" env ENGINE_GRAPH_TRACE_DIR="$trace" go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$raw" 2> "$stderr"
           status=$?
           set -e
+          elapsed_ms="$(( $(date +%s%3N) - start_ms ))"
           REQUIRED_TESTS="$tests" node - "$raw" "$trace" "$safe" <<'NODE'
           const crypto=require('node:crypto'),fs=require('node:fs'),path=require('node:path'); const [raw,trace,safe]=process.argv.slice(2); const required=process.env.REQUIRED_TESTS.slice(2,-2).split('|'); const terminal=new Map(); const out=[];
           for(const line of fs.readFileSync(raw,'utf8').split('\n')) { if(!line) continue; const e=JSON.parse(line); if(required.includes(e.Test) && ['pass','fail','skip'].includes(e.Action)) { terminal.set(e.Test,e.Action); out.push({Action:e.Action,Test:e.Test,Elapsed:e.Elapsed}); } }
@@ -132,15 +158,36 @@ jobs:
           const traceTests=['TestEngineGraphFailureStopsPublication','TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor','TestEngineManagedUpstashStateIsProtectedAndRetained','TestEngineManagedUpstashPreviewPreservesComputedSecretProjection','TestEngineGraphReadyPublishesAfterOrderedHosts','TestEngineGraphMaintenanceUpdateKeepsHostsAndRemovesPublication','TestEngineConfiguredServerCountOneTwo','TestEngineConfiguredServerCountZero','TestEngineAppPlacementOneReadyFailure/alpha_failure_blocks_publication','TestEngineAppPlacementOneReadyFailure/alpha_ready_publishes_once','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop/admission_then_App_then_publication','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop/data_failure_stops_App_and_publication','TestEngineGraphCrossHostDataAdmissionOrderingAndFailureStop/App_failure_stops_publication','TestEngineGraphCrossHostDataRemovalIsReverseStaged'];
           const fileName=t=>{let stem=t.replace(/[^A-Za-z0-9_.-]/g,'_').replace(/^[._]+|[._]+$/g,'').slice(0,96)||'engine-graph'; return `${stem}-${crypto.createHash('sha256').update(t).digest('hex')}.jsonl`}; const expected=traceTests.map(fileName).sort(),traceStat=fs.lstatSync(trace),files=fs.readdirSync(trace).sort(); if(!traceStat.isDirectory()||traceStat.isSymbolicLink()||(traceStat.mode&0o777)!==0o700) throw Error('invalid persisted trace directory mode'); if(JSON.stringify(files)!==JSON.stringify(expected)) throw Error('unexpected persisted trace inventory');
           for(const f of files) { const p=path.join(trace,f),stat=fs.lstatSync(p); if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o777)!==0o600) throw Error('invalid persisted trace mode'); const text=fs.readFileSync(p,'utf8'),lines=text.split('\n').filter(Boolean); if(lines.length===0) throw Error('persisted trace must contain at least one event'); for(const line of lines) { const e=JSON.parse(line),keys=Object.keys(e).sort(),event=['lifecycle_event','publication_event','summary'].filter(k=>typeof e[k]==='string'&&e[k]!==''),allowed=event[0]==='summary'?['summary','test_name']:['test_name',event[0]]; if(!e.test_name||event.length!==1||JSON.stringify(keys)!==JSON.stringify(allowed.sort())) throw Error('invalid persisted trace schema'); } if(/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |"secrets"\s*:|CrossHost[A-Za-z0-9_]*(?:Password|Secret)/i.test(text)) throw Error('persisted trace is not sanitized'); }
-          fs.writeFileSync(path.join(safe,'engine-graph.jsonl'),out.map(JSON.stringify).join('\n')+'\n');
+          fs.writeFileSync(path.join(safe,'engine-graph.jsonl'),out.map(JSON.stringify).join('\n')+'\n',{mode:0o600});
           NODE
           test ! -s "$stderr"
+          RESOURCE_LABEL='engine-graph' RESOURCE_ELAPSED_MS="$elapsed_ms" node - "$rss" "$safe/engine-graph-resource.json" <<'NODE'
+          const fs=require('node:fs'),[rss,output]=process.argv.slice(2),peakRSSKiB=Number(fs.readFileSync(rss,'utf8').trim()),record={schema:'engine-graph-resource-v1',implementation:'embedded-engine',label:process.env.RESOURCE_LABEL,elapsedMilliseconds:Number(process.env.RESOURCE_ELAPSED_MS),peakRSSKiB};
+          if(!Number.isSafeInteger(record.elapsedMilliseconds)||record.elapsedMilliseconds<0||!Number.isSafeInteger(record.peakRSSKiB)||record.peakRSSKiB<0)throw Error('invalid resource record measurements');
+          const keys=['elapsedMilliseconds','implementation','label','peakRSSKiB','schema'];if(JSON.stringify(Object.keys(record).sort())!==JSON.stringify(keys)||record.schema!=='engine-graph-resource-v1'||record.implementation!=='embedded-engine'||record.label!=='engine-graph')throw Error('invalid resource record schema');
+          const text=JSON.stringify(record)+'\n';if(/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|authorization|argv|env|log|state|secret/i.test(text))throw Error('resource record is not sanitized');fs.writeFileSync(output,text,{mode:0o600});
+          NODE
           test "$status" -eq 0
-          test "$(find "$safe" -type f | wc -l)" -eq 1
+          test "$(find "$safe" -type f | wc -l)" -eq 2
+      - name: Finalize Engine Graph private files
+        if: always()
+        run: |
+          set +e
+          safe="$RUNNER_TEMP/engine-graph-safe-$TARGET_SHA"
+          if ! test -d "$safe"; then mkdir -m 0700 "$safe"; fi
+          if ! find "$safe" -maxdepth 1 -type f -print -quit | grep -q .; then
+            printf '%s\n' '{"schema":"engine-graph-evidence-v1","outcome":"unavailable"}' > "$safe/unavailable.json"
+            chmod 0600 "$safe/unavailable.json"
+          fi
+          rm -rf "$PULUMI_HOME" "$RUNNER_TEMP/engine-graph-cli-$TARGET_SHA" "$RUNNER_TEMP/engine-graph-trace-$TARGET_SHA"
+          rm -f "$RUNNER_TEMP/engine-graph-${TARGET_SHA}.jsonl" "$RUNNER_TEMP/engine-graph-${TARGET_SHA}.stderr" "$RUNNER_TEMP/engine-graph-${TARGET_SHA}.rss"
+          chmod 0700 "$safe" 2>/dev/null || true
+          find "$safe" -type f -exec chmod 0600 {} + 2>/dev/null || true
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: engine-graph-evidence-${{ env.TARGET_SHA }}
-          path: ${{ runner.temp }}/engine-graph-safe-${{ env.TARGET_SHA }}/engine-graph.jsonl
+          path: ${{ runner.temp }}/engine-graph-safe-${{ env.TARGET_SHA }}
           if-no-files-found: error
 
   provider-ssh:

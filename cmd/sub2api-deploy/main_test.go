@@ -146,8 +146,8 @@ func TestPublicCLIWiresPulumiProviderAndApproval(t *testing.T) {
 
 	pulumi := pulumiRunRead(t, logs.pulumi)
 	for _, want := range []string{
-		"cwd=" + workdir,
-		"args=<preview><--stack=production><--config-file=",
+		"cwd=",
+		"args=<--non-interactive><preview><--stack=production><--config-file=",
 		"fd3=no",
 		"approval=\n",
 	} {
@@ -319,7 +319,7 @@ func task2PulumiHelper() {
 		task2HelperFailure(evidence, err)
 	}
 	args := task2HelperArgs()
-	if len(args) != 3 || args[0] != "up" || args[1] != "--stack=production" || !strings.HasPrefix(args[2], "--config-file=") {
+	if len(args) != 4 || args[0] != "--non-interactive" || args[1] != "up" || args[2] != "--stack=production" || !strings.HasPrefix(args[3], "--config-file=") {
 		task2HelperFailure(evidence, fmt.Errorf("unexpected Pulumi invocation"))
 	}
 	for _, arg := range args {

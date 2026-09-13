@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
@@ -51,6 +52,10 @@ func readStagedStackSource(path string) (stagedStackSource, error) {
 }
 
 func withStagedStack(ctx context.Context, project *workspace.Project, sourcePath, passphrase string, values stackConfigValues, operation func(string) error) error {
+	return withNamedStagedStack(ctx, project, sourcePath, stagedStackName, passphrase, values, operation)
+}
+
+func withNamedStagedStack(ctx context.Context, project *workspace.Project, sourcePath, stagedName, passphrase string, values stackConfigValues, operation func(string) error) error {
 	if ctx == nil || project == nil || operation == nil {
 		return errInvalidStagedStack
 	}
@@ -61,10 +66,14 @@ func withStagedStack(ctx context.Context, project *workspace.Project, sourcePath
 	if err != nil {
 		return errInvalidStagedStack
 	}
-	return withStagedStackSource(ctx, project, source, passphrase, values, operation)
+	return withNamedStagedStackSource(ctx, project, source, stagedName, passphrase, values, operation)
 }
 
 func withStagedStackSource(ctx context.Context, project *workspace.Project, source stagedStackSource, passphrase string, values stackConfigValues, operation func(string) error) (result error) {
+	return withNamedStagedStackSource(ctx, project, source, stagedStackName, passphrase, values, operation)
+}
+
+func withNamedStagedStackSource(ctx context.Context, project *workspace.Project, source stagedStackSource, stagedName, passphrase string, values stackConfigValues, operation func(string) error) (result error) {
 	if ctx == nil || project == nil || operation == nil {
 		return errInvalidStagedStack
 	}
@@ -97,7 +106,10 @@ func withStagedStackSource(ctx context.Context, project *workspace.Project, sour
 		return errInvalidStagedStack
 	}
 
-	finalPath, err := publishStagedStack(directory, rendered)
+	if filepath.Base(stagedName) != stagedName || !strings.HasPrefix(stagedName, "Pulumi.") || !strings.HasSuffix(stagedName, ".yaml") {
+		return errInvalidStagedStack
+	}
+	finalPath, err := publishNamedStagedStack(directory, stagedName, rendered)
 	if err != nil {
 		return errInvalidStagedStack
 	}
@@ -215,6 +227,10 @@ func validStagedTempDirectoryMode(stat *syscall.Stat_t) bool {
 }
 
 func publishStagedStack(directory string, rendered []byte) (string, error) {
+	return publishNamedStagedStack(directory, stagedStackName, rendered)
+}
+
+func publishNamedStagedStack(directory, stagedName string, rendered []byte) (string, error) {
 	temporaryPath := filepath.Join(directory, ".Pulumi.staged.tmp")
 	fd, err := syscall.Open(temporaryPath, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
@@ -241,7 +257,7 @@ func publishStagedStack(directory string, rendered []byte) (string, error) {
 	if err := validateStagedOutput(temporaryPath, &stat, int64(len(rendered))); err != nil {
 		return "", errInvalidStagedStack
 	}
-	finalPath := filepath.Join(directory, stagedStackName)
+	finalPath := filepath.Join(directory, stagedName)
 	if err := os.Rename(temporaryPath, finalPath); err != nil {
 		return "", errInvalidStagedStack
 	}

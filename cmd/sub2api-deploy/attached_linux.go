@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -35,6 +36,11 @@ type attachedCompletion struct {
 	err  error
 }
 
+type attachedPulumiFailure struct{ err error }
+
+func (e attachedPulumiFailure) Error() string { return e.err.Error() }
+func (e attachedPulumiFailure) Unwrap() error { return e.err }
+
 func resolveAttachedExecutables(cliPath string) (attachedExecutables, error) {
 	dir := filepath.Dir(cliPath)
 	paths := attachedExecutables{
@@ -59,12 +65,24 @@ func attachedSocketpair() (*os.File, *os.File, error) {
 }
 
 func runAttached(ctx context.Context, paths attachedExecutables, args, env []string, stdout, stderr io.Writer, decide func(context.Context, hostcontract.ApprovalSubject) bool) error {
-	return runAttachedIn(ctx, paths, "", args, env, stdout, stderr, decide)
+	return runAttachedIn(ctx, paths, "", nil, args, env, stdout, stderr, decide)
 }
 
-func runAttachedIn(ctx context.Context, paths attachedExecutables, workdir string, args, env []string, stdout, stderr io.Writer, decide func(context.Context, hostcontract.ApprovalSubject) bool) error {
+func runAttachedIn(ctx context.Context, paths attachedExecutables, workdir string, stdin io.Reader, args, env []string, stdout, stderr io.Writer, decide func(context.Context, hostcontract.ApprovalSubject) bool) error {
+	err := runAttachedCommand(ctx, paths, workdir, stdin, args, env, stdout, stderr, decide)
+	var pulumiFailure attachedPulumiFailure
+	if errors.As(err, &pulumiFailure) {
+		return fmt.Errorf("pulumi failed")
+	}
+	return err
+}
+
+func runAttachedCommand(ctx context.Context, paths attachedExecutables, workdir string, stdin io.Reader, args, env []string, stdout, stderr io.Writer, decide func(context.Context, hostcontract.ApprovalSubject) bool) error {
 	if ctx == nil || decide == nil {
 		return fmt.Errorf("attached execution is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	parent, child, err := attachedSocketpair()
 	if err != nil {
@@ -94,6 +112,7 @@ func runAttachedIn(ctx context.Context, paths attachedExecutables, workdir strin
 	provider.Env, provider.Stdout, provider.Stderr = attachedProviderEnv(env), outputWriter, io.Discard
 	provider.Dir = workdir
 	provider.ExtraFiles = []*os.File{child}
+	provider.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := provider.Start(); err != nil {
 		_ = outputWriter.Close()
 		_ = approval.Close()
@@ -150,25 +169,28 @@ func runAttachedIn(ctx context.Context, paths attachedExecutables, workdir strin
 		return terminal
 	}
 	pulumi := exec.Command(paths.pulumi, args...)
-	pulumi.Env, pulumi.Stdout, pulumi.Stderr = attachedPulumiEnv(env, port), stdout, stderr
+	pulumi.Env, pulumi.Stdin, pulumi.Stdout, pulumi.Stderr = attachedPulumiEnv(env, port), stdin, stdout, stderr
 	pulumi.Dir = workdir
+	pulumi.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := pulumi.Start(); err != nil {
 		cleanupAttached(provider, providerDone, approval, output, readerDone, server)
-		return fmt.Errorf("pulumi failed")
+		return attachedPulumiFailure{err: err}
 	}
 	pulumiDone := waitAttached(pulumi)
 	select {
 	case <-pulumiDone.done:
 		if terminal := attachedTerminal(ctx, providerDone, server); terminal != nil {
+			stopAttachedProcess(pulumi, pulumiDone)
 			cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 			return terminal
 		}
+		stopAttachedProcess(pulumi, pulumiDone)
 		cleanupAttached(provider, providerDone, approval, output, readerDone, server)
 		if cause := context.Cause(ctx); cause != nil {
 			return cause
 		}
 		if pulumiDone.err != nil {
-			return fmt.Errorf("pulumi failed")
+			return attachedPulumiFailure{err: pulumiDone.err}
 		}
 		return nil
 	case <-providerDone.done:
@@ -208,35 +230,31 @@ func waitAttached(command *exec.Cmd) *attachedCompletion {
 
 func cleanupAttached(provider *exec.Cmd, providerDone *attachedCompletion, approval io.Closer, output *os.File, readerDone <-chan struct{}, server *attachedCompletion) {
 	_ = approval.Close()
+	// Descendants can inherit the provider's stdout pipe; close our read end before waiting.
+	_ = output.Close()
 	// Approval EOF lets the provider finish its own cleanup before escalation.
 	select {
 	case <-providerDone.done:
 	case <-time.After(attachedProviderEOFGracePeriod):
-		stopAttachedProcess(provider, providerDone)
 	}
-	_ = output.Close()
+	stopAttachedProcess(provider, providerDone)
 	<-readerDone
 	<-server.done
 }
 
 func stopAttachedProcess(command *exec.Cmd, done *attachedCompletion) {
-	select {
-	case <-done.done:
+	if command == nil || command.Process == nil {
 		return
-	case <-time.After(100 * time.Millisecond):
 	}
-	_ = command.Process.Signal(os.Interrupt)
+	// A direct child may already have exited while descendants remain in its group.
+	_ = syscall.Kill(-command.Process.Pid, syscall.SIGINT)
 	select {
-	case <-done.done:
-		return
 	case <-time.After(time.Second):
-	}
-	select {
 	case <-done.done:
-		return
-	default:
-		_ = command.Process.Kill()
+		// Keep the group alive briefly so SIGINT can reach surviving descendants.
+		<-time.After(100 * time.Millisecond)
 	}
+	_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 	<-done.done
 }
 
@@ -259,7 +277,7 @@ func readAttachedPort(reader *bufio.Reader) (string, error) {
 func attachedProviderEnv(env []string) []string {
 	result := make([]string, 0, len(env)+1)
 	for _, value := range env {
-		if !strings.HasPrefix(value, "SUB2API_HOST_APPROVAL_FD=") && !strings.HasPrefix(value, "PULUMI_") {
+		if !strings.HasPrefix(value, "SUB2API_HOST_APPROVAL_FD=") && !strings.HasPrefix(value, "PULUMI_") && !strings.HasPrefix(value, "SOPS_") {
 			result = append(result, value)
 		}
 	}

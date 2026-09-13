@@ -163,6 +163,55 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("engine-graph-evidence-${{ env.TARGET_SHA }}");
   });
 
+  it("pins an isolated official Pulumi CLI and schema-validated embedded Engine baseline record", () => {
+    const parsedWorkflow = parseYAML(workflow) as {
+      jobs: {
+        "engine-graph": {
+          env: Record<string, string>;
+          steps: Array<{ name?: string; uses?: string; with?: Record<string, string>; if?: string; run?: string }>;
+        };
+      };
+    };
+    const engineGraph = parsedWorkflow.jobs["engine-graph"];
+    const install = engineGraph.steps.find((step) => step.name === "Install pinned official Pulumi CLI");
+    const setup = engineGraph.steps.find((step) => step.name === "Provision isolated Pulumi CLI and future test-Provider discovery");
+    const evidence = engineGraph.steps.find((step) => step.name === "Record required sanitized Engine Graph evidence");
+    const finalizer = engineGraph.steps.find((step) => step.name === "Finalize Engine Graph private files");
+    const upload = engineGraph.steps.find((step) => step.uses === "actions/upload-artifact@v4" && step.with?.name === "engine-graph-evidence-${{ env.TARGET_SHA }}");
+
+    expect((parseYAML(workflow) as { jobs: { "engine-graph": { "runs-on": string } } }).jobs["engine-graph"]["runs-on"]).toBe("ubuntu-24.04");
+    expect(engineGraph.env.PULUMI_HOME).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}");
+    expect(engineGraph.env.PULUMI_PLUGIN_PATH).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}/plugins");
+    expect(engineGraph.env.PULUMI_SKIP_UPDATE_CHECK).toBe("true");
+    expect(install).toMatchObject({ uses: "pulumi/actions@8582a9e8cc630786854029b4e09281acd6794b58", with: { "pulumi-version": "3.256.0" } });
+    expect(install?.with).not.toHaveProperty("command");
+    expect(setup?.run).toContain('test "$("$source" version)" = "v3.256.0"');
+    expect(setup?.run).toContain('ENGINE_GRAPH_PULUMI_CLI="$target" >> "$GITHUB_ENV"');
+    expect(setup?.run).toContain("TODO(Task 3): the migrated external Engine harness must invoke this absolute CLI and use PULUMI_PLUGIN_PATH with this runner, sampler, schema, and label; only implementation changes to external-engine.");
+    expect(setup?.run).not.toMatch(/curl|wget/);
+    expect(evidence?.run).toContain('"$ENGINE_GRAPH_PULUMI_CLI" version');
+    expect(evidence?.run).toContain("This is the before-migration embedded-engine baseline; it does not execute the provisioned CLI.");
+    expect(evidence?.run).toContain('env ENGINE_GRAPH_TRACE_DIR="$trace" go test -json -count=1 -run "$tests" ./internal/integration/enginegraph');
+    expect(evidence?.run).not.toContain("ENGINE_GRAPH_TEST_PROVIDER_DIR");
+    expect(evidence?.run).toContain("/usr/bin/time -f '%M' -o \"$rss\"");
+    expect(evidence?.run).toContain("implementation:'embedded-engine'");
+    expect(evidence?.run).toContain("schema:'engine-graph-resource-v1'");
+    expect(evidence?.run).toContain("resource record is not sanitized");
+    expect(evidence?.run).toContain("invalid resource record schema");
+    expect(evidence?.run).toContain("engine-graph-resource.json");
+    expect(evidence?.run).toContain("{mode:0o600}");
+    expect(finalizer).toMatchObject({ if: "always()" });
+    expect(finalizer?.run).toContain('if ! test -d "$safe"; then mkdir -m 0700 "$safe"; fi');
+    expect(finalizer?.run).toContain('if ! find "$safe" -maxdepth 1 -type f -print -quit | grep -q .; then');
+    expect(finalizer?.run).toContain('{"schema":"engine-graph-evidence-v1","outcome":"unavailable"}');
+    expect(finalizer?.run).toContain('> "$safe/unavailable.json"');
+    expect(finalizer?.run).toContain('chmod 0600 "$safe/unavailable.json"');
+    expect(finalizer?.run).toContain('rm -rf "$PULUMI_HOME" "$RUNNER_TEMP/engine-graph-cli-$TARGET_SHA"');
+    expect(finalizer?.run).toContain('rm -f "$RUNNER_TEMP/engine-graph-${TARGET_SHA}.jsonl" "$RUNNER_TEMP/engine-graph-${TARGET_SHA}.stderr" "$RUNNER_TEMP/engine-graph-${TARGET_SHA}.rss"');
+    expect(upload).toMatchObject({ if: "always()", with: { path: "${{ runner.temp }}/engine-graph-safe-${{ env.TARGET_SHA }}", "if-no-files-found": "error" } });
+    expect(engineGraph.steps.indexOf(finalizer!)).toBeLessThan(engineGraph.steps.indexOf(upload!));
+  });
+
   it("keeps scoped JSON no-skip evidence and baseline full checks for every required Go gate", () => {
     expect(workflow).toContain("host-controller-${TARGET_SHA}-${{ matrix.arch }}.jsonl");
     expect(workflow).toContain("host-controller-safe-${TARGET_SHA}-${{ matrix.arch }}");
