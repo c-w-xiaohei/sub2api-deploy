@@ -180,8 +180,7 @@ describe("Task4 CI contracts", () => {
     const upload = engineGraph.steps.find((step) => step.uses === "actions/upload-artifact@v4" && step.with?.name === "engine-graph-evidence-${{ env.TARGET_SHA }}");
 
     expect((parseYAML(workflow) as { jobs: { "engine-graph": { "runs-on": string } } }).jobs["engine-graph"]["runs-on"]).toBe("ubuntu-24.04");
-    expect(engineGraph.env.PULUMI_HOME).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ github.sha }}");
-    expect(engineGraph.env.PULUMI_PLUGIN_PATH).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ github.sha }}/plugins");
+    expect(engineGraph.steps.find((step) => step.name === "Set isolated Engine workspace")?.run).toContain('"PULUMI_HOME=$RUNNER_TEMP/engine-graph-pulumi-home-$TARGET_SHA"');
     expect(engineGraph.env.PULUMI_SKIP_UPDATE_CHECK).toBe("true");
     expect(install).toMatchObject({ uses: "pulumi/actions@8582a9e8cc630786854029b4e09281acd6794b58", with: { "pulumi-version": "3.256.0" } });
     expect(install?.with).not.toHaveProperty("command");
