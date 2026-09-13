@@ -180,13 +180,13 @@ describe("Task4 CI contracts", () => {
     const upload = engineGraph.steps.find((step) => step.uses === "actions/upload-artifact@v4" && step.with?.name === "engine-graph-evidence-${{ env.TARGET_SHA }}");
 
     expect((parseYAML(workflow) as { jobs: { "engine-graph": { "runs-on": string } } }).jobs["engine-graph"]["runs-on"]).toBe("ubuntu-24.04");
-    expect(engineGraph.env.PULUMI_HOME).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}");
-    expect(engineGraph.env.PULUMI_PLUGIN_PATH).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}/plugins");
+    expect(engineGraph.env.PULUMI_HOME).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ github.sha }}");
+    expect(engineGraph.env.PULUMI_PLUGIN_PATH).toBe("${{ runner.temp }}/engine-graph-pulumi-home-${{ github.sha }}/plugins");
     expect(engineGraph.env.PULUMI_SKIP_UPDATE_CHECK).toBe("true");
     expect(install).toMatchObject({ uses: "pulumi/actions@8582a9e8cc630786854029b4e09281acd6794b58", with: { "pulumi-version": "3.256.0" } });
     expect(install?.with).not.toHaveProperty("command");
     expect(setup?.run).toContain('test "$("$source" version)" = "v3.256.0"');
-    expect(setup?.run).toContain('ENGINE_GRAPH_PULUMI_CLI="$target" >> "$GITHUB_ENV"');
+    expect(setup?.run).toContain('"ENGINE_GRAPH_PULUMI_CLI=$target" >> "$GITHUB_ENV"');
     expect(setup?.run).toContain("TODO(Task 3): the migrated external Engine harness must invoke this absolute CLI and use PULUMI_PLUGIN_PATH with this runner, sampler, schema, and label; only implementation changes to external-engine.");
     expect(setup?.run).not.toMatch(/curl|wget/);
     expect(evidence?.run).toContain('"$ENGINE_GRAPH_PULUMI_CLI" version');

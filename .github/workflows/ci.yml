@@ -103,8 +103,8 @@ jobs:
     name: Engine Graph
     runs-on: ubuntu-24.04
     env:
-      PULUMI_HOME: ${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}
-      PULUMI_PLUGIN_PATH: ${{ runner.temp }}/engine-graph-pulumi-home-${{ env.TARGET_SHA }}/plugins
+      PULUMI_HOME: ${{ runner.temp }}/engine-graph-pulumi-home-${{ github.sha }}
+      PULUMI_PLUGIN_PATH: ${{ runner.temp }}/engine-graph-pulumi-home-${{ github.sha }}/plugins
       PULUMI_SKIP_UPDATE_CHECK: "true"
     steps:
       - uses: actions/checkout@v4
