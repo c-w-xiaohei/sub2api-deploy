@@ -1,0 +1,291 @@
+name: Pulumi Resource Comparison
+
+on:
+  push:
+    branches: [agent/pulumi-ssh-host-controller]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pulumi-resource-comparison-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASELINE_SHA: 46be3e20299b1c2e43251a52e48a942248d6199b
+  GO_VERSION: 1.25.11
+
+jobs:
+  measure:
+    name: ${{ matrix.target.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: CLI (cmd/sub2api-deploy)
+            label: cli
+          - name: Engine (internal/integration/enginegraph)
+            label: engine
+          - name: Import (internal/integration/providerimport)
+            label: import
+    env:
+      CGO_ENABLED: "0"
+      GOMAXPROCS: "2"
+      GOFLAGS: ""
+      GOTOOLCHAIN: local
+      GOOS: linux
+      GOARCH: amd64
+    steps:
+      - name: Checkout fixed baseline
+        uses: actions/checkout@v4
+        with:
+          ref: 46be3e20299b1c2e43251a52e48a942248d6199b
+          path: baseline
+
+      - name: Checkout candidate separately
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Verify checkouts and fixed toolchain
+        run: |
+          set -euo pipefail
+          printf '%s\n' "GOMODCACHE=$RUNNER_TEMP/pulumi-resource-comparison-gomodcache" >> "$GITHUB_ENV"
+          test "$(git -C "$GITHUB_WORKSPACE/baseline" rev-parse HEAD)" = "$BASELINE_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "go${GO_VERSION}"
+
+      - name: Predownload shared module cache outside measurement
+        run: |
+          set -euo pipefail
+          rm -rf "$GOMODCACHE"
+          mkdir -m 0700 -p "$GOMODCACHE"
+          for source in baseline candidate; do
+            (cd "$GITHUB_WORKSPACE/$source" && go mod download)
+          done
+
+      - name: Measure cold compile and link
+        id: measure
+        run: |
+          set -uo pipefail
+          set +e
+          report_dir="$RUNNER_TEMP/pulumi-resource-comparison-${{ matrix.target.label }}"
+          rm -rf "$report_dir"
+          mkdir -m 0700 -p "$report_dir"
+          script="$GITHUB_WORKSPACE/candidate/scripts/measure-pulumi-resources.py"
+
+          (cd "$GITHUB_WORKSPACE/baseline" && python3 "$script" \
+            --revision baseline \
+            --label '${{ matrix.target.label }}' \
+            --output "$report_dir/baseline-${{ matrix.target.label }}.json") &
+          baseline_pid=$!
+          wait "$baseline_pid"
+          baseline_status=$?
+
+          (cd "$GITHUB_WORKSPACE/candidate" && python3 "$script" \
+            --revision candidate \
+            --label '${{ matrix.target.label }}' \
+            --output "$report_dir/candidate-${{ matrix.target.label }}.json") &
+          candidate_pid=$!
+          wait "$candidate_pid"
+          candidate_status=$?
+
+          test -f "$report_dir/baseline-${{ matrix.target.label }}.json"
+          test -f "$report_dir/candidate-${{ matrix.target.label }}.json"
+          if test "$baseline_status" -ne 0 || test "$candidate_status" -ne 0; then
+            exit 1
+          fi
+
+      - name: Finalize private measurement files
+        if: always()
+        run: |
+          set +e
+          report_dir="$RUNNER_TEMP/pulumi-resource-comparison-${{ matrix.target.label }}"
+          if test -d "$report_dir"; then
+            find "$report_dir" -type f ! -name '*.json' -delete
+            find "$report_dir" -depth -mindepth 1 -type d -empty -delete
+          fi
+
+      - name: Upload sanitized comparison reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulumi-resource-comparison-${{ matrix.target.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/pulumi-resource-comparison-${{ matrix.target.label }}/*.json
+          if-no-files-found: error
+
+  compare:
+    name: Compare baseline and candidate
+    if: always()
+    needs: measure
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download sanitized reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pulumi-resource-comparison-*-*
+          path: reports
+          merge-multiple: false
+
+      - name: Write objective comparison summary
+        run: |
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+          import sys
+
+          schema = "pulumi-resource-comparison-v1"
+          baseline_sha = "46be3e20299b1c2e43251a52e48a942248d6199b"
+          candidate_sha = os.environ["GITHUB_SHA"]
+          expected_labels = {"cli", "engine", "import"}
+          expected_keys = {
+              "architecture", "cgo_enabled", "command_exit", "gomaxprocs",
+              "gocache", "gomodcache", "label", "memory_peak_source",
+              "goos", "parallelism", "revision", "schema", "source_sha", "status",
+              "toolchain", "wall_seconds", "cgroup_memory_peak_bytes",
+          }
+          expected_files = {
+              f"{revision}-{label}.json"
+              for revision in ("baseline", "candidate")
+              for label in expected_labels
+          }
+
+          def finite_nonnegative(value, expected_type):
+              return (
+                  type(value) is expected_type
+                  and (not isinstance(value, float) or math.isfinite(value))
+                  and value >= 0
+              )
+
+          def unavailable():
+              Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
+                  "# Pulumi resource comparison\n\nmeasurement unavailable\n",
+                  encoding="ascii",
+              )
+              raise SystemExit(1)
+
+          files = sorted(Path("reports").rglob("*.json"))
+          if {path.name for path in files} != expected_files:
+              unavailable()
+
+          records = {}
+          for path in files:
+              try:
+                  record = json.loads(path.read_text(encoding="ascii"))
+              except (OSError, UnicodeError, json.JSONDecodeError):
+                  unavailable()
+              if set(record) != expected_keys:
+                  unavailable()
+              label = record["label"]
+              revision = record["revision"]
+              if not isinstance(label, str) or not isinstance(revision, str):
+                  unavailable()
+              if label not in expected_labels or revision not in {"baseline", "candidate"}:
+                  unavailable()
+              if path.name != f"{revision}-{label}.json":
+                  unavailable()
+              if record["schema"] != schema or record["architecture"] != "amd64":
+                  unavailable()
+              if record["goos"] != "linux" or record["toolchain"] != "go1.25.11":
+                  unavailable()
+              if type(record["cgo_enabled"]) is not bool or record["cgo_enabled"] is not False:
+                  unavailable()
+              if type(record["gomaxprocs"]) is not int or record["gomaxprocs"] != 2:
+                  unavailable()
+              if type(record["parallelism"]) is not int or record["parallelism"] != 2:
+                  unavailable()
+              if record["gocache"] != "private-cold" or record["gomodcache"] != "shared-predownloaded":
+                  unavailable()
+              if record["memory_peak_source"] != "cgroup-v2-memory.peak":
+                  unavailable()
+              expected_sha = baseline_sha if revision == "baseline" else candidate_sha
+              if not isinstance(record["source_sha"], str) or record["source_sha"] != expected_sha:
+                  unavailable()
+              if not isinstance(record["status"], str):
+                  unavailable()
+              if record["status"] not in {"measured", "compile_failed", "measurement_unavailable"}:
+                  unavailable()
+              if record["status"] == "measurement_unavailable":
+                  if any(record[key] is not None for key in ("command_exit", "wall_seconds", "cgroup_memory_peak_bytes")):
+                      unavailable()
+              else:
+                  if type(record["command_exit"]) is not int:
+                      unavailable()
+                  if record["status"] == "measured" and record["command_exit"] != 0:
+                      unavailable()
+                  if record["status"] == "compile_failed" and record["command_exit"] == 0:
+                      unavailable()
+                  if not finite_nonnegative(record["wall_seconds"], float):
+                      unavailable()
+                  if not finite_nonnegative(record["cgroup_memory_peak_bytes"], int):
+                      unavailable()
+              if (revision, label) in records:
+                  unavailable()
+              records[(revision, label)] = record
+
+          lines = [
+              "# Pulumi resource comparison",
+              "",
+              f"Baseline: `{baseline_sha}`",
+              f"Candidate: `{candidate_sha}`",
+              "Runner: `ubuntu-24.04`; toolchain: `go1.25.11`; `CGO_ENABLED=0`; "
+              "`GOMAXPROCS=2`; build parallelism: `-p=2`.",
+              "",
+              "Ratios are candidate / baseline. Values below `1.0` are reductions; "
+              "no numeric pass threshold is applied.",
+              "",
+              "| Target | Baseline status | Candidate status | Wall ratio | Memory ratio |",
+              "| --- | --- | --- | ---: | ---: |",
+          ]
+          failed = False
+          for label in ("cli", "engine", "import"):
+              baseline = records[("baseline", label)]
+              candidate = records[("candidate", label)]
+              statuses = (baseline["status"], candidate["status"])
+              if statuses != ("measured", "measured"):
+                  failed = True
+              wall_ratio = "unavailable"
+              memory_ratio = "unavailable"
+              if statuses == ("measured", "measured"):
+                  base_wall = baseline["wall_seconds"]
+                  cand_wall = candidate["wall_seconds"]
+                  base_memory = baseline["cgroup_memory_peak_bytes"]
+                  cand_memory = candidate["cgroup_memory_peak_bytes"]
+                  if not finite_nonnegative(base_wall, float) or not finite_nonnegative(cand_wall, float):
+                      unavailable()
+                  if not finite_nonnegative(base_memory, int) or not finite_nonnegative(cand_memory, int):
+                      unavailable()
+                  if min(base_wall, cand_wall, base_memory, cand_memory) <= 0:
+                      unavailable()
+                  wall_ratio = f"{cand_wall / base_wall:.3f}"
+                  memory_ratio = f"{cand_memory / base_memory:.3f}"
+              lines.append(
+                  f"| `{label}` | `{baseline['status']}` | `{candidate['status']}` | "
+                  f"{wall_ratio} | {memory_ratio} |"
+              )
+
+          lines.extend([
+              "",
+              "The memory number is aggregate cgroup-v2 `memory.peak`, which includes "
+              "memory charged to the cgroup, including page cache. It is not RSS.",
+              "",
+              "This is a controlled `-p=2` cold-Go-cache compile/link comparison. It "
+              "does not reproduce historic unconstrained WSL execution and does not "
+              "authorize local builds or tests.",
+          ])
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n", encoding="ascii")
+          if failed:
+              print("compilation failed or measurement unavailable")
+              sys.exit(1)
+          PY
