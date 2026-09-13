@@ -6,14 +6,31 @@ the CLI does not store a plan or run a removal workflow for you.
 
 ## Capability Boundary
 
-Cross-Host Docker PostgreSQL and Redis are implementation-present and
-CI-evidence-pending: a data Host derives its admission policy from App
-placement, and the Program orders data admission, App readiness, then
-Cloudflare publication. Use the workflow below, but do not treat this as
-production-proven until the Task 4 exact-SHA gates pass. Local data remains
-supported too. Neon, MicroSocks, Tunnel Connector, production migration/cutover,
+Cross-Host Docker PostgreSQL and Redis passed all eight Task 4 gates at
+`46be3e20299b1c2e43251a52e48a942248d6199b`
+([CI run 34182012748](https://github.com/c-w-xiaohei/sub2api-deploy/actions/runs/34182012748)).
+A data Host derives its admission policy from App placement, and the Program
+orders data admission, App readiness, then Cloudflare publication. That evidence
+applies to that exact revision, not automatically to subsequent migrations, and
+does not establish production deployment. Local data remains supported too.
+Neon, MicroSocks, Tunnel Connector, production migration/cutover,
 and a published production release remain separate gaps. This does not claim
 that the original 001 product is complete.
+
+## SDK And Engine Isolation Migration
+
+The deployment controller and integration tests are being migrated to the
+official Automation API. The Engine runs in the official external Pulumi CLI;
+Program and Host Provider code retain their respective SDKs. Integration tests
+must exercise that real Engine, not replace its scheduling with mocks.
+
+Local builds and tests remain prohibited until exact-SHA CI demonstrates both
+functional preservation and an acceptable resource comparison. The historical
+warm-cache Engine Graph baseline is 19,200 ms and 2,879,460 KiB maximum
+single-process RSS at `596c2b4a5203b83a9bf8b2da1668d7675d2fd214`; this is not
+aggregate parallel build memory or permission to build locally. Paired cold-cache
+CI measurements are tracked separately in
+`docs/plans/2026-09-13-automation-api-engine-isolation.md`.
 
 ## Environment Input
 

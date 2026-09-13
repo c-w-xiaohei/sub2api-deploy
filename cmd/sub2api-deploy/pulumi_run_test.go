@@ -14,7 +14,6 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
-	"github.com/pulumi/pulumi/pkg/v3/secrets"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
@@ -113,12 +112,7 @@ func TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi(t *testing
 		t.Fatal("unexpected fake approval request")
 	}
 	data := pulumiRunRead(t, logs.pulumi)
-	for _, want := range []string{
-		"cwd=",
-		"args=<--non-interactive><up><--stack=production><--config-file=", "<--yes><--message=release>",
-		"fd3=no",
-		"approval=",
-	} {
+	for _, want := range []string{"cwd=", "args=<--non-interactive><up>", "<--yes>", "<--message=", "fd3=no", "approval="} {
 		if !strings.Contains(data, want) {
 			t.Fatalf("Pulumi observation missing %q", want)
 		}
@@ -243,7 +237,7 @@ type pulumiRunLogs struct { pulumi, staged, cleanup, providerStarted, providerEn
 type pulumiRunSource struct {
 	bytes   []byte
 	info    os.FileInfo
-	manager secrets.Manager
+	manager config.Crypter
 }
 
 func pulumiRunFixture(t *testing.T, sopsOutput []byte, pulumiMode string) (string, string, string, pulumiRunSource, pulumiRunLogs) {
@@ -263,7 +257,7 @@ func pulumiRunFixture(t *testing.T, sopsOutput []byte, pulumiMode string) (strin
 	writeAttachedExecutable(t, filepath.Join(bin, "sops"), "#!/bin/sh\n[ \"$SOPS_AGE_KEY\" = '"+pulumiRunSOPSKey+"' ] || exit 24\nprintf '%s' '"+strings.ReplaceAll(string(sopsOutput), "'", "'\\''")+"'\n")
 	// The delay is longer than the old immediate escalation path but shorter than the EOF grace period.
 	writeAttachedExecutable(t, filepath.Join(bin, "pulumi-resource-sub2api-host"), "#!/bin/sh\nif env | grep -q '"+pulumiRunSOPSKey+"'; then exit 25; fi\nif env | grep -q '^PULUMI_'; then exit 27; fi\nprintf '%s/%s\\n' \"${PULUMI_CONFIG_PASSPHRASE+x}\" \"${PULUMI_CONFIG_PASSPHRASE_FILE+x}\" > '"+logs.providerEnv+"'\nprintf x > '"+logs.providerStarted+"'\nprintf '%s\\n' 43123\ncat <&3 >/dev/null\nsleep 0.25\nprintf '%s\\n' closed > '"+logs.cleanup+"'\n")
-	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nif [ \"$1\" = version ]; then printf 'v3.256.0\\n'; exit 0; fi\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; esac; done\n[ -n \"$PULUMI_CONFIG_PASSPHRASE_FILE\" ] && [ \"$(cat \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = '"+pulumiRunPassphrase+"' ] && [ \"$(stat -c %a \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = 600 ] || exit 26\nprintf '\\nfd3=no\\napproval=\\ndebug=%s\\npassphrase-file=%s\\n' \"$PULUMI_DEBUG_PROVIDERS\" \"${PULUMI_CONFIG_PASSPHRASE_FILE:+set}\" >> '"+logs.pulumi+"'\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
+	writeAttachedExecutable(t, filepath.Join(bin, "pulumi"), "#!/bin/sh\nif [ \"$1\" = version ]; then printf 'v3.205.0\\n'; exit 0; fi\nif [ \"$1\" = --non-interactive ] && [ \"$2\" = stack ]; then case \"$3\" in select) exit 0 ;; output) printf '{}\\n'; exit 0 ;; history) printf '[]\\n'; exit 0 ;; esac; fi\nprintf 'cwd=%s\\nargs=' \"$PWD\" > '"+logs.pulumi+"'\nexpect_event_log=0\nfor arg; do printf '<%s>' \"$arg\" >> '"+logs.pulumi+"'; case \"$arg\" in --config-file=*) config=${arg#--config-file=};; --event-log) expect_event_log=1;; esac; if [ \"$expect_event_log\" = 1 ] && [ \"$arg\" != \"--event-log\" ]; then event_log=$arg; expect_event_log=0; fi; done\n[ -n \"$PULUMI_CONFIG_PASSPHRASE_FILE\" ] && [ \"$(cat \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = '"+pulumiRunPassphrase+"' ] && [ \"$(stat -c %a \"$PULUMI_CONFIG_PASSPHRASE_FILE\")\" = 600 ] || exit 26\nprintf '\\nfd3=no\\napproval=\\ndebug=%s\\npassphrase-file=%s\\n' \"$PULUMI_DEBUG_PROVIDERS\" \"${PULUMI_CONFIG_PASSPHRASE_FILE:+set}\" >> '"+logs.pulumi+"'\ncat \"$config\" > '"+logs.staged+"'\ndirname \"$config\" > '"+logs.stagedParent+"'\nif [ \"$2\" = preview ] && [ -n \"$event_log\" ]; then printf '%s\\n' '{\"summaryEvent\":{\"resourceChanges\":{},\"isPreview\":true,\"result\":\"succeeded\"}}' > \"$event_log\"; fi\nif [ '"+pulumiMode+"' = failure ]; then exit 23; fi\nexit 0\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SOPS_AGE_KEY", pulumiRunSOPSKey)
 	t.Setenv("PULUMI_DEBUG_PROVIDERS", "existing:123")
@@ -280,14 +274,14 @@ func assertPulumiRunSourceUnchanged(t *testing.T, path string, before pulumiRunS
 	if info.Mode().Perm() != 0o600 || !os.SameFile(before.info, info) || !bytes.Equal(after, before.bytes) { t.Fatal("source stack identity, bytes, or mode changed") }
 }
 
-func pulumiRunProgramSecrets(t *testing.T, staged string, manager secrets.Manager) string {
+func pulumiRunProgramSecrets(t *testing.T, staged string, manager config.Crypter) string {
 	t.Helper()
 	project := &workspace.Project{Name: "sub2api-environment", Runtime: workspace.NewProjectRuntimeInfo("go", nil)}
 	stack, err := workspace.LoadProjectStackBytes(nil, project, []byte(staged), "captured-staged.yaml", encoding.YAML)
 	if err != nil { t.Fatalf("load captured staged stack: %v", err) }
 	value, ok := stack.Config[config.MustMakeKey("sub2api-environment", "environmentSecrets")]
 	if !ok { t.Fatal("captured staged stack has no environmentSecrets") }
-	plain, err := value.Value(manager.Decrypter())
+	plain, err := value.Value(manager)
 	if err != nil { t.Fatalf("decrypt captured Program secrets: %v", err) }
 	return plain
 }

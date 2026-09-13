@@ -18,6 +18,21 @@ Owner：Feature Dev Test Spec producer
 
 ## 1. Test Architecture / Test Surface
 
+### SDK/Engine Isolation Amendment (2026-09-13)
+
+The user-authorized Automation API migration changes the Engine execution seam,
+not the functional acceptance matrix below. Engine Graph and Provider Import
+must drive the pinned official Pulumi CLI through the public Automation SDK;
+repository test binaries must not import the Engine/backend/deploy implementation.
+Test-owned loopback Provider RPC servers remain valid fake providers, while the
+Engine scheduling, checkpoint, preview, and import behavior must remain real.
+The production Program and Host Provider retain their official SDKs.
+
+Historical Task 4 evidence is bound to `46be3e2` and does not verify this migration.
+Current exact-SHA functional and resource evidence is tracked in
+`../../plans/automation-api-migration-evidence.md`. Local builds/tests remain
+prohibited; warm single-process RSS is not aggregate build memory evidence.
+
 | Module | Interface under test | Production seam | Candidate test adapter / path | Required integration boundary | Owner |
 | --- | --- | --- | --- | --- | --- |
 | Environment Program | config/secrets -> official resources + one Host/server | Pulumi language host | `internal/program/program_test.go` `pulumi.WithMocks` | planned real Engine/local backend and test-only publication Provider | Program/Integration |

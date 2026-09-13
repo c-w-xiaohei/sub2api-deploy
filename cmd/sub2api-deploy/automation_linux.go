@@ -18,6 +18,7 @@ import (
 	"github.com/blang/semver"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+	"gopkg.in/yaml.v3"
 )
 
 // attachedPulumiCommand is the Automation API boundary. The Engine remains in
@@ -225,10 +226,54 @@ func newStagedPulumiWorkspace(ctx context.Context, stagedPath, stackName string,
 }
 
 func stagedProjectYAML(projectYAML []byte, workdir string) ([]byte, error) {
-	const program = "binary: ./bin/pulumi-program"
-	replacement := "binary: " + filepath.Join(workdir, "bin", "pulumi-program")
-	if strings.Count(string(projectYAML), program) != 1 {
+	if !validPulumiYAMLBytes(projectYAML) || !filepath.IsAbs(workdir) {
 		return nil, errInvalidStagedStack
 	}
-	return []byte(strings.Replace(string(projectYAML), program, replacement, 1)), nil
+	var document yaml.Node
+	decoder := yaml.NewDecoder(bytes.NewReader(projectYAML))
+	if err := decoder.Decode(&document); err != nil || !validPulumiYAMLNode(&document) || document.Kind != yaml.DocumentNode || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, errInvalidStagedStack
+	}
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errInvalidStagedStack
+	}
+
+	runtime := yamlMappingValue(document.Content[0], "runtime")
+	if runtime == nil {
+		return nil, errInvalidStagedStack
+	}
+	if runtime.Kind == yaml.ScalarNode && runtime.Tag == "!!str" && runtime.Value == "go" {
+		return projectYAML, nil
+	}
+	if runtime.Kind != yaml.MappingNode {
+		return nil, errInvalidStagedStack
+	}
+	options := yamlMappingValue(runtime, "options")
+	if options == nil || options.Kind != yaml.MappingNode {
+		return nil, errInvalidStagedStack
+	}
+	binary := yamlMappingValue(options, "binary")
+	if binary == nil || binary.Kind != yaml.ScalarNode || binary.Tag != "!!str" || binary.Value != "./bin/pulumi-program" {
+		return nil, errInvalidStagedStack
+	}
+	binary.Value = filepath.Join(workdir, "bin", "pulumi-program")
+	var rendered bytes.Buffer
+	encoder := yaml.NewEncoder(&rendered)
+	if err := encoder.Encode(&document); err != nil || encoder.Close() != nil {
+		return nil, errInvalidStagedStack
+	}
+	return rendered.Bytes(), nil
+}
+
+func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Kind == yaml.ScalarNode && mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
 }

@@ -38,10 +38,13 @@ type attachedCompletion struct {
 
 type attachedPulumiFailure struct{ err error }
 
-func (e attachedPulumiFailure) Error() string { return e.err.Error() }
+func (e attachedPulumiFailure) Error() string { return "pulumi failed" }
 func (e attachedPulumiFailure) Unwrap() error { return e.err }
 
 func resolveAttachedExecutables(cliPath string) (attachedExecutables, error) {
+	if !filepath.IsAbs(cliPath) {
+		return attachedExecutables{}, fmt.Errorf("attached executable is unavailable")
+	}
 	dir := filepath.Dir(cliPath)
 	paths := attachedExecutables{
 		provider: filepath.Join(dir, "pulumi-resource-sub2api-host"),

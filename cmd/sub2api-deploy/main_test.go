@@ -145,12 +145,7 @@ func TestPublicCLIWiresPulumiProviderAndApproval(t *testing.T) {
 	}
 
 	pulumi := pulumiRunRead(t, logs.pulumi)
-	for _, want := range []string{
-		"cwd=",
-		"args=<--non-interactive><preview><--stack=production><--config-file=",
-		"fd3=no",
-		"approval=\n",
-	} {
+	for _, want := range []string{"cwd=", "args=<--non-interactive><preview>", "<--config-file=", "fd3=no", "approval=\n"} {
 		if !strings.Contains(pulumi, want) {
 			t.Fatalf("Pulumi invocation missing %q: %s", want, pulumi)
 		}
@@ -254,6 +249,13 @@ func TestPublicCLIDeniedDangerousUpdateLeavesRemoteAndStateUntouched(t *testing.
 		t.Fatal(closeSlaveErr)
 	}
 
+	applyPrompt := task2WaitForApplyPrompt(pty, 10*time.Second)
+	if !strings.Contains(applyPrompt, "Preview complete for up. Type APPLY to continue: ") {
+		t.Fatal("public CLI did not require explicit Pulumi update confirmation")
+	}
+	if _, err := master.Write([]byte("APPLY\n")); err != nil {
+		t.Fatal(err)
+	}
 	prompt := task2WaitForPrompt(pty, 10*time.Second)
 	if !task2PromptMatches(prompt, task2ApprovalSubject(task2Revision("db.example"))) {
 		t.Fatal("approval prompt did not contain the exact dangerous data-link subject")
@@ -314,12 +316,40 @@ func task2PulumiHelper() {
 	if evidence == "" {
 		os.Exit(90)
 	}
+	args := task2HelperArgs()
+	if len(args) == 1 && args[0] == "version" {
+		_, _ = os.Stdout.WriteString("v3.205.0\n")
+		os.Exit(0)
+	}
 	_ = os.WriteFile(filepath.Join(evidence, "pulumi-started"), []byte("1"), 0o600)
 	if err := task2RecordProcess(evidence, "pulumi"); err != nil {
 		task2HelperFailure(evidence, err)
 	}
-	args := task2HelperArgs()
-	if len(args) != 4 || args[0] != "--non-interactive" || args[1] != "up" || args[2] != "--stack=production" || !strings.HasPrefix(args[3], "--config-file=") {
+	if len(args) < 2 || args[0] != "--non-interactive" {
+		task2HelperFailure(evidence, fmt.Errorf("unexpected Pulumi invocation"))
+	}
+	if args[1] == "stack" {
+		if len(args) < 3 || (args[2] != "select" && args[2] != "output" && args[2] != "history") {
+			task2HelperFailure(evidence, fmt.Errorf("unexpected Pulumi auxiliary invocation"))
+		}
+		if args[2] == "output" {
+			_, _ = os.Stdout.WriteString("{}\n")
+		} else if args[2] == "history" {
+			_, _ = os.Stdout.WriteString("[]\n")
+		}
+		os.Exit(0)
+	}
+	if args[1] == "preview" {
+		eventLog := task2ArgumentValue(args, "--event-log")
+		if !task2SafeEventLog(eventLog) {
+			task2HelperFailure(evidence, fmt.Errorf("unexpected preview event log"))
+		}
+		if err := os.WriteFile(eventLog, []byte("{\"summaryEvent\":{\"resourceChanges\":{},\"isPreview\":true,\"result\":\"succeeded\"}}\n"), 0o600); err != nil {
+			task2HelperFailure(evidence, err)
+		}
+		os.Exit(0)
+	}
+	if args[1] != "up" || !task2HasArgument(args, "--yes") || !task2HasArgument(args, "--skip-preview") || !task2HasArgument(args, "--exec-kind=auto.local") || !task2HasArgument(args, "--stack=production") {
 		task2HelperFailure(evidence, fmt.Errorf("unexpected Pulumi invocation"))
 	}
 	for _, arg := range args {
@@ -530,12 +560,20 @@ func task2PTYOutput(file *os.File) *task2PTY {
 }
 
 func task2WaitForPrompt(p *task2PTY, timeout time.Duration) string {
+	return task2WaitForText(p, "Type APPROVE ", timeout)
+}
+
+func task2WaitForApplyPrompt(p *task2PTY, timeout time.Duration) string {
+	return task2WaitForText(p, "Type APPLY", timeout)
+}
+
+func task2WaitForText(p *task2PTY, text string, timeout time.Duration) string {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case chunk := <-p.chunks:
 		p.output.WriteString(chunk)
-		for !strings.Contains(p.output.String(), "Type APPROVE ") {
+		for !strings.Contains(p.output.String(), text) {
 			select {
 			case chunk := <-p.chunks:
 				p.output.WriteString(chunk)
@@ -703,6 +741,14 @@ func task2SafeClientLog(path string) bool {
 	return err == nil && filepath.IsAbs(path) && filepath.Dir(path) == os.TempDir() && info.Mode().IsRegular() && info.Mode().Perm() == 0o600
 }
 
+func task2SafeEventLog(path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	relative, err := filepath.Rel(os.TempDir(), path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) && filepath.Base(path) != "."
+}
+
 func task2HelperArgs() []string {
 	for i, arg := range os.Args {
 		if arg == "--" {
@@ -710,6 +756,24 @@ func task2HelperArgs() []string {
 		}
 	}
 	return nil
+}
+
+func task2HasArgument(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func task2ArgumentValue(args []string, name string) string {
+	for index, arg := range args {
+		if arg == name && index+1 < len(args) {
+			return args[index+1]
+		}
+	}
+	return ""
 }
 
 func task2PromptMatches(prompt string, want hostcontract.ApprovalSubject) bool {

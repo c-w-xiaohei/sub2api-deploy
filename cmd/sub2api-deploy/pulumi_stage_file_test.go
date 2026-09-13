@@ -50,10 +50,10 @@ func TestWithStagedStackStagesPrivateRenderedFileAndCleansUp(t *testing.T) {
 		}
 		stack := loadLifecycleStagedStack(t, project, rendered)
 		assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
-		assertStagedStackProtectedValue(t, stack, "sub2api-environment:environmentSecrets", stageSecrets, manager.Decrypter())
-		assertStagedStackProtectedValue(t, stack, "sub2api-host:revisionKey", stageRevision, manager.Decrypter())
+		assertStagedStackProtectedValue(t, stack, "sub2api-environment:environmentSecrets", stageSecrets, manager)
+		assertStagedStackProtectedValue(t, stack, "sub2api-host:revisionKey", stageRevision, manager)
 		assertStackValue(t, stack, "sub2api-environment:unrelated", false, stageUnrelatedValue, config.NopDecrypter)
-		assertStagedStackProtectedValue(t, stack, "sub2api-environment:unrelatedSecret", stageUnrelatedSecret, manager.Decrypter())
+		assertStagedStackProtectedValue(t, stack, "sub2api-environment:unrelatedSecret", stageUnrelatedSecret, manager)
 		if got := stagedStackConfigText(t, stack, "sub2api-environment:unrelatedSecret", config.NopDecrypter); got != sourceCiphertext {
 			t.Fatal("unrelated secure ciphertext changed")
 		}

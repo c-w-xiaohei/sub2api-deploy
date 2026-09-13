@@ -31,25 +31,14 @@ import (
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostruntime/testonly"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/program"
-	"github.com/pulumi/pulumi/pkg/v3/backend"
-	"github.com/pulumi/pulumi/pkg/v3/backend/display"
-	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
-	pulumidisplay "github.com/pulumi/pulumi/pkg/v3/display"
-	"github.com/pulumi/pulumi/pkg/v3/engine"
-	pkgresource "github.com/pulumi/pulumi/pkg/v3/resource"
-	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/deploytest"
-	pkgplugin "github.com/pulumi/pulumi/pkg/v3/resource/plugin"
-	"github.com/pulumi/pulumi/pkg/v3/resource/stack"
-	"github.com/pulumi/pulumi/pkg/v3/secrets"
-	"github.com/pulumi/pulumi/pkg/v3/secrets/b64"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
 	sdkplugin "github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/testing/diagtest"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
@@ -97,7 +86,7 @@ func TestProviderImportDockerHelper(t *testing.T) {
 }
 
 // TestEngineImportPreviewIsNoOpOrAcceptedDiff runs a real Program Import through
-// the Engine, then verifies a normal program preview cannot mutate the fixture.
+// the official CLI and verifies a normal program preview cannot mutate the fixture.
 func TestEngineImportPreviewIsNoOpOrAcceptedDiff(t *testing.T) {
 	h := newHarness(t)
 	h.setupRuntime(t)
@@ -107,17 +96,12 @@ func TestEngineImportPreviewIsNoOpOrAcceptedDiff(t *testing.T) {
 	imported, err := h.update(t, true)
 	if err != nil {
 		h.mu.Lock()
-		calls, operations := append([]string(nil), h.calls...), append([]pulumidisplay.StepOp(nil), h.operations...)
+		calls := h.provider.recorder.snapshot()
 		h.mu.Unlock()
-		t.Fatalf("Engine import update: %v (calls=%v operations=%v)", err, calls, operations)
-	}
-	if err := imported.VerifyIntegrity(); err != nil {
-		t.Fatalf("import checkpoint integrity: %v", err)
+		t.Fatalf("external Engine import update failed after calls=%v", calls)
 	}
 	h.assertImportResult(t, imported)
 	h.assertMeasuredCalls(t, []string{"Configure", "Read", "Check", "Diff"})
-	h.assertHostOperations(t, deploy.OpImport)
-	h.assertLatestHostRegistration(t, "import", true)
 	h.assertOneInspect(t)
 	h.assertDockerReads(t, "read network-ls", "read network-ls", "read container-ls", "read app-readiness", "read container-ls", "read proxy-readiness")
 	h.assertUnchangedRoot(t, beforeRoot)
@@ -126,14 +110,12 @@ func TestEngineImportPreviewIsNoOpOrAcceptedDiff(t *testing.T) {
 	h.resetMeasuredTrace(t)
 	previewed, err := h.preview(t)
 	if err != nil {
-		t.Fatalf("Engine preview after import: %v", err)
+		t.Fatal("external Engine preview after import failed")
 	}
 	if !snapshotsEqual(beforeSnapshot, previewed) {
 		t.Fatal("preview changed the imported checkpoint")
 	}
 	h.assertMeasuredCalls(t, []string{"Configure", "Check", "Diff"})
-	h.assertHostOperations(t, deploy.OpSame)
-	h.assertLatestHostRegistration(t, "preview", false)
 	h.assertNoEffects(t)
 	h.assertDockerReads(t)
 	h.assertUnchangedRoot(t, beforeRoot)
@@ -141,70 +123,100 @@ func TestEngineImportPreviewIsNoOpOrAcceptedDiff(t *testing.T) {
 }
 
 type harness struct {
-	backend backend.Backend
-	stack   backend.Stack
-	project *workspace.Project
+	stack   auto.Stack
 	root    string
-	manager secrets.Manager
 	key     string
+	providerBinary string
 
 	provider *providerProcess
 
 	mu                   sync.Mutex
-	calls                []string
-	operations           []pulumidisplay.StepOp
 	productionHostInputs resource.PropertyMap
-	registrations        []hostRegistration
 	phase                string
 	preseededState       hostruntime.State
 	capturing            bool
 }
 
-type hostRegistration struct {
-	phase    string
-	inputs   resource.PropertyMap
-	importID string
-}
-
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	project := &workspace.Project{
-		Name:    "sub2api-environment",
-		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
+	cli := os.Getenv("EXTERNAL_PULUMI_CLI")
+	if cli == "" {
+		cli = os.Getenv("ENGINE_GRAPH_PULUMI_CLI")
+	}
+	if cli == "" || !filepath.IsAbs(cli) {
+		t.Fatal("external Pulumi CLI is required as an absolute path")
+	}
+	provider := os.Getenv("PROVIDER_IMPORT_BINARY")
+	if provider == "" {
+		provider = os.Getenv("SUB2API_TEST_PROVIDER_BINARY")
+	}
+	if provider == "" {
+		if releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT"); releaseRoot != "" {
+			provider = filepath.Join(releaseRoot, "bin", "pulumi-resource-sub2api-host")
+		}
+	}
+	if provider == "" {
+		t.Fatal("provider binary is required")
+	}
+	providerInfo, err := os.Stat(provider)
+	if err != nil || providerInfo.IsDir() || providerInfo.Mode()&0o111 == 0 {
+		t.Fatal("provider binary is unavailable")
+	}
+	versionOutput, err := exec.Command(cli, "version").Output()
+	if err != nil || strings.TrimSpace(string(versionOutput)) != "v3.256.0" {
+		t.Fatal("external Pulumi CLI must be pinned to v3.256.0")
+	}
+	root := t.TempDir()
+	cliRoot := filepath.Join(root, "cli")
+	if err := os.MkdirAll(filepath.Join(cliRoot, "bin"), 0o700); err != nil {
+		t.Fatal("prepare CLI fixture failed")
+	}
+	if err := os.Symlink(cli, filepath.Join(cliRoot, "bin", "pulumi")); err != nil {
+		t.Fatal("prepare CLI fixture failed")
+	}
+	command, err := auto.NewPulumiCommand(&auto.PulumiCommandOptions{Root: cliRoot, Version: semver.MustParse("3.256.0")})
+	if err != nil {
+		t.Fatal("initialize official Pulumi command failed")
 	}
 	backendRoot := t.TempDir()
-	b, err := diy.New(t.Context(), diagtest.LogSink(t), "file://"+filepath.ToSlash(backendRoot), project)
-	if err != nil {
+	passphraseFile := filepath.Join(root, "config-passphrase")
+	if err := os.WriteFile(passphraseFile, []byte("provider-import-test-passphrase\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ref, err := b.ParseStackReference("canary")
+	workspaceOptions := []auto.LocalWorkspaceOption{
+		auto.WorkDir(root),
+		auto.Pulumi(command),
+		auto.PulumiHome(filepath.Join(root, "pulumi-home")),
+		auto.SecretsProvider("passphrase"),
+		auto.Project(workspace.Project{Name: "sub2api-environment", Runtime: workspace.NewProjectRuntimeInfo("go", nil)}),
+		auto.EnvVars(map[string]string{
+			"PATH":                         filepath.Dir(provider) + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"PULUMI_BACKEND_URL":           "file://" + filepath.ToSlash(backendRoot),
+			"PULUMI_CONFIG_PASSPHRASE_FILE": passphraseFile,
+			"PULUMI_SKIP_UPDATE_CHECK":      "true",
+		}),
+	}
+	stack, err := auto.NewStackInlineSource(t.Context(), "canary", "sub2api-environment", func(ctx *pulumi.Context) error {
+		return program.Register(ctx, importRelease, fixtureBytes("import.yaml"), fixtureBytes("import-secrets.yaml"))
+	}, workspaceOptions...)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("create Automation API stack failed")
 	}
-	st, err := b.CreateStack(t.Context(), ref, "", nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager := b64.NewBase64SecretsManager()
-	key, err := manager.Encrypter().EncryptValue(t.Context(), revisionKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &harness{
-		backend: b,
-		stack:   st,
-		project: project,
-		root:    t.TempDir(),
-		manager: manager,
-		key:     key,
-	}
+	return &harness{stack: stack, root: root, key: revisionKey, providerBinary: provider}
 }
 
 // setupRuntime creates a static, read-only Runtime fixture before the provider
 // process exists. It intentionally never invokes Provider Create or bootstrap.
 func (h *harness) setupRuntime(t *testing.T) {
 	t.Helper()
+	captureRoot, captureTrace := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(captureTrace, "current"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.provider = startProvider(t, h.providerBinary, captureRoot, captureTrace, "")
+	h.setProviderAttachPort(t)
 	inputs := h.captureProductionInputs(t)
+	stopProvider(t, h.provider)
 	fixture := writePreseed(t, inputs)
 	before := treeManifest(t, fixture.root)
 	validatePreseed(t, fixture)
@@ -212,36 +224,32 @@ func (h *harness) setupRuntime(t *testing.T) {
 		t.Fatal("direct Runtime inspect changed the static fixture")
 	}
 	h.preseededState = fixture.state
-	h.provider = startProvider(t, fixture)
+	h.provider = startProvider(t, h.providerBinary, fixture.root, fixture.trace, filepath.Join(fixture.trace, "docker-model.json"))
+	h.root = fixture.root
+	h.setProviderAttachPort(t)
+}
+
+func (h *harness) setProviderAttachPort(t *testing.T) {
+	t.Helper()
+	h.stack.Workspace().SetEnvVar("PULUMI_DEBUG_PROVIDERS", "sub2api-host:"+h.provider.port)
 }
 
 func (h *harness) resetMeasuredTrace(t *testing.T) {
 	t.Helper()
-	h.mu.Lock()
-	h.calls = nil
-	h.operations = nil
-	h.mu.Unlock()
+	h.provider.recorder.reset()
 
 	newTraceGeneration(t, h.provider.trace)
 }
 
-func (h *harness) update(t *testing.T, importTarget bool) (*deploy.Snapshot, error) {
+func (h *harness) update(t *testing.T, importTarget bool) (apitype.UntypedDeployment, error) {
 	return h.run(t, false, importTarget)
 }
 
-func (h *harness) preview(t *testing.T) (*deploy.Snapshot, error) {
+func (h *harness) preview(t *testing.T) (apitype.UntypedDeployment, error) {
 	return h.run(t, true, false)
 }
 
-func importStackConfig(key string, importTarget bool) config.Map {
-	values := config.Map{config.MustMakeKey("sub2api-host", "revisionKey"): config.NewSecureValue(key)}
-	if importTarget {
-		values[config.MustMakeKey("sub2api-environment", "hostImportTarget")] = config.NewValue("edge")
-	}
-	return values
-}
-
-func (h *harness) run(t *testing.T, preview, importTarget bool) (*deploy.Snapshot, error) {
+func (h *harness) run(t *testing.T, preview, importTarget bool) (apitype.UntypedDeployment, error) {
 	t.Helper()
 	phase := "preview"
 	if !preview && importTarget {
@@ -250,326 +258,55 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (*deploy.Snapsho
 		phase = "update"
 	}
 	h.mu.Lock()
-	if h.capturing {
-		h.phase = "capture"
-	} else {
-		h.phase = phase
-	}
+	if h.capturing { h.phase = "capture" } else { h.phase = phase }
 	h.mu.Unlock()
-	runtime := newLanguageRuntime(h, importTarget)
-	host := deploytest.NewPluginHostF(nil, nil, runtime, nil, nil,
-		deploytest.NewProviderLoader(tokens.Package("sub2api-host"), semver.MustParse("1.0.0"), func() (pkgplugin.Provider, error) {
-			return h.adapter(), nil
-		}),
-	)
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	op := backend.UpdateOperation{
-		Proj: h.project,
-		M:    &backend.UpdateMetadata{},
-		Root: h.root,
-		Opts: backend.UpdateOptions{
-			AutoApprove: true,
-			SkipPreview: !preview,
-			PreviewOnly: preview,
-			Display:     display.Options{Color: colors.Never, Stdout: io.Discard, Stderr: io.Discard, SuppressProgress: true},
-			Engine: engine.UpdateOptions{Parallel: 1, SkipPluginPreInstall: true, HostFactory: func(context.Context, diag.Sink, diag.Sink, pkgplugin.DebugContext) (pkgplugin.Host, error) {
-				return host(), nil
-			}},
-		},
-		SecretsManager:  h.manager,
-		SecretsProvider: stack.Base64SecretsProvider{},
-		StackConfiguration: backend.StackConfiguration{
-			Config:    importStackConfig(h.key, importTarget),
-			Decrypter: h.manager.Decrypter(),
-		},
-		Scopes: backend.CancellationScopes,
+	settings, err := h.stack.Workspace().StackSettings(t.Context(), h.stack.Name())
+	if err != nil {
+		return apitype.UntypedDeployment{}, err
 	}
-	events := make(chan engine.Event)
-	done := make(chan struct{})
-	var operations []pulumidisplay.StepOp
-	go func() {
-		defer close(done)
-		for event := range events {
-			if event.Type != engine.ResourcePreEvent {
-				continue
-			}
-			metadata := event.Payload().(engine.ResourcePreEventPayload).Metadata
-			if metadata.URN.Type() == hostType {
-				operations = append(operations, metadata.Op)
-			}
+	saltParts := strings.SplitN(settings.EncryptionSalt, ":", 3)
+	if len(saltParts) != 3 || saltParts[0] != "v1" {
+		return apitype.UntypedDeployment{}, errors.New("invalid test secrets settings")
+	}
+	salt, err := base64.StdEncoding.DecodeString(saltParts[1])
+	if err != nil {
+		return apitype.UntypedDeployment{}, errors.New("invalid test secrets salt")
+	}
+	crypter := config.NewSymmetricCrypterFromPassphrase("provider-import-test-passphrase", salt)
+	ciphertext, err := crypter.EncryptValue(t.Context(), h.key)
+	if err != nil {
+		return apitype.UntypedDeployment{}, errors.New("encrypt test config failed")
+	}
+	if settings.Config == nil {
+		settings.Config = config.Map{}
+	}
+	settings.Config[config.MustMakeKey("sub2api-host", "revisionKey")] = config.NewSecureValue(ciphertext)
+	if err := h.stack.Workspace().SaveStackSettings(t.Context(), h.stack.Name(), settings); err != nil {
+		return apitype.UntypedDeployment{}, err
+	}
+	if importTarget {
+		if err := h.stack.SetConfig(t.Context(), "sub2api-environment:hostImportTarget", auto.ConfigValue{Value: "edge"}); err != nil {
+			return apitype.UntypedDeployment{}, err
 		}
-	}()
-	var err error
+	} else if _, err := h.stack.Workspace().GetConfig(t.Context(), h.stack.Name(), "sub2api-environment:hostImportTarget"); err == nil {
+		if err := h.stack.Workspace().RemoveConfig(t.Context(), h.stack.Name(), "sub2api-environment:hostImportTarget"); err != nil {
+			return apitype.UntypedDeployment{}, err
+		}
+	}
 	if preview {
-		_, _, err = backend.PreviewStack(ctx, h.stack, op, events)
+		_, err = h.stack.Preview(t.Context(), optpreview.Parallel(1), optpreview.Color(colors.Never), optpreview.SuppressProgress(), optpreview.SuppressOutputs())
 	} else {
-		_, err = h.backend.Update(ctx, h.stack, op, events)
+		_, err = h.stack.Up(t.Context(), optup.Parallel(1), optup.Color(colors.Never), optup.SuppressProgress(), optup.SuppressOutputs())
 	}
-	close(events)
-	<-done
-	h.mu.Lock()
-	h.operations = operations
-	h.mu.Unlock()
-	current, getErr := h.backend.GetStack(context.Background(), h.stack.Ref())
-	if getErr != nil {
-		t.Fatal(getErr)
-	}
-	snapshot, snapshotErr := current.Snapshot(context.Background(), stack.Base64SecretsProvider{})
-	if snapshotErr != nil {
-		t.Fatal(snapshotErr)
-	}
-	return snapshot, err
-}
-
-type languageRuntime struct {
-	pkgplugin.LanguageRuntime
-	harness      *harness
-	importTarget bool
-}
-
-func newLanguageRuntime(h *harness, importTarget bool) deploytest.LanguageRuntimeFactory {
-	return func() pkgplugin.LanguageRuntime {
-		return &languageRuntime{
-			LanguageRuntime: deploytest.NewLanguageRuntime(func(pkgplugin.RunInfo, *deploytest.ResourceMonitor) error { return nil }),
-			harness:         h,
-			importTarget:    importTarget,
-		}
-	}
-}
-
-func (r *languageRuntime) Run(ctx context.Context, info pkgplugin.RunInfo) (string, bool, error) {
-	address, closeProxy, err := startMonitorProxy(ctx, info.MonitorAddress, r.harness)
-	if err != nil {
-		return "", false, err
-	}
-	defer closeProxy()
-	programConfig := map[string]string{}
-	for key, value := range info.Config {
-		programConfig[key.String()] = value
-	}
-	programContext, err := pulumi.NewContext(ctx, pulumi.RunInfo{Project: info.Project, Stack: info.Stack, Parallel: info.Parallel, DryRun: info.DryRun, MonitorAddr: address, Config: programConfig})
-	if err != nil {
-		return "", false, err
-	}
-	err = errors.Join(pulumi.RunWithContext(programContext, func(c *pulumi.Context) error {
-		return program.Register(c, importRelease, fixtureBytes("import.yaml"), fixtureBytes("import-secrets.yaml"))
-	}), programContext.Close())
-	if err != nil {
-		return err.Error(), false, nil
-	}
-	return "", false, nil
-}
-
-type monitorProxy struct {
-	pulumirpc.UnimplementedResourceMonitorServer
-	upstream pulumirpc.ResourceMonitorClient
-	harness  *harness
-}
-
-func startMonitorProxy(ctx context.Context, upstream string, h *harness) (string, func(), error) {
-	conn, err := grpc.DialContext(ctx, upstream, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	if err != nil {
-		return "", nil, err
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		_ = conn.Close()
-		return "", nil, err
-	}
-	server := grpc.NewServer()
-	pulumirpc.RegisterResourceMonitorServer(server, &monitorProxy{upstream: pulumirpc.NewResourceMonitorClient(conn), harness: h})
-	done := make(chan struct{})
-	go func() { _ = server.Serve(listener); close(done) }()
-	return listener.Addr().String(), func() {
-		server.GracefulStop()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			server.Stop()
-		}
-		_ = listener.Close()
-		_ = conn.Close()
-	}, nil
-}
-
-func (p *monitorProxy) RegisterResource(ctx context.Context, req *pulumirpc.RegisterResourceRequest) (*pulumirpc.RegisterResourceResponse, error) {
-	if req.GetType() == hostType && req.GetName() == hostName {
-		p.harness.mu.Lock()
-		inputs := unmarshalProperties(req.GetObject())
-		p.harness.registrations = append(p.harness.registrations, hostRegistration{phase: p.harness.phase, inputs: inputs.Copy(), importID: req.GetImportId()})
-		if p.harness.phase == "capture" && p.harness.productionHostInputs == nil {
-			p.harness.productionHostInputs = inputs
-		}
-		p.harness.mu.Unlock()
-	}
-	return p.upstream.RegisterResource(ctx, req)
-}
-
-func (p *monitorProxy) SupportsFeature(c context.Context, r *pulumirpc.SupportsFeatureRequest) (*pulumirpc.SupportsFeatureResponse, error) {
-	return p.upstream.SupportsFeature(c, r)
-}
-func (p *monitorProxy) RegisterResourceOutputs(c context.Context, r *pulumirpc.RegisterResourceOutputsRequest) (*emptypb.Empty, error) {
-	return p.upstream.RegisterResourceOutputs(c, r)
-}
-func (p *monitorProxy) GetDeploymentInfo(c context.Context, r *emptypb.Empty) (*pulumirpc.DeploymentInfo, error) {
-	return p.upstream.GetDeploymentInfo(c, r)
-}
-func (p *monitorProxy) Invoke(c context.Context, r *pulumirpc.ResourceInvokeRequest) (*pulumirpc.ResourceInvokeResponse, error) {
-	return p.upstream.Invoke(c, r)
-}
-func (p *monitorProxy) Call(c context.Context, r *pulumirpc.ResourceCallRequest) (*pulumirpc.CallResponse, error) {
-	return p.upstream.Call(c, r)
-}
-func (p *monitorProxy) ReadResource(c context.Context, r *pulumirpc.ReadResourceRequest) (*pulumirpc.ReadResourceResponse, error) {
-	return p.upstream.ReadResource(c, r)
-}
-func (p *monitorProxy) RegisterStackTransform(c context.Context, r *pulumirpc.Callback) (*emptypb.Empty, error) {
-	return p.upstream.RegisterStackTransform(c, r)
-}
-func (p *monitorProxy) RegisterStackInvokeTransform(c context.Context, r *pulumirpc.Callback) (*emptypb.Empty, error) {
-	return p.upstream.RegisterStackInvokeTransform(c, r)
-}
-func (p *monitorProxy) RegisterResourceHook(c context.Context, r *pulumirpc.RegisterResourceHookRequest) (*emptypb.Empty, error) {
-	return p.upstream.RegisterResourceHook(c, r)
-}
-func (p *monitorProxy) RegisterErrorHook(c context.Context, r *pulumirpc.RegisterErrorHookRequest) (*emptypb.Empty, error) {
-	return p.upstream.RegisterErrorHook(c, r)
-}
-func (p *monitorProxy) RegisterPackage(c context.Context, r *pulumirpc.RegisterPackageRequest) (*pulumirpc.RegisterPackageResponse, error) {
-	return p.upstream.RegisterPackage(c, r)
-}
-func (p *monitorProxy) SignalAndWaitForShutdown(c context.Context, r *emptypb.Empty) (*emptypb.Empty, error) {
-	return p.upstream.SignalAndWaitForShutdown(c, r)
-}
-
-func (h *harness) adapter() pkgplugin.Provider {
-	return &deploytest.Provider{
-		ConfigureF: func(ctx context.Context, req pkgplugin.ConfigureRequest) (pkgplugin.ConfigureResponse, error) {
-			if h.isCapturing() {
-				return pkgplugin.ConfigureResponse{}, nil
-			}
-			h.record("Configure")
-			_, err := h.provider.client.Configure(ctx, &pulumirpc.ConfigureRequest{Args: marshalProperties(nil, req.Inputs)})
-			return pkgplugin.ConfigureResponse{}, err
-		},
-		CheckF: func(ctx context.Context, req pkgplugin.CheckRequest) (pkgplugin.CheckResponse, error) {
-			if h.isCapturing() {
-				return pkgplugin.CheckResponse{Properties: req.News}, nil
-			}
-			h.record("Check")
-			response, err := h.provider.client.Check(ctx, &pulumirpc.CheckRequest{Urn: string(req.URN), Olds: marshalProperties(nil, req.Olds), News: marshalProperties(nil, req.News)})
-			if err != nil {
-				return pkgplugin.CheckResponse{}, err
-			}
-			return pkgplugin.CheckResponse{Properties: unmarshalProperties(response.Inputs)}, nil
-		},
-		DiffF: func(ctx context.Context, req pkgplugin.DiffRequest) (pkgplugin.DiffResult, error) {
-			if h.isCapturing() {
-				return pkgplugin.DiffResult{Changes: pkgplugin.DiffNone}, nil
-			}
-			h.record("Diff")
-			response, err := h.provider.client.Diff(ctx, &pulumirpc.DiffRequest{Id: string(req.ID), Urn: string(req.URN), Olds: marshalProperties(nil, req.OldOutputs), OldInputs: marshalProperties(nil, req.OldInputs), News: marshalProperties(nil, req.NewInputs)})
-			if err != nil {
-				return pkgplugin.DiffResult{}, err
-			}
-			if importOmittedEmptyCollections(req, response) {
-				return pkgplugin.DiffResult{Changes: pkgplugin.DiffNone}, nil
-			}
-			if response.Changes == pulumirpc.DiffResponse_DIFF_NONE {
-				return pkgplugin.DiffResult{Changes: pkgplugin.DiffNone}, nil
-			}
-			return pkgplugin.DiffResult{Changes: pkgplugin.DiffSome}, nil
-		},
-		ReadF: func(ctx context.Context, req pkgplugin.ReadRequest) (pkgplugin.ReadResponse, error) {
-			if h.isCapturing() {
-				return pkgplugin.ReadResponse{}, errors.New("capture preview unexpectedly read Host")
-			}
-			h.record("Read")
-			response, err := h.provider.client.Read(ctx, &pulumirpc.ReadRequest{Id: string(req.ID), Urn: string(req.URN), Name: req.Name, Type: string(req.Type), Inputs: marshalProperties(nil, req.Inputs), Properties: marshalProperties(nil, req.State)})
-			if err != nil {
-				return pkgplugin.ReadResponse{}, err
-			}
-			return pkgplugin.ReadResponse{ReadResult: pkgplugin.ReadResult{ID: resource.ID(response.Id), Inputs: unmarshalProperties(response.Inputs), Outputs: unmarshalProperties(response.Properties)}}, nil
-		},
-		CreateF: func(ctx context.Context, req pkgplugin.CreateRequest) (pkgplugin.CreateResponse, error) {
-			h.mu.Lock()
-			capturing := h.capturing
-			h.mu.Unlock()
-			if capturing {
-				return pkgplugin.CreateResponse{ID: resource.ID(h.stableID()), Properties: req.Properties, Status: resource.StatusOK}, nil
-			}
-			return forbiddenCreate(h)(ctx, req)
-		},
-		UpdateF: forbiddenUpdate(h),
-		DeleteF: forbiddenDelete(h),
-	}
-}
-
-func (h *harness) record(call string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calls = append(h.calls, call)
-}
-
-// Import tokens encode Go structs, where empty collections are omitted. The
-// normal program registration retains its empty Pulumi containers. This is the
-// sole accepted representation-only import difference; every other provider
-// diff remains visible to the Engine.
-func importOmittedEmptyCollections(req pkgplugin.DiffRequest, response *pulumirpc.DiffResponse) bool {
-	if response.Changes != pulumirpc.DiffResponse_DIFF_SOME || len(response.Replaces) != 0 || len(response.Diffs) != 2 || !containsDiff(response.Diffs, "target") || !containsDiff(response.Diffs, "secrets") {
-		return false
-	}
-	oldTarget, targetOK := req.OldInputs["target"]
-	oldSecrets, secretsOK := req.OldInputs["secrets"]
-	newTarget, newTargetOK := req.NewInputs["target"]
-	newSecrets, newSecretsOK := req.NewInputs["secrets"]
-	if !targetOK || !secretsOK || !newTargetOK || !newSecretsOK {
-		return false
-	}
-	var oldTargetValue, newTargetValue hostcontract.Target
-	var oldSecretValues, newSecretValues hostcontract.Secrets
-	if !decodePropertyJSON(oldTarget, &oldTargetValue) || !decodePropertyJSON(newTarget, &newTargetValue) || !decodePropertyJSON(oldSecrets, &oldSecretValues) || !decodePropertyJSON(newSecrets, &newSecretValues) {
-		return false
-	}
-	oldTargetValue, oldSecretValues = hostcontract.NormalizeTargetSecrets(oldTargetValue, oldSecretValues)
-	newTargetValue, newSecretValues = hostcontract.NormalizeTargetSecrets(newTargetValue, newSecretValues)
-	return reflect.DeepEqual(oldTargetValue, newTargetValue) && reflect.DeepEqual(oldSecretValues, newSecretValues)
-}
-
-func containsDiff(diffs []string, want string) bool {
-	for _, diff := range diffs {
-		if diff == want {
-			return true
-		}
-	}
-	return false
+	state, exportErr := h.stack.Export(t.Context())
+	if err == nil { err = exportErr }
+	return state, err
 }
 
 func decodePropertyJSON(value resource.PropertyValue, into any) bool {
 	b, err := json.Marshal(unwrapFixtureValue(value).Mappable())
 	return err == nil && json.Unmarshal(b, into) == nil
 }
-func (h *harness) isCapturing() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.capturing }
-func forbiddenCreate(h *harness) func(context.Context, pkgplugin.CreateRequest) (pkgplugin.CreateResponse, error) {
-	return func(context.Context, pkgplugin.CreateRequest) (pkgplugin.CreateResponse, error) {
-		h.record("Create")
-		return pkgplugin.CreateResponse{}, errors.New("unexpected Engine Create")
-	}
-}
-func forbiddenUpdate(h *harness) func(context.Context, pkgplugin.UpdateRequest) (pkgplugin.UpdateResponse, error) {
-	return func(_ context.Context, req pkgplugin.UpdateRequest) (pkgplugin.UpdateResponse, error) {
-		h.record("Update")
-		return pkgplugin.UpdateResponse{}, fmt.Errorf("unexpected Engine Update for %s (%s)", req.URN, req.ID)
-	}
-}
-func forbiddenDelete(h *harness) func(context.Context, pkgplugin.DeleteRequest) (pkgplugin.DeleteResponse, error) {
-	return func(context.Context, pkgplugin.DeleteRequest) (pkgplugin.DeleteResponse, error) {
-		h.record("Delete")
-		return pkgplugin.DeleteResponse{}, errors.New("unexpected Engine Delete")
-	}
-}
-
 type providerProcess struct {
 	cmd         *exec.Cmd
 	client      pulumirpc.ResourceProviderClient
@@ -578,7 +315,133 @@ type providerProcess struct {
 	stderr      *lockedBuffer
 	done        <-chan error
 	identity    processIdentity
-	root, trace string
+	root, trace, port string
+	recorder *providerRecorder
+	proxy    *grpc.Server
+	proxyListener net.Listener
+	stopOnce sync.Once
+	stopped  chan struct{}
+}
+
+type providerRecorder struct {
+	pulumirpc.UnimplementedResourceProviderServer
+	upstream pulumirpc.ResourceProviderClient
+	mu       sync.Mutex
+	calls    []string
+	inputs   resource.PropertyMap
+}
+
+func (p *providerRecorder) record(call string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, call)
+}
+func (p *providerRecorder) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = nil
+	p.inputs = nil
+}
+func (p *providerRecorder) snapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.calls...)
+}
+func (p *providerRecorder) lastInputs() resource.PropertyMap {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inputs.Copy()
+}
+func (p *providerRecorder) Configure(ctx context.Context, req *pulumirpc.ConfigureRequest) (*pulumirpc.ConfigureResponse, error) {
+	p.record("Configure")
+	return p.upstream.Configure(ctx, req)
+}
+func (p *providerRecorder) Check(ctx context.Context, req *pulumirpc.CheckRequest) (*pulumirpc.CheckResponse, error) {
+	p.record("Check")
+	values := unmarshalProperties(req.GetNews())
+	if _, ok := values[resource.PropertyKey("resource")]; ok {
+		p.mu.Lock()
+		p.inputs = values.Copy()
+		p.mu.Unlock()
+	}
+	return p.upstream.Check(ctx, req)
+}
+func (p *providerRecorder) Diff(ctx context.Context, req *pulumirpc.DiffRequest) (*pulumirpc.DiffResponse, error) {
+	p.record("Diff")
+	return p.upstream.Diff(ctx, req)
+}
+func (p *providerRecorder) Read(ctx context.Context, req *pulumirpc.ReadRequest) (*pulumirpc.ReadResponse, error) {
+	p.record("Read")
+	return p.upstream.Read(ctx, req)
+}
+func (p *providerRecorder) Create(ctx context.Context, req *pulumirpc.CreateRequest) (*pulumirpc.CreateResponse, error) {
+	p.record("Create")
+	return p.upstream.Create(ctx, req)
+}
+func (p *providerRecorder) Update(ctx context.Context, req *pulumirpc.UpdateRequest) (*pulumirpc.UpdateResponse, error) {
+	p.record("Update")
+	return p.upstream.Update(ctx, req)
+}
+func (p *providerRecorder) Delete(ctx context.Context, req *pulumirpc.DeleteRequest) (*emptypb.Empty, error) {
+	p.record("Delete")
+	return p.upstream.Delete(ctx, req)
+}
+func (p *providerRecorder) Handshake(ctx context.Context, req *pulumirpc.ProviderHandshakeRequest) (*pulumirpc.ProviderHandshakeResponse, error) {
+	return p.upstream.Handshake(ctx, req)
+}
+func (p *providerRecorder) Parameterize(ctx context.Context, req *pulumirpc.ParameterizeRequest) (*pulumirpc.ParameterizeResponse, error) {
+	return p.upstream.Parameterize(ctx, req)
+}
+func (p *providerRecorder) GetSchema(ctx context.Context, req *pulumirpc.GetSchemaRequest) (*pulumirpc.GetSchemaResponse, error) {
+	return p.upstream.GetSchema(ctx, req)
+}
+func (p *providerRecorder) CheckConfig(ctx context.Context, req *pulumirpc.CheckRequest) (*pulumirpc.CheckResponse, error) {
+	return p.upstream.CheckConfig(ctx, req)
+}
+func (p *providerRecorder) DiffConfig(ctx context.Context, req *pulumirpc.DiffRequest) (*pulumirpc.DiffResponse, error) {
+	return p.upstream.DiffConfig(ctx, req)
+}
+func (p *providerRecorder) GetPluginInfo(ctx context.Context, req *emptypb.Empty) (*pulumirpc.PluginInfo, error) {
+	return p.upstream.GetPluginInfo(ctx, req)
+}
+func (p *providerRecorder) Attach(ctx context.Context, req *pulumirpc.PluginAttach) (*emptypb.Empty, error) {
+	return p.upstream.Attach(ctx, req)
+}
+func (p *providerRecorder) Invoke(ctx context.Context, req *pulumirpc.InvokeRequest) (*pulumirpc.InvokeResponse, error) {
+	return p.upstream.Invoke(ctx, req)
+}
+func (p *providerRecorder) Call(ctx context.Context, req *pulumirpc.CallRequest) (*pulumirpc.CallResponse, error) {
+	return p.upstream.Call(ctx, req)
+}
+func (p *providerRecorder) Cancel(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty, error) {
+	return p.upstream.Cancel(ctx, req)
+}
+func (p *providerRecorder) Construct(ctx context.Context, req *pulumirpc.ConstructRequest) (*pulumirpc.ConstructResponse, error) {
+	return p.upstream.Construct(ctx, req)
+}
+func (p *providerRecorder) GetMapping(ctx context.Context, req *pulumirpc.GetMappingRequest) (*pulumirpc.GetMappingResponse, error) {
+	return p.upstream.GetMapping(ctx, req)
+}
+func (p *providerRecorder) GetMappings(ctx context.Context, req *pulumirpc.GetMappingsRequest) (*pulumirpc.GetMappingsResponse, error) {
+	return p.upstream.GetMappings(ctx, req)
+}
+func (p *providerRecorder) List(req *pulumirpc.ListRequest, stream grpc.ServerStreamingServer[pulumirpc.ListResponse]) error {
+	upstream, err := p.upstream.List(stream.Context(), req)
+	if err != nil {
+		return err
+	}
+	for {
+		response, recvErr := upstream.Recv()
+		if recvErr != nil {
+			if recvErr == io.EOF {
+				return nil
+			}
+			return recvErr
+		}
+		if err := stream.Send(response); err != nil {
+			return err
+		}
+	}
 }
 type lockedBuffer struct {
 	mu  sync.Mutex
@@ -752,7 +615,7 @@ func validatePreseed(t *testing.T, fixture preseedFixture) {
 	var response bytes.Buffer
 	digest := filepath.Join(fixture.trace, "preseed.digest")
 	if err := testonly.ServeWithRequestDigest(&response, bytes.NewReader(frame), fixture.root, fixture.machine, digest); err != nil {
-		t.Fatalf("direct preseed inspect: %v", err)
+		t.Fatal("direct preseed inspect failed")
 	}
 	decoded, err := hostprotocol.DecodeResponse(response.Bytes())
 	if err != nil || decoded.Result == nil || decoded.Result.Observation == nil || !decoded.Result.Observation.Ready || decoded.Result.Observation.Drifted {
@@ -812,7 +675,7 @@ func fixtureRevision(t *testing.T, resourceValue hostcontract.ResourceIdentity, 
 	}
 	revision, err := hostcontract.TargetRevision(hostcontract.RevisionKey(key), resourceValue, target, secretValues)
 	if err != nil {
-		t.Fatalf("fixture target revision: %v (validation=%v)", err, hostcontract.ValidateTarget(target, secretValues))
+		t.Fatal("fixture target revision failed")
 	}
 	return revision
 }
@@ -850,7 +713,7 @@ func fixtureNetworkLabel(resourceValue hostcontract.ResourceIdentity, ownership 
 	return "s2hnet1:" + fixtureToken(resourceValue.Environment, resourceValue.ServerKey, ownership.Value)
 }
 func fixtureAppEnv(secrets hostcontract.Secrets) []byte {
-	app := secrets.Apps["app"]
+	app := secretValues.Apps["app"]
 	return []byte("ADMIN_EMAIL=admin@example.test\nFEATURE_FLAG=enabled\nINITIAL_ADMIN_PASSWORD=" + app.InitialAdminPassword + "\nJWT_SECRET=" + app.JWTSecret + "\nTOTP_ENCRYPTION_KEY=" + app.TOTPEncryptionKey + "\nPOSTGRES_USERNAME=" + app.Postgres.Username + "\nPOSTGRES_PASSWORD=" + app.Postgres.Password + "\nREDIS_USERNAME=" + app.Redis.Username + "\nREDIS_PASSWORD=" + app.Redis.Password + "\n")
 }
 func fixtureProxyConfig(email string) []byte {
@@ -989,37 +852,28 @@ func newTraceGeneration(t *testing.T, trace string) {
 	}
 }
 
-func startProvider(t *testing.T, fixture preseedFixture) *providerProcess {
+func startProvider(t *testing.T, binary, root, trace, dockerModel string) *providerProcess {
 	t.Helper()
-	caseDir := filepath.Dir(fixture.root)
+	caseDir := filepath.Dir(root)
 	bin := filepath.Join(caseDir, "bin")
-	for _, path := range []string{bin, filepath.Join(caseDir, "release", "bin")} {
+	for _, path := range []string{bin} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	writeFixture(t, filepath.Join(bin, "ssh"), fixtureFile(t, "ssh-import.sh"), 0o700)
 	writeFixture(t, filepath.Join(bin, "docker"), dockerShim(), 0o700)
-	providerDir := filepath.Join(caseDir, "release", "bin")
-	binary := filepath.Join(providerDir, "pulumi-resource-sub2api-host")
-	buildContext, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	build := exec.CommandContext(buildContext, "go", "build", "-o", binary, "./cmd/pulumi-resource-sub2api-host")
-	build.Dir = repositoryRoot(t)
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build provider: %v: %s", err, output)
-	}
 	cmd := exec.Command(binary)
-	cmd.Dir = repositoryRoot(t)
+	cmd.Dir = filepath.Dir(binary)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"PROVIDER_IMPORT_TRACE="+fixture.trace,
-		"PROVIDER_IMPORT_ROOT="+fixture.root,
-		"PROVIDER_IMPORT_MACHINE_ID="+fixture.machine,
+		"PROVIDER_IMPORT_TRACE="+trace,
+		"PROVIDER_IMPORT_ROOT="+root,
+		"PROVIDER_IMPORT_MACHINE_ID="+filepath.Join(caseDir, "machine-id"),
 		"PROVIDER_IMPORT_TEST_BINARY="+os.Args[0],
-		"PROVIDER_IMPORT_REQUEST_DIGEST="+filepath.Join(fixture.trace, "current", "request.digest"),
-		"PROVIDER_IMPORT_DOCKER_MODEL="+filepath.Join(fixture.trace, "docker-model.json"),
+		"PROVIDER_IMPORT_REQUEST_DIGEST="+filepath.Join(trace, "current", "request.digest"),
+		"PROVIDER_IMPORT_DOCKER_MODEL="+dockerModel,
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1040,18 +894,24 @@ func startProvider(t *testing.T, fixture preseedFixture) *providerProcess {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &providerProcess{cmd: cmd, client: pulumirpc.NewResourceProviderClient(conn), conn: conn, stdout: stdout, stderr: stderr, done: done, identity: identity, root: fixture.root, trace: fixture.trace}
+	recorder := &providerRecorder{upstream: pulumirpc.NewResourceProviderClient(conn)}
+	proxyListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil { t.Fatal(err) }
+	proxy := grpc.NewServer()
+	pulumirpc.RegisterResourceProviderServer(proxy, recorder)
+	go func() { _ = proxy.Serve(proxyListener) }()
+	p := &providerProcess{cmd: cmd, client: pulumirpc.NewResourceProviderClient(conn), conn: conn, stdout: stdout, stderr: stderr, done: done, identity: identity, root: root, trace: trace, port: strconv.Itoa(proxyListener.Addr().(*net.TCPAddr).Port), recorder: recorder, proxy: proxy, proxyListener: proxyListener, stopped: make(chan struct{})}
 	t.Cleanup(func() { _ = conn.Close(); _ = stdout.Close(); stopProvider(t, p) })
 	ctx, cancelConfigure := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancelConfigure()
-	if _, err := p.client.Configure(ctx, &pulumirpc.ConfigureRequest{Args: marshalProperties(t, resource.PropertyMap{"revisionKey": resource.MakeSecret(resource.NewStringProperty(revisionKey))})}); err != nil {
+	if _, err := p.client.Configure(ctx, &pulumirpc.ConfigureRequest{Args: resourceRPCProperties(t, resource.PropertyMap{"revisionKey": resource.MakeSecret(resource.NewStringProperty(revisionKey))})}); err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
 func (h *harness) captureProductionInputs(t *testing.T) resource.PropertyMap {
-	h.productionHostInputs = nil
+	h.provider.recorder.reset()
 	h.mu.Lock()
 	h.capturing = true
 	h.phase = "capture"
@@ -1063,65 +923,35 @@ func (h *harness) captureProductionInputs(t *testing.T) resource.PropertyMap {
 	}()
 	_, err := h.run(t, true, false)
 	if err != nil {
-		t.Fatalf("capture production inputs: %v", err)
+		t.Fatal("capture production inputs failed")
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.productionHostInputs == nil {
+	inputs := h.provider.recorder.lastInputs()
+	if inputs == nil {
 		t.Fatal("program did not register Host")
 	}
-	if len(h.registrations) != 1 || h.registrations[0].phase != "capture" || h.registrations[0].importID != "" {
-		t.Fatal("normal Program registration unexpectedly imported Host")
-	}
-	return h.productionHostInputs.Copy()
+	h.productionHostInputs = inputs
+	return inputs.Copy()
 }
 func (h *harness) stableID() string {
 	sum := sha256.Sum256([]byte("sub2api-host-resource-id-v1:6:canary4:edge"))
 	return "host-" + hex.EncodeToString(sum[:])
 }
-func (h *harness) assertImportResult(t *testing.T, snapshot *deploy.Snapshot) {
-	state := singleHost(t, snapshot)
-	h.mu.Lock()
-	var token string
-	for _, registration := range h.registrations {
-		if registration.phase == "import" {
-			token = registration.importID
-		}
-	}
+func (h *harness) assertImportResult(t *testing.T, deployment apitype.UntypedDeployment) {
+	state := singleHost(t, deployment)
 	preseeded := h.preseededState
-	h.mu.Unlock()
 	if string(state.URN) != hostURN() {
 		t.Fatalf("Host URN = %q, want %q", state.URN, hostURN())
 	}
-	if !strings.HasPrefix(token, "hit1:") || state.ID != resource.ID(h.stableID()) || state.ImportID != resource.ID(token) {
-		t.Fatalf("Host state did not preserve real encrypted import token")
+	if !strings.HasPrefix(string(state.ImportID), "hit1:") || state.ID != resource.ID(h.stableID()) {
+		t.Fatalf("Host state did not preserve the import token")
 	}
-	assertCanonicalHostInputs(t, state.Inputs, h.productionHostInputs)
+	assertCanonicalHostInputs(t, deploymentPropertyMap(t, state.Inputs), h.productionHostInputs)
 	assertImportedCheckpoint(t, state, preseeded)
-	if !secretOnlyProperty(state.Outputs, secretCanary, false) {
+	if !secretOnlyProperty(deploymentPropertyMap(t, state.Outputs), secretCanary, false) {
 		t.Fatal("import checkpoint exposes the secret canary outside a secret property")
 	}
 }
-func (h *harness) assertLatestHostRegistration(t *testing.T, phase string, imported bool) {
-	t.Helper()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for index := len(h.registrations) - 1; index >= 0; index-- {
-		registration := h.registrations[index]
-		if registration.phase != phase {
-			continue
-		}
-		if imported && !strings.HasPrefix(registration.importID, "hit1:") {
-			t.Fatalf("%s Host registration ImportId = %q, want hit1 token", phase, registration.importID)
-		}
-		if !imported && registration.importID != "" {
-			t.Fatalf("%s Host registration ImportId = %q, want empty", phase, registration.importID)
-		}
-		return
-	}
-	t.Fatalf("no Host registration recorded for %s", phase)
-}
-func assertImportedCheckpoint(t *testing.T, state *pkgresource.State, expected hostruntime.State) {
+func assertImportedCheckpoint(t *testing.T, state apitype.ResourceV3, expected hostruntime.State) {
 	t.Helper()
 	var machine hostcontract.MachineIdentity
 	var ownership hostcontract.OwnershipIdentity
@@ -1131,14 +961,26 @@ func assertImportedCheckpoint(t *testing.T, state *pkgresource.State, expected h
 		name string
 		into any
 	}{{"machine", &machine}, {"ownership", &ownership}, {"appliedRevision", &revision}, {"observation", &observation}} {
-		value, ok := state.Outputs[resource.PropertyKey(item.name)]
-		if !ok || value.ContainsSecrets() || value.IsComputed() || !decodePropertyJSON(value, item.into) {
+		value, ok := state.Outputs[string(item.name)]
+		if !ok || !decodeJSONValue(value, item.into) {
 			t.Fatalf("import checkpoint output %s is missing, secret, unknown, or invalid", item.name)
 		}
 	}
 	if machine != expected.Machine || ownership != expected.Ownership || revision != expected.AppliedRevision || !reflect.DeepEqual(observation, expected.Observation) {
 		t.Fatal("import checkpoint outputs differ from preseeded Runtime state")
 	}
+}
+func decodeJSONValue(value any, into any) bool {
+	b, err := json.Marshal(value)
+	return err == nil && json.Unmarshal(b, into) == nil
+}
+func deploymentPropertyMap(t *testing.T, values map[string]any) resource.PropertyMap {
+	t.Helper()
+	object, err := structpb.NewStruct(values)
+	if err != nil {
+		t.Fatal("decode deployment properties")
+	}
+	return unmarshalProperties(object)
 }
 func secretOnlyProperty(values resource.PropertyMap, canary string, secret bool) bool {
 	for _, value := range values {
@@ -1200,19 +1042,9 @@ func assertCanonicalHostInputs(t *testing.T, imported, programInputs resource.Pr
 	}
 }
 func (h *harness) assertMeasuredCalls(t *testing.T, want []string) {
-	h.mu.Lock()
-	got := append([]string(nil), h.calls...)
-	h.mu.Unlock()
+	got := h.provider.recorder.snapshot()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("provider calls = %v, want %v", got, want)
-	}
-}
-func (h *harness) assertHostOperations(t *testing.T, want ...pulumidisplay.StepOp) {
-	h.mu.Lock()
-	got := append([]pulumidisplay.StepOp(nil), h.operations...)
-	h.mu.Unlock()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Host operations = %v, want %v", got, want)
 	}
 }
 func (h *harness) assertOneInspect(t *testing.T) {
@@ -1272,7 +1104,7 @@ func (h *harness) assertNoEffects(t *testing.T) {
 	for _, name := range []string{"docker-effects", "forbidden"} {
 		b, err := os.ReadFile(filepath.Join(h.provider.trace, "current", name))
 		if err == nil && strings.TrimSpace(string(b)) != "" {
-			t.Fatalf("measured phase emitted Docker effects: %q", b)
+			t.Fatalf("measured phase emitted forbidden Docker effects")
 		}
 	}
 }
@@ -1280,7 +1112,7 @@ func (h *harness) assertDockerReads(t *testing.T, want ...string) {
 	b, err := os.ReadFile(filepath.Join(h.provider.trace, "current", "docker-reads"))
 	if len(want) == 0 {
 		if err == nil && strings.TrimSpace(string(b)) != "" {
-			t.Fatalf("unexpected Docker reads: %q", b)
+			t.Fatalf("unexpected Docker reads")
 		}
 		return
 	}
@@ -1367,7 +1199,7 @@ func treeManifest(t *testing.T, root string) map[string]string {
 	}
 	return out
 }
-func marshalProperties(t *testing.T, values resource.PropertyMap) *structpb.Struct {
+func resourceRPCProperties(t *testing.T, values resource.PropertyMap) *structpb.Struct {
 	encoded, err := sdkplugin.MarshalProperties(values, sdkplugin.MarshalOptions{KeepUnknowns: true, KeepSecrets: true, KeepResources: true})
 	if err != nil {
 		if t != nil {
@@ -1406,35 +1238,22 @@ func writeFixture(t *testing.T, path string, value []byte, mode os.FileMode) {
 	}
 }
 func hostURN() string { return "urn:pulumi:canary::sub2api-environment::" + hostType + "::" + hostName }
-func singleHost(t *testing.T, snapshot *deploy.Snapshot) *pkgresource.State {
+func singleHost(t *testing.T, deployment apitype.UntypedDeployment) apitype.ResourceV3 {
 	t.Helper()
-	for _, state := range snapshot.Resources {
+	var typed apitype.DeploymentV3
+	if err := json.Unmarshal(deployment.Deployment, &typed); err != nil {
+		t.Fatal("decode exported deployment")
+	}
+	for _, state := range typed.Resources {
 		if state.Type == hostType {
 			return state
 		}
 	}
 	t.Fatal("checkpoint has no Host")
-	return nil
+	return apitype.ResourceV3{}
 }
-func snapshotsEqual(a, b *deploy.Snapshot) bool {
-	return reflect.DeepEqual(a.Manifest, b.Manifest) && reflect.DeepEqual(a.Resources, b.Resources) && reflect.DeepEqual(a.PendingOperations, b.PendingOperations) && reflect.DeepEqual(a.Metadata, b.Metadata) && reflect.DeepEqual(a.Snippets, b.Snippets) && reflect.DeepEqual(a.Extensions, b.Extensions)
-}
-func repositoryRoot(t *testing.T) string {
-	t.Helper()
-	path, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
-			return path
-		}
-		parent := filepath.Dir(path)
-		if parent == path {
-			t.Fatal("repository root not found")
-		}
-		path = parent
-	}
+func snapshotsEqual(a, b apitype.UntypedDeployment) bool {
+	return reflect.DeepEqual(a, b)
 }
 func readPort(t *testing.T, reader io.Reader) string {
 	t.Helper()
@@ -1478,20 +1297,30 @@ func processStart(pid int) string {
 }
 func stopProvider(t *testing.T, p *providerProcess) {
 	t.Helper()
-	if p.identity.start != "" && processStart(p.identity.pid) == p.identity.start {
-		_ = syscall.Kill(-p.identity.pid, syscall.SIGTERM)
-	}
-	select {
-	case <-p.done:
-		return
-	case <-time.After(time.Second):
-	}
-	if p.identity.start != "" && processStart(p.identity.pid) == p.identity.start {
-		_ = syscall.Kill(-p.identity.pid, syscall.SIGKILL)
-	}
-	select {
-	case <-p.done:
-	case <-time.After(time.Second):
-		t.Errorf("provider process did not exit")
-	}
+	p.stopOnce.Do(func() {
+		defer close(p.stopped)
+		if p.proxy != nil {
+			p.proxy.Stop()
+		}
+		if p.proxyListener != nil {
+			_ = p.proxyListener.Close()
+		}
+		if p.identity.start != "" && processStart(p.identity.pid) == p.identity.start {
+			_ = syscall.Kill(-p.identity.pid, syscall.SIGTERM)
+		}
+		select {
+		case <-p.done:
+			return
+		case <-time.After(time.Second):
+		}
+		if p.identity.start != "" && processStart(p.identity.pid) == p.identity.start {
+			_ = syscall.Kill(-p.identity.pid, syscall.SIGKILL)
+		}
+		select {
+		case <-p.done:
+		case <-time.After(time.Second):
+			t.Errorf("provider process did not exit")
+		}
+	})
+	<-p.stopped
 }

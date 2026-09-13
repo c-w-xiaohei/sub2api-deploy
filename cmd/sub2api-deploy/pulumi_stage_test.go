@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pulumi/pulumi/pkg/v3/secrets"
-	"github.com/pulumi/pulumi/pkg/v3/secrets/passphrase"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
@@ -53,8 +51,8 @@ func TestRenderStagedStackEncryptsValuesWithoutLeakingPlaintext(t *testing.T) {
 	stack := loadStagedStack(t, project, rendered)
 
 	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
-	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
-	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+		assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager)
+		assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager)
 	assertStackValue(t, stack, "sub2api-environment:hostImportTarget", false, "", config.NopDecrypter)
 	for _, canary := range []string{stagePassphrase, stageUnrelatedSecret, stageSecrets, stageRevision, stageStaleConfig, stageStaleSecrets, stageStaleRevision} {
 		if bytes.Contains(rendered, []byte(canary)) {
@@ -74,7 +72,7 @@ func TestRenderStagedStackPreservesUnrelatedStackContent(t *testing.T) {
 	}
 	stack := loadStagedStack(t, project, rendered)
 	assertStackValue(t, stack, "sub2api-environment:unrelated", false, stageUnrelatedValue, config.NopDecrypter)
-	assertStackValue(t, stack, "sub2api-environment:unrelatedSecret", true, stageUnrelatedSecret, manager.Decrypter())
+	assertStackValue(t, stack, "sub2api-environment:unrelatedSecret", true, stageUnrelatedSecret, manager)
 	if got := valueText(t, stack, "sub2api-environment:unrelatedSecret", config.NopDecrypter); got != sourceCiphertext {
 		t.Fatalf("unrelated ciphertext = %q, want original %q", got, sourceCiphertext)
 	}
@@ -114,8 +112,8 @@ func TestRenderStagedStackReplacesSemanticTargetKeyAliases(t *testing.T) {
 	}
 	stack := loadStagedStack(t, project, rendered)
 	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
-	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
-	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+		assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager)
+		assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager)
 	assertStackValue(t, stack, "sub2api-environment:hostImportTarget", false, "", config.NopDecrypter)
 	configNode := mappingValue(t, documentMapping(t, loadYAMLNode(t, rendered)), "config")
 	for _, key := range []string{
@@ -142,11 +140,11 @@ func TestRenderStagedStackReplacesSemanticTargetKeyAliases(t *testing.T) {
 
 func TestRenderStagedStackRejectsConfigMergeAliases(t *testing.T) {
 	project, _, manager, salt := stagedStackFixture(t)
-	secretsCiphertext, err := manager.Encrypter().EncryptValue(context.Background(), stageSecrets)
+	secretsCiphertext, err := manager.EncryptValue(context.Background(), stageSecrets)
 	if err != nil {
 		t.Fatalf("encrypt merged environment secrets: %v", err)
 	}
-	revisionCiphertext, err := manager.Encrypter().EncryptValue(context.Background(), stageRevision)
+	revisionCiphertext, err := manager.EncryptValue(context.Background(), stageRevision)
 	if err != nil {
 		t.Fatalf("encrypt merged revision key: %v", err)
 	}
@@ -159,8 +157,8 @@ func TestRenderStagedStackRejectsConfigMergeAliases(t *testing.T) {
 		"config:\n" +
 		"  <<: *targetAliases\n")
 	merged := loadStagedStack(t, project, source)
-	assertStackValue(t, merged, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
-	assertStackValue(t, merged, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+	assertStackValue(t, merged, "sub2api-environment:environmentSecrets", true, stageSecrets, manager)
+	assertStackValue(t, merged, "sub2api-host:revisionKey", true, stageRevision, manager)
 
 	rendered, err := renderStagedStack(context.Background(), project, source, stageSourcePath, stagePassphrase, stagedStackValues())
 	assertStagedStackRejected(t, rendered, err, stagePassphrase, stageSecrets, stageRevision)
@@ -179,8 +177,8 @@ func TestRenderStagedStackPreservesUnrelatedConfigMerge(t *testing.T) {
 	stack := loadStagedStack(t, project, rendered)
 	assertStackValue(t, stack, "sub2api-environment:mergedUnrelated", false, stageMergedUnrelated, config.NopDecrypter)
 	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
-	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
-	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager)
+	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager)
 }
 
 func TestRenderStagedStackPreservesQuotedLiteralMergeConfigKey(t *testing.T) {
@@ -199,16 +197,12 @@ func TestRenderStagedStackPreservesQuotedLiteralMergeConfigKey(t *testing.T) {
 	stack := loadStagedStack(t, project, rendered)
 	assertStackValue(t, stack, "sub2api-environment:<<", false, stageLiteralMergeKey, config.NopDecrypter)
 	assertStackValue(t, stack, "sub2api-environment:environmentConfig", false, stageEnvironment, config.NopDecrypter)
-	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager.Decrypter())
-	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager.Decrypter())
+	assertStackValue(t, stack, "sub2api-environment:environmentSecrets", true, stageSecrets, manager)
+	assertStackValue(t, stack, "sub2api-host:revisionKey", true, stageRevision, manager)
 }
 
-func TestRenderStagedStackRejectsWrongPassphraseAfterManagerCacheWarms(t *testing.T) {
-	project, source, _, salt := stagedStackFixture(t)
-	if _, err := passphrase.GetPassphraseSecretsManager(stagePassphrase, salt); err != nil {
-		t.Fatalf("warm passphrase manager: %v", err)
-	}
-
+func TestRenderStagedStackRejectsWrongPassphrase(t *testing.T) {
+	project, source, _, _ := stagedStackFixture(t)
 	rendered, err := renderStagedStack(context.Background(), project, source, stageSourcePath, stageWrongPassphrase, stagedStackValues())
 	assertStagedStackRejected(t, rendered, err, stagePassphrase, stageWrongPassphrase, stageUnrelatedSecret, stageSecrets, stageRevision, stageStaleSecrets, stageStaleRevision)
 }
@@ -300,31 +294,30 @@ func TestRenderStagedStackRejectsCancelledContext(t *testing.T) {
 	assertStagedStackRejected(t, rendered, err, stagePassphrase, stageUnrelatedSecret, stageSecrets, stageRevision, stageStaleSecrets, stageStaleRevision)
 }
 
-func stagedStackFixture(t *testing.T) (*workspace.Project, []byte, secrets.Manager, string) {
+func stagedStackFixture(t *testing.T) (*workspace.Project, []byte, config.Crypter, string) {
 	t.Helper()
-	state, manager, err := passphrase.NewPassphraseSecretsManager(stagePassphrase)
+	salt := []byte("12345678")
+	manager := config.NewSymmetricCrypterFromPassphrase(stagePassphrase, salt)
+	sentinel, err := manager.EncryptValue(context.Background(), "pulumi")
 	if err != nil {
-		t.Fatalf("NewPassphraseSecretsManager() error = %v", err)
+		t.Fatalf("encrypt passphrase sentinel: %v", err)
 	}
-	metadata := &workspace.ProjectStack{}
-	if err := passphrase.EditProjectStack(metadata, manager.State()); err != nil {
-		t.Fatalf("EditProjectStack() error = %v", err)
-	}
-	ciphertext, err := manager.Encrypter().EncryptValue(context.Background(), stageUnrelatedSecret)
+	state := "v1:" + base64.StdEncoding.EncodeToString(salt) + ":" + sentinel
+	ciphertext, err := manager.EncryptValue(context.Background(), stageUnrelatedSecret)
 	if err != nil {
 		t.Fatalf("encrypt unrelated value: %v", err)
 	}
-	staleSecrets, err := manager.Encrypter().EncryptValue(context.Background(), stageStaleSecrets)
+	staleSecrets, err := manager.EncryptValue(context.Background(), stageStaleSecrets)
 	if err != nil {
 		t.Fatalf("encrypt stale environment secrets: %v", err)
 	}
-	staleRevision, err := manager.Encrypter().EncryptValue(context.Background(), stageStaleRevision)
+	staleRevision, err := manager.EncryptValue(context.Background(), stageStaleRevision)
 	if err != nil {
 		t.Fatalf("encrypt stale revision key: %v", err)
 	}
 	project := &workspace.Project{Name: tokens.PackageName("sub2api-environment"), Runtime: workspace.NewProjectRuntimeInfo("go", nil)}
 	source := []byte("# staged stack fixture\n" +
-		"encryptionsalt: " + metadata.EncryptionSalt + "\n" +
+		"encryptionsalt: " + state + "\n" +
 		"config:\n" +
 		"  sub2api-environment:unrelated: " + stageUnrelatedValue + "\n" +
 		"  sub2api-environment:unrelatedSecret:\n" +
@@ -471,9 +464,9 @@ func addUnrelatedConfigMerge(t *testing.T, source []byte, value string) []byte {
 	})
 }
 
-func setMappingSecure(t *testing.T, mapping *yaml.Node, key string, manager secrets.Manager, plaintext string) {
+func setMappingSecure(t *testing.T, mapping *yaml.Node, key string, manager config.Crypter, plaintext string) {
 	t.Helper()
-	ciphertext, err := manager.Encrypter().EncryptValue(context.Background(), plaintext)
+	ciphertext, err := manager.EncryptValue(context.Background(), plaintext)
 	if err != nil {
 		t.Fatalf("encrypt %q: %v", key, err)
 	}

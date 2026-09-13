@@ -5,6 +5,7 @@ package enginegraph_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,26 +21,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/integration/automationtest"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/program"
-	"github.com/pulumi/pulumi/pkg/v3/backend"
-	"github.com/pulumi/pulumi/pkg/v3/backend/display"
-	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
-	"github.com/pulumi/pulumi/pkg/v3/engine"
-	pkgresource "github.com/pulumi/pulumi/pkg/v3/resource"
-	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/deploytest"
-	"github.com/pulumi/pulumi/pkg/v3/resource/plugin"
-	"github.com/pulumi/pulumi/pkg/v3/resource/stack"
-	"github.com/pulumi/pulumi/pkg/v3/secrets"
-	"github.com/pulumi/pulumi/pkg/v3/secrets/b64"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/events"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/testing/diagtest"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	p "github.com/pulumi/pulumi-go-provider"
 )
 
 const release = "ghcr.io/example/sub2api-deploy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -212,15 +205,14 @@ func sanitizedTraceFileName(testName string) string {
 	return cleanStem + "-" + hex.EncodeToString(hash[:]) + ".jsonl"
 }
 
-func (f *traceFixture) recordHostCheck(req plugin.CheckRequest) {
+func (f *traceFixture) recordHostCheck(req p.CheckRequest) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hostChecks = append(f.hostChecks, hostCheckObservation{
-		URN:           req.URN,
-		Type:          req.URN.Type(),
-		Name:          string(req.URN.Name()),
-		AllowUnknowns: req.AllowUnknowns,
-		News:          clonePropertyMap(req.News),
+		URN:           req.Urn,
+		Type:          req.Urn.Type(),
+		Name:          string(req.Urn.Name()),
+		News:          clonePropertyMap(resource.ToResourcePropertyMap(req.Inputs)),
 	})
 }
 
@@ -312,9 +304,7 @@ func TestEngineGraphPartialCheckpointKeepsSuccessfulPredecessor(t *testing.T) {
 	if snapshot == nil {
 		t.Fatal("partial checkpoint is nil")
 	}
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("partial checkpoint is invalid: %v", err)
-	}
+	assertCheckpoint(t, snapshot)
 
 	stackResources := 0
 	hostResources := 0
@@ -367,9 +357,7 @@ func TestEngineManagedUpstashStateIsProtectedAndRetained(t *testing.T) {
 	if snapshot == nil {
 		t.Fatal("managed Upstash checkpoint is nil")
 	}
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("managed Upstash checkpoint is invalid: %v", err)
-	}
+	assertCheckpoint(t, snapshot)
 
 	const managedRedisType = "upstash:index/redisDatabase:RedisDatabase"
 	stackResources := 0
@@ -849,7 +837,7 @@ func TestEngineGraphTraceArtifactIsSanitizedJSONL(t *testing.T) {
 	assertSanitizedLifecycleTrace(t, harness.trace.snapshot())
 }
 
-func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostReadiness map[string]bool) (*traceFixture, *deploy.Snapshot, error) {
+func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostReadiness map[string]bool) (*traceFixture, *automationtest.Checkpoint, error) {
 	t.Helper()
 	harness := newEngineGraphHarness(t, hostReadiness)
 	snapshot, updateErr := harness.update(t, configName, secretsName)
@@ -857,181 +845,182 @@ func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostRead
 }
 
 type engineGraphHarness struct {
-	backend        backend.Backend
-	stack          backend.Stack
-	project        *workspace.Project
-	programRoot    string
+	stack          auto.Stack
+	workspace      auto.Workspace
 	trace          *traceFixture
-	secretsManager secrets.Manager
+	providers      map[string]*automationtest.ProviderServer
 	revisionKey    string
+	configYAML     []byte
+	secretsYAML    []byte
 }
 
 func newEngineGraphHarness(t *testing.T, hostReadiness map[string]bool) *engineGraphHarness {
 	t.Helper()
 	trace := &traceFixture{hostReadiness: hostReadiness}
+	harness := &engineGraphHarness{trace: trace, revisionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}
 	if directory := os.Getenv("ENGINE_GRAPH_TRACE_DIR"); directory != "" {
 		t.Cleanup(func() {
 			writeEngineGraphTraceArtifact(t, trace, directory)
 		})
 	}
-	ctx := context.Background()
-	project := &workspace.Project{
-		Name:    tokens.PackageName("sub2api-environment"),
-		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cliPath := os.Getenv("ENGINE_GRAPH_PULUMI_CLI")
+	if cliPath == "" {
+		t.Fatal("ENGINE_GRAPH_PULUMI_CLI is required for external Engine Graph tests")
 	}
-	localBackend, err := diy.New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(t.TempDir()), project)
+	command, err := automationtest.NewCommand(ctx, cliPath, t.TempDir())
 	if err != nil {
-		t.Fatalf("create local backend: %v", err)
+		t.Fatalf("create official Pulumi command: %v", err)
 	}
-	ref, err := localBackend.ParseStackReference("canary")
+	pulumiHome := os.Getenv("PULUMI_HOME")
+	if pulumiHome == "" {
+		pulumiHome = t.TempDir()
+	}
+	providers, err := startEngineGraphProviders(ctx, trace)
 	if err != nil {
-		t.Fatalf("parse stack reference: %v", err)
+		t.Fatalf("start external test providers: %v", err)
 	}
-	stackState, err := localBackend.CreateStack(ctx, ref, "", nil, nil)
+	for _, provider := range providers {
+		provider := provider
+		t.Cleanup(provider.Close)
+	}
+	workspace, err := auto.NewLocalWorkspace(ctx,
+		auto.Program(func(ctx *pulumi.Context) error {
+			return program.Register(ctx, release, harness.config(), harness.secrets())
+		}),
+		auto.Project(workspaceProject()),
+		auto.Pulumi(command),
+		auto.PulumiHome(pulumiHome),
+		auto.SecretsProvider("passphrase"),
+		auto.EnvVars(map[string]string{
+			"PULUMI_BACKEND_URL":       "file://" + filepath.ToSlash(t.TempDir()),
+			"PULUMI_CONFIG_PASSPHRASE": "engine-graph-passphrase",
+			"PULUMI_DEBUG_PROVIDERS":   automationtest.DebugProviders(providerPorts(providers)),
+		}),
+	)
 	if err != nil {
-		t.Fatalf("create stack: %v", err)
+		t.Fatalf("create Automation workspace: %v", err)
 	}
-
-	secretsManager := b64.NewBase64SecretsManager()
-	revisionKey, err := secretsManager.Encrypter().EncryptValue(ctx, "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	stackState, err := auto.NewStack(ctx, "canary", workspace)
 	if err != nil {
-		t.Fatalf("encrypt Host revision key: %v", err)
+		t.Fatalf("create Automation stack: %v", err)
 	}
-	return &engineGraphHarness{
-		backend:        localBackend,
-		stack:          stackState,
-		project:        project,
-		programRoot:    t.TempDir(),
-		trace:          trace,
-		secretsManager: secretsManager,
-		revisionKey:    revisionKey,
+	harness.stack = stackState
+	harness.workspace = workspace
+	harness.providers = providers
+	if err := configureRevisionKey(ctx, workspace, stackState.Name(), harness.revisionKey); err != nil {
+		t.Fatalf("encrypt external Engine stack config: %v", err)
 	}
+	t.Cleanup(func() {
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer removeCancel()
+		_ = workspace.RemoveStack(removeCtx, stackState.Name())
+	})
+	return harness
 }
 
-func (h *engineGraphHarness) update(t *testing.T, configName, secretsName string) (*deploy.Snapshot, error) {
+func (h *engineGraphHarness) update(t *testing.T, configName, secretsName string) (*automationtest.Checkpoint, error) {
 	return h.updateTargets(t, configName, secretsName)
 }
 
-func (h *engineGraphHarness) updateTargets(t *testing.T, configName, secretsName string, targets ...resource.URN) (*deploy.Snapshot, error) {
+func (h *engineGraphHarness) updateTargets(t *testing.T, configName, secretsName string, targets ...resource.URN) (*automationtest.Checkpoint, error) {
 	t.Helper()
-	ctx := context.Background()
-	configYAML := readFixture(t, configName)
-	secretsYAML := readFixture(t, secretsName)
-	languageRuntime := newContextAwareLanguageRuntime(func(ctx *pulumi.Context) error {
-		return program.Register(ctx, release, configYAML, secretsYAML)
-	})
-	hostFactory := deploytest.NewPluginHostF(nil, nil, languageRuntime, nil, nil, engineProviderLoaders(h.trace)...)
-	updateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	h.configYAML = readFixture(t, configName)
+	h.secretsYAML = readFixture(t, secretsName)
+	updateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, updateErr := h.backend.Update(updateCtx, h.stack, backend.UpdateOperation{
-		Proj: h.project,
-		M:    &backend.UpdateMetadata{},
-		Root: h.programRoot,
-		Opts: backend.UpdateOptions{
-			AutoApprove: true,
-			SkipPreview: true,
-			Display: display.Options{
-				Color:            colors.Never,
-				Stdout:           io.Discard,
-				Stderr:           io.Discard,
-				SuppressProgress: true,
-			},
-			Engine: engineOptions(hostFactory, targets...),
-		},
-		SecretsManager:  h.secretsManager,
-		SecretsProvider: stack.Base64SecretsProvider{},
-		StackConfiguration: backend.StackConfiguration{
-			Config: config.Map{
-				config.MustMakeKey("sub2api-host", "revisionKey"): config.NewSecureValue(h.revisionKey),
-			},
-			Decrypter: h.secretsManager.Decrypter(),
-		},
-		Scopes: backend.CancellationScopes,
-	}, nil)
-	currentStack, getStackErr := h.backend.GetStack(ctx, h.stack.Ref())
-	if getStackErr != nil {
-		t.Fatalf("load current checkpoint stack: %v", getStackErr)
+	options := []optup.Option{optup.Parallel(4), optup.SuppressProgress(), optup.SuppressOutputs(), optup.Color("never"), optup.EventStreams(h.eventStream(t))}
+	if len(targets) != 0 {
+		urns := make([]string, len(targets))
+		for i, target := range targets { urns[i] = string(target) }
+		options = append(options, optup.Target(urns))
 	}
-	if currentStack == nil {
-		t.Fatalf("load current checkpoint stack: backend returned nil stack")
-	}
-	snapshot, snapshotErr := currentStack.Snapshot(ctx, stack.Base64SecretsProvider{})
-	if snapshotErr != nil {
-		t.Fatalf("load partial checkpoint: %v", snapshotErr)
-	}
+	_, updateErr := h.stack.Up(updateCtx, options...)
+	snapshot, snapshotErr := h.exportCheckpoint(updateCtx)
+	if snapshotErr != nil { t.Fatalf("load exported checkpoint: %v", snapshotErr) }
 	return snapshot, updateErr
 }
 
-func (h *engineGraphHarness) preview(t *testing.T, configName, secretsName string) (*deploy.Snapshot, *deploy.Snapshot, error) {
+func (h *engineGraphHarness) preview(t *testing.T, configName, secretsName string) (*automationtest.Checkpoint, *automationtest.Checkpoint, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	before, err := h.reloadSnapshot(ctx)
+	h.configYAML = readFixture(t, configName)
+	h.secretsYAML = readFixture(t, secretsName)
+	before, err := h.exportCheckpoint(ctx)
 	if err != nil {
 		t.Fatalf("load checkpoint before preview: %v", err)
 	}
-	configYAML := readFixture(t, configName)
-	secretsYAML := readFixture(t, secretsName)
-	languageRuntime := newContextAwareLanguageRuntime(func(ctx *pulumi.Context) error {
-		return program.Register(ctx, release, configYAML, secretsYAML)
-	})
-	hostFactory := deploytest.NewPluginHostF(nil, nil, languageRuntime, nil, nil, engineProviderLoaders(h.trace)...)
-	engineEvents := make(chan engine.Event)
-	eventsDone := make(chan struct{})
-	go func() {
-		for range engineEvents {
-		}
-		close(eventsDone)
-	}()
-
-	_, _, previewErr := backend.PreviewStack(ctx, h.stack, backend.UpdateOperation{
-		Proj: h.project,
-		M:    &backend.UpdateMetadata{},
-		Root: h.programRoot,
-		Opts: backend.UpdateOptions{
-			AutoApprove: true,
-			PreviewOnly: true,
-			Display: display.Options{
-				Color:            colors.Never,
-				Stdout:           io.Discard,
-				Stderr:           io.Discard,
-				SuppressProgress: true,
-			},
-			Engine: engineOptions(hostFactory),
-		},
-		SecretsManager:  h.secretsManager,
-		SecretsProvider: stack.Base64SecretsProvider{},
-		StackConfiguration: backend.StackConfiguration{
-			Config: config.Map{
-				config.MustMakeKey("sub2api-host", "revisionKey"): config.NewSecureValue(h.revisionKey),
-			},
-			Decrypter: h.secretsManager.Decrypter(),
-		},
-		Scopes: backend.CancellationScopes,
-	}, engineEvents)
-	close(engineEvents)
-	<-eventsDone
-
-	after, err := h.reloadSnapshot(ctx)
+	_, previewErr := h.stack.Preview(ctx, optpreview.Parallel(4), optpreview.SuppressProgress(), optpreview.SuppressOutputs(), optpreview.Color("never"), optpreview.EventStreams(h.eventStream(t)))
+	after, err := h.exportCheckpoint(ctx)
 	if err != nil {
 		t.Fatalf("load checkpoint after preview: %v", err)
 	}
 	return before, after, previewErr
 }
 
-func (h *engineGraphHarness) reloadSnapshot(ctx context.Context) (*deploy.Snapshot, error) {
-	currentStack, err := h.backend.GetStack(ctx, h.stack.Ref())
+func configureRevisionKey(ctx context.Context, workspace auto.Workspace, stackName, revisionKey string) error {
+	settings, err := workspace.StackSettings(ctx, stackName)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if currentStack == nil {
-		return nil, errors.New("backend returned nil stack")
+	saltParts := strings.SplitN(settings.EncryptionSalt, ":", 3)
+	if len(saltParts) != 3 || saltParts[0] != "v1" {
+		return errors.New("invalid external Engine secrets settings")
 	}
-	return currentStack.Snapshot(ctx, stack.Base64SecretsProvider{})
+	salt, err := base64.StdEncoding.DecodeString(saltParts[1])
+	if err != nil {
+		return errors.New("invalid external Engine secrets salt")
+	}
+	crypter := config.NewSymmetricCrypterFromPassphrase("engine-graph-passphrase", salt)
+	ciphertext, err := crypter.EncryptValue(ctx, revisionKey)
+	if err != nil {
+		return errors.New("encrypt external Engine config failed")
+	}
+	if settings.Config == nil {
+		settings.Config = config.Map{}
+	}
+	settings.Config[config.MustMakeKey("sub2api-host", "revisionKey")] = config.NewSecureValue(ciphertext)
+	return workspace.SaveStackSettings(ctx, stackName, settings)
 }
 
-func snapshotsEqual(before, after *deploy.Snapshot) bool {
+func (h *engineGraphHarness) exportCheckpoint(ctx context.Context) (*automationtest.Checkpoint, error) {
+	export, err := h.stack.Export(ctx)
+	if err != nil { return nil, err }
+	return automationtest.DecodeCheckpoint(export)
+}
+
+func workspaceProject() workspace.Project {
+	return workspace.Project{
+		Name:    tokens.PackageName("sub2api-environment"),
+		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
+	}
+}
+
+func providerPorts(providers map[string]*automationtest.ProviderServer) map[string]int {
+	ports := make(map[string]int, len(providers))
+	for name, provider := range providers {
+		ports[name] = provider.Port()
+	}
+	return ports
+}
+
+func (h *engineGraphHarness) eventStream(t *testing.T) chan<- events.EngineEvent {
+	t.Helper()
+	stream := make(chan events.EngineEvent)
+	go func() {
+		for range stream {
+		}
+	}()
+	return stream
+}
+
+func (h *engineGraphHarness) config() []byte { return h.configYAML }
+
+func (h *engineGraphHarness) secrets() []byte { return h.secretsYAML }
+
+func snapshotsEqual(before, after *automationtest.Checkpoint) bool {
 	if before == nil || after == nil {
 		return before == after
 	}
@@ -1119,53 +1108,6 @@ func containsString(value resource.PropertyValue, want string) bool {
 	return false
 }
 
-func engineOptions(hostFactory deploytest.PluginHostFactory, targets ...resource.URN) engine.UpdateOptions {
-	options := engine.UpdateOptions{
-		Parallel: 4,
-		HostFactory: func(context.Context, diag.Sink, diag.Sink, plugin.DebugContext) (plugin.Host, error) {
-			return hostFactory(), nil
-		},
-		SkipPluginPreInstall: true,
-	}
-	if len(targets) != 0 {
-		options.Targets = deploy.NewUrnTargetsFromUrns(targets)
-	}
-	return options
-}
-
-type contextAwareLanguageRuntime struct {
-	plugin.LanguageRuntime
-	program func(*pulumi.Context) error
-}
-
-func newContextAwareLanguageRuntime(program func(*pulumi.Context) error) deploytest.LanguageRuntimeFactory {
-	return func() plugin.LanguageRuntime {
-		base := deploytest.NewLanguageRuntime(func(_ plugin.RunInfo, _ *deploytest.ResourceMonitor) error {
-			return nil
-		})
-		return &contextAwareLanguageRuntime{LanguageRuntime: base, program: program}
-	}
-}
-
-func (r *contextAwareLanguageRuntime) Run(ctx context.Context, info plugin.RunInfo) (string, bool, error) {
-	pulumiCtx, err := pulumi.NewContext(ctx, pulumi.RunInfo{
-		Project:     info.Project,
-		Stack:       info.Stack,
-		Parallel:    info.Parallel,
-		DryRun:      info.DryRun,
-		MonitorAddr: info.MonitorAddress,
-	})
-	if err != nil {
-		return "", false, err
-	}
-	runErr := pulumi.RunWithContext(pulumiCtx, r.program)
-	closeErr := pulumiCtx.Close()
-	if joinedErr := errors.Join(runErr, closeErr); joinedErr != nil {
-		return joinedErr.Error(), false, nil
-	}
-	return "", false, nil
-}
-
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	contents, err := os.ReadFile(filepath.Join("testdata", name))
@@ -1175,11 +1117,19 @@ func readFixture(t *testing.T, name string) []byte {
 	return contents
 }
 
-func assertFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+func assertCheckpoint(t *testing.T, snapshot *automationtest.Checkpoint) {
 	t.Helper()
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("partial checkpoint is invalid: %v", err)
+	if snapshot == nil {
+		t.Fatal("exported checkpoint is nil")
 	}
+	if snapshot.Manifest.Version == "" {
+		t.Fatal("exported checkpoint has no Pulumi manifest version")
+	}
+}
+
+func assertFailureCheckpoint(t *testing.T, snapshot *automationtest.Checkpoint) {
+	t.Helper()
+	assertCheckpoint(t, snapshot)
 	stackResources := 0
 	for _, resource := range snapshot.Resources {
 		if resource.Type == "pulumi:pulumi:Stack" {
@@ -1198,11 +1148,9 @@ func assertFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	}
 }
 
-func assertReadyCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+func assertReadyCheckpoint(t *testing.T, snapshot *automationtest.Checkpoint) {
 	t.Helper()
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("ready checkpoint is invalid: %v", err)
-	}
+	assertCheckpoint(t, snapshot)
 	stackResources := 0
 	hosts := map[string]bool{}
 	dnsRecords := 0
@@ -1221,11 +1169,9 @@ func assertReadyCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	}
 }
 
-func assertMaintenanceCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+func assertMaintenanceCheckpoint(t *testing.T, snapshot *automationtest.Checkpoint) {
 	t.Helper()
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("maintenance checkpoint is invalid: %v", err)
-	}
+	assertCheckpoint(t, snapshot)
 	stackResources := 0
 	hostResources := 0
 	hosts := map[string]bool{}
@@ -1261,14 +1207,9 @@ func assertMaintenanceCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	}
 }
 
-func assertConfiguredHostCheckpoint(t *testing.T, snapshot *deploy.Snapshot, serverKeys, wantDNSNames []string) {
+func assertConfiguredHostCheckpoint(t *testing.T, snapshot *automationtest.Checkpoint, serverKeys, wantDNSNames []string) {
 	t.Helper()
-	if snapshot == nil {
-		t.Fatal("configured-server checkpoint is nil")
-	}
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("configured-server checkpoint is invalid: %v", err)
-	}
+	assertCheckpoint(t, snapshot)
 
 	wantHosts := make(map[string]resource.ID, len(serverKeys))
 	for _, serverKey := range serverKeys {
@@ -1306,7 +1247,7 @@ func assertConfiguredHostCheckpoint(t *testing.T, snapshot *deploy.Snapshot, ser
 	}
 }
 
-func assertAppPlacementCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+func assertAppPlacementCheckpoint(t *testing.T, snapshot *automationtest.Checkpoint) {
 	t.Helper()
 	assertConfiguredHostCheckpoint(t, snapshot, []string{"alpha", "bravo"}, []string{"dns-app-alpha-A"})
 
@@ -1345,14 +1286,9 @@ func assertAppPlacementCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	}
 }
 
-func assertPlacementFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
+func assertPlacementFailureCheckpoint(t *testing.T, snapshot *automationtest.Checkpoint) {
 	t.Helper()
-	if snapshot == nil {
-		t.Fatal("placement failure checkpoint is nil")
-	}
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("placement failure checkpoint is invalid: %v", err)
-	}
+	assertCheckpoint(t, snapshot)
 	stackResources := 0
 	bravoHosts := 0
 	for _, state := range snapshot.Resources {
@@ -1388,15 +1324,10 @@ func assertPlacementFailureCheckpoint(t *testing.T, snapshot *deploy.Snapshot) {
 	}
 }
 
-func assertCrossHostTargets(t *testing.T, snapshot *deploy.Snapshot, bravoHasApp, alphaAdmitsBravo, publication bool) {
+func assertCrossHostTargets(t *testing.T, snapshot *automationtest.Checkpoint, bravoHasApp, alphaAdmitsBravo, publication bool) {
 	t.Helper()
-	if snapshot == nil {
-		t.Fatal("cross-Host checkpoint is nil")
-	}
-	if err := snapshot.VerifyIntegrity(); err != nil {
-		t.Fatalf("cross-Host checkpoint is invalid: %v", err)
-	}
-	var alpha, bravo *pkgresource.State
+	assertCheckpoint(t, snapshot)
+	var alpha, bravo *automationtest.Resource
 	dnsRecords := 0
 	for _, state := range snapshot.Resources {
 		switch state.Type {
@@ -1448,17 +1379,13 @@ func assertCrossHostTargets(t *testing.T, snapshot *deploy.Snapshot, bravoHasApp
 	}
 }
 
-func assertSemanticCheckpointEqual(t *testing.T, got, want *deploy.Snapshot) {
+func assertSemanticCheckpointEqual(t *testing.T, got, want *automationtest.Checkpoint) {
 	t.Helper()
 	if got == nil || want == nil {
 		t.Fatalf("retry checkpoint nil state = got:%t want:%t", got == nil, want == nil)
 	}
-	if err := got.VerifyIntegrity(); err != nil {
-		t.Fatalf("retry checkpoint is invalid: %v", err)
-	}
-	if err := want.VerifyIntegrity(); err != nil {
-		t.Fatalf("preceding checkpoint is invalid: %v", err)
-	}
+	assertCheckpoint(t, got)
+	assertCheckpoint(t, want)
 	gotStates, wantStates := checkpointResourceStates(got), checkpointResourceStates(want)
 	if !reflect.DeepEqual(gotStates, wantStates) {
 		t.Fatalf("retry checkpoint resource semantics changed: got=%#v want=%#v", gotStates, wantStates)
@@ -1486,7 +1413,7 @@ type checkpointResourceState struct {
 	CustomTimeouts          resource.CustomTimeouts
 }
 
-func checkpointResourceStates(snapshot *deploy.Snapshot) map[resource.URN]checkpointResourceState {
+func checkpointResourceStates(snapshot *automationtest.Checkpoint) map[resource.URN]checkpointResourceState {
 	states := make(map[resource.URN]checkpointResourceState, len(snapshot.Resources))
 	for _, state := range snapshot.Resources {
 		states[state.URN] = checkpointResourceState{
@@ -1502,18 +1429,18 @@ func checkpointResourceStates(snapshot *deploy.Snapshot) map[resource.URN]checkp
 			Delete:                  state.Delete,
 			Protect:                 state.Protect,
 			External:                state.External,
-			RetainOnDelete:          state.RetainOnDelete,
 			PropertyDependencies:    maps.Clone(state.PropertyDependencies),
 			PendingReplacement:      state.PendingReplacement,
 			AdditionalSecretOutputs: append([]resource.PropertyKey(nil), state.AdditionalSecretOutputs...),
 			Aliases:                 append([]resource.URN(nil), state.Aliases...),
 			CustomTimeouts:          state.CustomTimeouts,
+			RetainOnDelete:          state.RetainOnDelete,
 		}
 	}
 	return states
 }
 
-func assertHostAppCount(t *testing.T, snapshot *deploy.Snapshot, hostID string, want int) {
+func assertHostAppCount(t *testing.T, snapshot *automationtest.Checkpoint, hostID string, want int) {
 	t.Helper()
 	for _, state := range snapshot.Resources {
 		if state.Type != hostProviderType || string(state.ID) != hostID {

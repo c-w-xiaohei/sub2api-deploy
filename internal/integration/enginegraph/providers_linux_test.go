@@ -5,12 +5,13 @@ package enginegraph_test
 import (
 	"context"
 	"errors"
+	"fmt"
 
-	"github.com/blang/semver"
-	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/deploytest"
-	"github.com/pulumi/pulumi/pkg/v3/resource/plugin"
+	p "github.com/pulumi/pulumi-go-provider"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/integration/automationtest"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
 const (
@@ -20,171 +21,192 @@ const (
 	hostProviderType         = tokens.Type("sub2api-host:index:Host")
 )
 
-// engineProviderLoaders supplies only the providers used by the existing Program graph. These
-// providers never leave the test process: deploytest keeps their instances in the plugin host.
-func engineProviderLoaders(trace *traceFixture) []*deploytest.ProviderLoader {
-	return []*deploytest.ProviderLoader{
-		deploytest.NewProviderLoader(hostProviderPackage, semver.MustParse("1.0.0"), func() (plugin.Provider, error) {
-			return hostProvider(trace), nil
-		}),
-		deploytest.NewProviderLoader(cloudflareProviderPackage, semver.MustParse("6.18.0"), func() (plugin.Provider, error) {
-			return cloudflareProvider(trace), nil
-		}),
-		deploytest.NewProviderLoader(upstashProviderPackage, semver.MustParse("1.0.0"), func() (plugin.Provider, error) {
-			return upstashProvider(trace), nil
-		}),
+func startEngineGraphProviders(ctx context.Context, trace *traceFixture) (map[string]*automationtest.ProviderServer, error) {
+	providers := map[string]p.Provider{
+		string(hostProviderPackage):      hostProvider(trace),
+		string(cloudflareProviderPackage): cloudflareProvider(trace),
+		string(upstashProviderPackage):    upstashProvider(trace),
 	}
+	servers := make(map[string]*automationtest.ProviderServer, len(providers))
+	for name, provider := range providers {
+		server, err := automationtest.StartProvider(ctx, name, providerVersion(name), provider)
+		if err != nil {
+			for _, started := range servers {
+				started.Close()
+			}
+			return nil, err
+		}
+		servers[name] = server
+	}
+	return servers, nil
 }
 
-func hostProvider(trace *traceFixture) plugin.Provider {
-	return &deploytest.Provider{
-		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
-			if req.URN.Type() == hostProviderType {
+func providerVersion(name string) string {
+	if name == string(cloudflareProviderPackage) {
+		return "6.18.0"
+	}
+	return "1.0.0"
+}
+
+func hostProvider(trace *traceFixture) p.Provider {
+	return p.Provider{
+		GetSchema: func(context.Context, p.GetSchemaRequest) (p.GetSchemaResponse, error) {
+			return p.GetSchemaResponse{Schema: providerSchema(string(hostProviderPackage), providerVersion(string(hostProviderPackage)), string(hostProviderType))}, nil
+		},
+		Check: func(_ context.Context, req p.CheckRequest) (p.CheckResponse, error) {
+			if req.Urn.Type() == hostProviderType {
 				trace.recordHostCheck(req)
 			}
-			return plugin.CheckResponse{Properties: req.News}, nil
+			return p.CheckResponse{Inputs: req.Inputs}, nil
 		},
-		DiffF: func(_ context.Context, req plugin.DiffRequest) (plugin.DiffResult, error) {
-			if req.OldInputs.DeepEquals(req.NewInputs) {
-				return plugin.DiffResult{Changes: plugin.DiffNone}, nil
+		Diff: func(_ context.Context, req p.DiffRequest) (p.DiffResponse, error) {
+			if req.OldInputs.Equals(req.Inputs) {
+				return p.DiffResponse{HasChanges: false}, nil
 			}
-			return plugin.DiffResult{Changes: plugin.DiffSome}, nil
+			return p.DiffResponse{HasChanges: true}, nil
 		},
-		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
-			if req.Preview {
-				return plugin.CreateResponse{Properties: req.Properties, Status: resource.StatusOK}, nil
+		Create: func(_ context.Context, req p.CreateRequest) (p.CreateResponse, error) {
+			if req.DryRun {
+				return p.CreateResponse{Properties: req.Properties}, nil
 			}
-			serverKey := hostServerKey(req.Properties)
+			properties := resource.ToResourcePropertyMap(req.Properties)
+			serverKey := hostServerKey(properties)
 			if serverKey == "" {
-				return plugin.CreateResponse{}, errors.New("test Host input has no server key")
+				return p.CreateResponse{}, errors.New("test Host input has no server key")
 			}
-			if req.URN.Name() != "host-"+serverKey {
-				return plugin.CreateResponse{}, errors.New("test Host URN does not match server key")
+			if req.Urn.Name() != "host-"+serverKey {
+				return p.CreateResponse{}, errors.New("test Host URN does not match server key")
 			}
 			// hostReadiness is populated before the engine starts and is immutable during the update.
 			if !trace.hostReadiness[serverKey] {
 				trace.append("host:" + serverKey + ":create:fail")
 				if serverKey == "alpha" {
-					return plugin.CreateResponse{}, errors.New(scriptedAlphaFailure)
+					return p.CreateResponse{}, errors.New(scriptedAlphaFailure)
 				}
-				return plugin.CreateResponse{}, errors.New("scripted Host " + serverKey + " create failure")
+				return p.CreateResponse{}, errors.New("scripted Host " + serverKey + " create failure")
 			}
 			trace.append("host:" + serverKey + ":create:ok")
-			return plugin.CreateResponse{
-				ID:         resource.ID("host-" + serverKey),
+			return p.CreateResponse{
+				ID:         "host-" + serverKey,
 				Properties: req.Properties,
-				Status:     resource.StatusOK,
 			}, nil
 		},
-		DeleteF: func(_ context.Context, req plugin.DeleteRequest) (plugin.DeleteResponse, error) {
-			serverKey := hostServerKey(req.Inputs)
+		Delete: func(_ context.Context, req p.DeleteRequest) error {
+			serverKey := hostServerKey(resource.ToResourcePropertyMap(req.Properties))
 			if serverKey == "" {
-				return plugin.DeleteResponse{}, errors.New("test Host input has no server key")
+				return errors.New("test Host input has no server key")
 			}
-			if req.URN.Name() != "host-"+serverKey {
-				return plugin.DeleteResponse{}, errors.New("test Host URN does not match server key")
+			if req.Urn.Name() != "host-"+serverKey {
+				return errors.New("test Host URN does not match server key")
 			}
 			trace.append("host:" + serverKey + ":delete:ok")
-			return plugin.DeleteResponse{Status: resource.StatusOK}, nil
+			return nil
 		},
-		UpdateF: func(_ context.Context, req plugin.UpdateRequest) (plugin.UpdateResponse, error) {
-			serverKey := hostServerKey(req.NewInputs)
+		Update: func(_ context.Context, req p.UpdateRequest) (p.UpdateResponse, error) {
+			properties := resource.ToResourcePropertyMap(req.Inputs)
+			serverKey := hostServerKey(properties)
 			if serverKey == "" {
-				return plugin.UpdateResponse{}, errors.New("test Host input has no server key")
+				return p.UpdateResponse{}, errors.New("test Host input has no server key")
 			}
-			if req.URN.Name() != "host-"+serverKey {
-				return plugin.UpdateResponse{}, errors.New("test Host URN does not match server key")
+			if req.Urn.Name() != "host-"+serverKey {
+				return p.UpdateResponse{}, errors.New("test Host URN does not match server key")
 			}
-			if req.Preview {
-				return plugin.UpdateResponse{Properties: req.NewInputs, Status: resource.StatusOK}, nil
+			if req.DryRun {
+				return p.UpdateResponse{Properties: req.Inputs}, nil
 			}
 			// hostReadiness is populated before the engine starts and is immutable during the update.
 			if !trace.hostReadiness[serverKey] {
 				trace.append("host:" + serverKey + ":update:fail")
 				if serverKey == "alpha" {
-					return plugin.UpdateResponse{}, errors.New("scripted Host alpha update failure")
+					return p.UpdateResponse{}, errors.New("scripted Host alpha update failure")
 				}
-				return plugin.UpdateResponse{}, errors.New("scripted Host " + serverKey + " update failure")
+				return p.UpdateResponse{}, errors.New("scripted Host " + serverKey + " update failure")
 			}
 			trace.append("host:" + serverKey + ":update:ok")
-			return plugin.UpdateResponse{Properties: req.NewInputs, Status: resource.StatusOK}, nil
+			return p.UpdateResponse{Properties: req.Inputs}, nil
 		},
 	}
 }
 
-func cloudflareProvider(trace *traceFixture) plugin.Provider {
-	return &deploytest.Provider{
-		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
-			return plugin.CheckResponse{Properties: req.News}, nil
+func cloudflareProvider(trace *traceFixture) p.Provider {
+	return p.Provider{
+		GetSchema: func(context.Context, p.GetSchemaRequest) (p.GetSchemaResponse, error) {
+			return p.GetSchemaResponse{Schema: providerSchema(string(cloudflareProviderPackage), providerVersion(string(cloudflareProviderPackage)), "cloudflare:index/dnsRecord:DnsRecord")}, nil
 		},
-		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
-			if req.URN.Type() != "cloudflare:index/dnsRecord:DnsRecord" {
-				return plugin.CreateResponse{}, errors.New("test Cloudflare create request is not a DNS record")
+		Check: func(_ context.Context, req p.CheckRequest) (p.CheckResponse, error) {
+			return p.CheckResponse{Inputs: req.Inputs}, nil
+		},
+		Create: func(_ context.Context, req p.CreateRequest) (p.CreateResponse, error) {
+			if req.Urn.Type() != "cloudflare:index/dnsRecord:DnsRecord" {
+				return p.CreateResponse{}, errors.New("test Cloudflare create request is not a DNS record")
 			}
-			if req.URN.Name() == "" {
-				return plugin.CreateResponse{}, errors.New("test Cloudflare create request has no logical resource name")
+			if req.Urn.Name() == "" {
+				return p.CreateResponse{}, errors.New("test Cloudflare create request has no logical resource name")
 			}
-			if req.Type == "cloudflare:index/dnsRecord:DnsRecord" && !req.Preview {
+			if !req.DryRun {
 				trace.mu.Lock()
-				trace.events = append(trace.events, "cloudflare:dns:"+req.URN.Name()+":create:ok")
+				trace.events = append(trace.events, "cloudflare:dns:"+req.Urn.Name()+":create:ok")
 				trace.publicationEvents = append(trace.publicationEvents, "cloudflare:dns:create")
 				trace.mu.Unlock()
 			}
-			return recordingCreate(req, resource.ID("cloudflare-"+req.Name)), nil
+			return recordingCreate(req, "cloudflare-"+req.Urn.Name()), nil
 		},
-		DeleteF: func(_ context.Context, req plugin.DeleteRequest) (plugin.DeleteResponse, error) {
-			if req.URN.Type() != "cloudflare:index/dnsRecord:DnsRecord" {
-				return plugin.DeleteResponse{}, errors.New("test Cloudflare delete request is not a DNS record")
+		Delete: func(_ context.Context, req p.DeleteRequest) error {
+			if req.Urn.Type() != "cloudflare:index/dnsRecord:DnsRecord" {
+				return errors.New("test Cloudflare delete request is not a DNS record")
 			}
-			if req.URN.Name() == "" {
-				return plugin.DeleteResponse{}, errors.New("test Cloudflare delete request has no logical resource name")
+			if req.Urn.Name() == "" {
+				return errors.New("test Cloudflare delete request has no logical resource name")
 			}
-			trace.append("cloudflare:dns:" + req.URN.Name() + ":delete:ok")
-			return plugin.DeleteResponse{Status: resource.StatusOK}, nil
+			trace.append("cloudflare:dns:" + req.Urn.Name() + ":delete:ok")
+			return nil
 		},
 	}
 }
 
-func upstashProvider(trace *traceFixture) plugin.Provider {
-	return &deploytest.Provider{
-		CheckF: func(_ context.Context, req plugin.CheckRequest) (plugin.CheckResponse, error) {
-			return plugin.CheckResponse{Properties: req.News}, nil
+func upstashProvider(trace *traceFixture) p.Provider {
+	return p.Provider{
+		GetSchema: func(context.Context, p.GetSchemaRequest) (p.GetSchemaResponse, error) {
+			return p.GetSchemaResponse{Schema: providerSchema(string(upstashProviderPackage), providerVersion(string(upstashProviderPackage)), "upstash:index/redisDatabase:RedisDatabase")}, nil
 		},
-		CreateF: func(_ context.Context, req plugin.CreateRequest) (plugin.CreateResponse, error) {
-			if !req.Preview {
-				trace.append("upstash:" + req.Name + ":create:ok")
+		Check: func(_ context.Context, req p.CheckRequest) (p.CheckResponse, error) {
+			return p.CheckResponse{Inputs: req.Inputs}, nil
+		},
+		Create: func(_ context.Context, req p.CreateRequest) (p.CreateResponse, error) {
+			if !req.DryRun {
+				trace.append("upstash:" + req.Urn.Name() + ":create:ok")
 			}
-			response := recordingCreate(req, resource.ID("upstash-"+req.Name))
-			if req.Type == "upstash:index/redisDatabase:RedisDatabase" && req.Preview {
-				response.Properties["endpoint"] = resource.MakeComputed(resource.NewStringProperty(""))
-				response.Properties["port"] = resource.MakeComputed(resource.NewNumberProperty(0))
-				response.Properties["password"] = resource.MakeSecret(resource.MakeComputed(resource.NewStringProperty("")))
-			} else if req.Type == "upstash:index/redisDatabase:RedisDatabase" && !req.Preview {
-				response.Properties["endpoint"] = resource.NewStringProperty("redis.example.test")
-				response.Properties["port"] = resource.NewNumberProperty(6380)
-				response.Properties["password"] = resource.MakeSecret(resource.NewStringProperty("upstash-password-canary"))
+			response := recordingCreate(req, "upstash-"+req.Urn.Name())
+			if req.Urn.Type() == "upstash:index/redisDatabase:RedisDatabase" && req.DryRun {
+				response.Properties = response.Properties.Set("endpoint", property.New(property.Computed)).Set("port", property.New(property.Computed)).Set("password", property.New(property.Computed).WithSecret(true))
+			} else if req.Urn.Type() == "upstash:index/redisDatabase:RedisDatabase" && !req.DryRun {
+				response.Properties = response.Properties.Set("endpoint", property.New("redis.example.test")).Set("port", property.New(6380.0)).Set("password", property.New("upstash-password-canary").WithSecret(true))
 			}
 			return response, nil
 		},
-		UpdateF: func(_ context.Context, req plugin.UpdateRequest) (plugin.UpdateResponse, error) {
-			if !req.Preview {
-				trace.append("upstash:" + req.Name + ":update:ok")
+		Update: func(_ context.Context, req p.UpdateRequest) (p.UpdateResponse, error) {
+			if !req.DryRun {
+				trace.append("upstash:" + req.Urn.Name() + ":update:ok")
 			}
-			return plugin.UpdateResponse{Properties: req.NewInputs, Status: resource.StatusOK}, nil
+			return p.UpdateResponse{Properties: req.Inputs}, nil
 		},
-		DeleteF: func(_ context.Context, req plugin.DeleteRequest) (plugin.DeleteResponse, error) {
-			trace.append("upstash:" + req.Name + ":delete:ok")
-			return plugin.DeleteResponse{Status: resource.StatusOK}, nil
+		Delete: func(_ context.Context, req p.DeleteRequest) error {
+			trace.append("upstash:" + req.Urn.Name() + ":delete:ok")
+			return nil
 		},
 	}
 }
 
-func recordingCreate(req plugin.CreateRequest, id resource.ID) plugin.CreateResponse {
-	response := plugin.CreateResponse{Properties: req.Properties.Copy(), Status: resource.StatusOK}
-	if !req.Preview {
+func recordingCreate(req p.CreateRequest, id string) p.CreateResponse {
+	response := p.CreateResponse{Properties: req.Properties}
+	if !req.DryRun {
 		response.ID = id
 	}
 	return response
+}
+
+func providerSchema(name, version, resourceType string) string {
+	return fmt.Sprintf(`{"name":%q,"version":%q,"resources":{"%s":{"inputProperties":{"resource":{"$ref":"pulumi.json#/Any"},"server":{"$ref":"pulumi.json#/Any"},"target":{"$ref":"pulumi.json#/Any"},"secrets":{"$ref":"pulumi.json#/Any"},"name":{"$ref":"pulumi.json#/Any"},"content":{"$ref":"pulumi.json#/Any"},"proxied":{"$ref":"pulumi.json#/Any"},"ttl":{"$ref":"pulumi.json#/Any"},"type":{"$ref":"pulumi.json#/Any"},"zoneId":{"$ref":"pulumi.json#/Any"},"databaseName":{"$ref":"pulumi.json#/Any"},"region":{"$ref":"pulumi.json#/Any"},"tls":{"$ref":"pulumi.json#/Any"}}}}}`, name, version, resourceType)
 }
 
 func hostServerKey(inputs resource.PropertyMap) string {

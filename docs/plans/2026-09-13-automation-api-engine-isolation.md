@@ -15,7 +15,7 @@
 - The external official Pulumi CLI is the only Engine implementation. Do not create an Engine wrapper, alternative scheduler, or replacement state engine.
 - Use public Automation API and SDK interfaces where available. Keep direct subprocess management only in the `auto.PulumiCommand` adapter required to attach the custom Provider and its FD3 approval channel.
 - Do not run local Go builds, tests, `go list`, vet, formatter, Pulumi, Docker, package manager, compiler, or linker commands. Static inspection, `git diff --check`, and remote GitHub Actions are permitted.
-- CI is the sole behavior and resource verification environment. Do not permit local build/test use until an exact-SHA CI comparison records lower peak RSS and acceptable duration for the migrated heavy gates.
+- CI is the sole behavior and resource verification environment. Lower paired cold-build cgroup memory peak and reviewed build/gate durations are necessary evidence, not automatic local authorization. Local builds and tests remain prohibited until the complete results are reviewed and an explicit user/project decision permits a bounded local command.
 - Measure the same commands on a fixed GitHub runner image and Go/Pulumi version. The initial GNU time record is a warm-cache, maximum-single-process RSS observation, not aggregate build memory. A separate paired cold-cache compile/link comparison measures cgroup v2 memory peak (including accounted page cache), fixed concurrency, and duration for baseline and candidate on the same runner. Do not upload raw logs, environment, argv, frame, state, SQL, credentials, or runtime diagnostics.
 
 ## Tasks
@@ -57,8 +57,8 @@
 **Depends on:** Task 4 because the measured commands must be the final external-Engine gates.
 **Consumes / Produces:** Consumes final migrated gate commands and resource records. Produces exact-SHA sanitized duration/RSS evidence, before/after comparison metadata, and an explicit decision on whether local build/test remains prohibited.
 **Preserve:** All eight required job names, no-skip behavior, candidate inputs, target release same-byte consumption, safe evidence schema, and existing finalizer cleanup.
-**Requirements:** Capture a baseline on the pre-migration command shape or a pinned baseline run, then compare it against the migrated exact-SHA run. Treat lower peak RSS as necessary but not sufficient: duration must remain within a documented acceptable bound, and all required gates must pass. Do not enable local builds merely because CI is green.
-**Acceptance:** An exact-SHA CI run passes all required gates and proves the migrated heavy commands use lower peak RSS than the baseline. The final report names observed values, comparison method, residual transitive dependency, and whether the user’s local-build prohibition remains in force.
+**Requirements:** Compare identical cold compile/link targets for fixed baseline and candidate revisions on the same runner. Report lower cgroup memory peak separately from the warm-cache single-process RSS observation. Review duration and all required functional gates before a local safety decision. Do not enable local builds merely because CI is green.
+**Acceptance:** An exact-SHA CI run passes all required gates and the complete Engine Graph/Provider Import suites through the external CLI. Source inspection establishes actual public Automation Stack calls; CI inspects test and binary dependency closures for Engine/backend/deploy. Paired measurements report cgroup memory peak and duration of identical cold compilation targets. Full gate durations are reviewed separately; a compile-only result cannot claim lower total CI duration. The final report names observed values, comparison method, residual transitive dependency, and the continuing local-build prohibition unless explicitly changed.
 
 ## Verification And Closure
 - Static checks: source import inventory, workflow/schema contracts, documentation consistency, and `git diff --check`.

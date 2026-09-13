@@ -3,18 +3,27 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/debug"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optrefresh"
+	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 	"gopkg.in/yaml.v3"
 )
@@ -103,7 +112,7 @@ func runPulumiPlan(ctx context.Context, plan pulumiPlan, workdir, cliPath string
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := parsePulumiPlan(append([]string{"pulumi", plan.environment, plan.operation}, plan.userArgs...)); err != nil {
+	if !environment.ValidID(plan.environment) || !pulumiOperation(plan.operation) {
 		return errInvalidPulumiInputs
 	}
 	resolvedWorkdir, err := resolvePulumiWorkdir(workdir)
@@ -161,13 +170,183 @@ func runPulumiPlan(ctx context.Context, plan pulumiPlan, workdir, cliPath string
 		if err != nil {
 			return errInvalidStagedStack
 		}
-		_, _, _, err = workspace.PulumiCommand().Run(ctx, workspace.WorkDir(), nil, []io.Writer{stdout}, []io.Writer{stderr}, nil, plan.arguments(stagedPath)...)
-		return err
+		return runPulumiStack(ctx, workspace, plan, stagedPath, stdout, stderr)
 	})
 	if err != nil && errors.Is(err, errInvalidStagedStack) {
 		return errInvalidPulumiInputs
 	}
 	return err
+}
+
+var errPulumiConfirmationRequired = errors.New("Pulumi operation was not confirmed")
+
+func runPulumiStack(ctx context.Context, workspace auto.Workspace, plan pulumiPlan, configFile string, stdout, stderr io.Writer) error {
+	if ctx == nil || workspace == nil || stdout == nil || stderr == nil {
+		return errInvalidPulumiInputs
+	}
+	if !environment.ValidID(plan.environment) || !pulumiOperation(plan.operation) || !validPulumiOptions(plan.operation, plan.options) {
+		return errInvalidPulumiInputs
+	}
+	stack, err := auto.SelectStack(ctx, plan.environment, workspace)
+	if err != nil {
+		return publicPulumiError(ctx, workspace, err)
+	}
+	options := plan.options
+	options.configFile = configFile
+	if (plan.operation == "up" || plan.operation == "destroy") && !options.approve {
+		if err := runPulumiPreview(ctx, &stack, plan.operation, options, stdout, stderr); err != nil {
+			return publicPulumiError(ctx, workspace, err)
+		}
+		if !confirmPulumiOperation(ctx, plan.operation) {
+			return errPulumiConfirmationRequired
+		}
+	}
+
+	switch plan.operation {
+	case "preview":
+		_, err = stack.Preview(ctx, pulumiPreviewOptions(options, stdout, stderr)...)
+	case "up":
+		_, err = stack.Up(ctx, pulumiUpOptions(options, stdout, stderr)...)
+	case "refresh":
+		_, err = stack.Refresh(ctx, pulumiRefreshOptions(options, stdout, stderr)...)
+	case "destroy":
+		_, err = stack.Destroy(ctx, pulumiDestroyOptions(options, stdout, stderr)...)
+	default:
+		return errInvalidPulumiInputs
+	}
+	return publicPulumiError(ctx, workspace, err)
+}
+
+func publicPulumiError(ctx context.Context, workspace auto.Workspace, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	if workspace != nil {
+		if _, attached := workspace.PulumiCommand().(attachedPulumiCommand); attached {
+			return errors.New("pulumi failed")
+		}
+	}
+	return err
+}
+
+func runPulumiPreview(ctx context.Context, stack *auto.Stack, operation string, options pulumiOptions, stdout, stderr io.Writer) error {
+	var err error
+	switch operation {
+	case "up":
+		_, err = stack.Preview(ctx, pulumiPreviewOptions(options, stdout, stderr)...)
+	case "destroy":
+		_, err = stack.PreviewDestroy(ctx, pulumiDestroyOptions(options, stdout, stderr)...)
+	default:
+		return errInvalidPulumiInputs
+	}
+	return err
+}
+
+func pulumiPreviewOptions(options pulumiOptions, stdout, stderr io.Writer) []optpreview.Option {
+	result := []optpreview.Option{optpreview.ProgressStreams(stdout), optpreview.ErrorProgressStreams(stderr)}
+	if options.debugLevel != nil { result = append(result, optpreview.DebugLogging(debug.LoggingOptions{LogLevel: options.debugLevel})) }
+	if options.message != "" { result = append(result, optpreview.Message(options.message)) }
+	if options.parallel > 0 { result = append(result, optpreview.Parallel(options.parallel)) }
+	if len(options.targets) > 0 { result = append(result, optpreview.Target(options.targets)) }
+	if len(options.replaces) > 0 { result = append(result, optpreview.Replace(options.replaces)) }
+	if len(options.excludes) > 0 { result = append(result, optpreview.Exclude(options.excludes)) }
+	if len(options.policyPacks) > 0 { result = append(result, optpreview.PolicyPacks(options.policyPacks...)) }
+	if len(options.policyPackConfig) > 0 { result = append(result, optpreview.PolicyPackConfigs(options.policyPackConfig...)) }
+	if options.plan != "" { result = append(result, optpreview.Plan(options.plan)) }
+	if options.color != "" { result = append(result, optpreview.Color(options.color)) }
+	if options.diff { result = append(result, optpreview.Diff()) }
+	if options.expectNoChanges { result = append(result, optpreview.ExpectNoChanges()) }
+	if options.targetDependents { result = append(result, optpreview.TargetDependents()) }
+	if options.excludeDependents { result = append(result, optpreview.ExcludeDependents()) }
+	if options.refresh { result = append(result, optpreview.Refresh()) }
+	if options.suppressProgress { result = append(result, optpreview.SuppressProgress()) }
+	if options.suppressOutputs { result = append(result, optpreview.SuppressOutputs()) }
+	if options.configFile != "" { result = append(result, optpreview.ConfigFile(options.configFile)) }
+	return result
+}
+
+func pulumiUpOptions(options pulumiOptions, stdout, stderr io.Writer) []optup.Option {
+	result := []optup.Option{optup.ProgressStreams(stdout), optup.ErrorProgressStreams(stderr)}
+	if options.debugLevel != nil { result = append(result, optup.DebugLogging(debug.LoggingOptions{LogLevel: options.debugLevel})) }
+	if options.message != "" { result = append(result, optup.Message(options.message)) }
+	if options.parallel > 0 { result = append(result, optup.Parallel(options.parallel)) }
+	if len(options.targets) > 0 { result = append(result, optup.Target(options.targets)) }
+	if len(options.replaces) > 0 { result = append(result, optup.Replace(options.replaces)) }
+	if len(options.excludes) > 0 { result = append(result, optup.Exclude(options.excludes)) }
+	if len(options.policyPacks) > 0 { result = append(result, optup.PolicyPacks(options.policyPacks...)) }
+	if len(options.policyPackConfig) > 0 { result = append(result, optup.PolicyPackConfigs(options.policyPackConfig...)) }
+	if options.plan != "" { result = append(result, optup.Plan(options.plan)) }
+	if options.color != "" { result = append(result, optup.Color(options.color)) }
+	if options.diff { result = append(result, optup.Diff()) }
+	if options.expectNoChanges { result = append(result, optup.ExpectNoChanges()) }
+	if options.targetDependents { result = append(result, optup.TargetDependents()) }
+	if options.excludeDependents { result = append(result, optup.ExcludeDependents()) }
+	if options.refresh { result = append(result, optup.Refresh()) }
+	if options.suppressProgress { result = append(result, optup.SuppressProgress()) }
+	if options.suppressOutputs { result = append(result, optup.SuppressOutputs()) }
+	if options.continueOnError { result = append(result, optup.ContinueOnError()) }
+	if options.configFile != "" { result = append(result, optup.ConfigFile(options.configFile)) }
+	return result
+}
+
+func pulumiRefreshOptions(options pulumiOptions, stdout, stderr io.Writer) []optrefresh.Option {
+	result := []optrefresh.Option{optrefresh.ProgressStreams(stdout), optrefresh.ErrorProgressStreams(stderr)}
+	result = append(result, optrefresh.ShowSecrets(false))
+	if options.debugLevel != nil { result = append(result, optrefresh.DebugLogging(debug.LoggingOptions{LogLevel: options.debugLevel})) }
+	if options.message != "" { result = append(result, optrefresh.Message(options.message)) }
+	if options.parallel > 0 { result = append(result, optrefresh.Parallel(options.parallel)) }
+	if len(options.targets) > 0 { result = append(result, optrefresh.Target(options.targets)) }
+	if len(options.excludes) > 0 { result = append(result, optrefresh.Exclude(options.excludes)) }
+	if options.color != "" { result = append(result, optrefresh.Color(options.color)) }
+	if options.expectNoChanges { result = append(result, optrefresh.ExpectNoChanges()) }
+	if options.diff { result = append(result, optrefresh.Diff()) }
+	if options.targetDependents { result = append(result, optrefresh.TargetDependents()) }
+	if options.excludeDependents { result = append(result, optrefresh.ExcludeDependents()) }
+	if options.suppressProgress { result = append(result, optrefresh.SuppressProgress()) }
+	if options.suppressOutputs { result = append(result, optrefresh.SuppressOutputs()) }
+	if options.configFile != "" { result = append(result, optrefresh.ConfigFile(options.configFile)) }
+	return result
+}
+
+func pulumiDestroyOptions(options pulumiOptions, stdout, stderr io.Writer) []optdestroy.Option {
+	result := []optdestroy.Option{optdestroy.ProgressStreams(stdout), optdestroy.ErrorProgressStreams(stderr)}
+	result = append(result, optdestroy.ShowSecrets(false))
+	if options.debugLevel != nil { result = append(result, optdestroy.DebugLogging(debug.LoggingOptions{LogLevel: options.debugLevel})) }
+	if options.message != "" { result = append(result, optdestroy.Message(options.message)) }
+	if options.parallel > 0 { result = append(result, optdestroy.Parallel(options.parallel)) }
+	if len(options.targets) > 0 { result = append(result, optdestroy.Target(options.targets)) }
+	if len(options.excludes) > 0 { result = append(result, optdestroy.Exclude(options.excludes)) }
+	if options.color != "" { result = append(result, optdestroy.Color(options.color)) }
+	if options.targetDependents { result = append(result, optdestroy.TargetDependents()) }
+	if options.excludeDependents { result = append(result, optdestroy.ExcludeDependents()) }
+	if options.refresh { result = append(result, optdestroy.Refresh()) }
+	if options.suppressProgress { result = append(result, optdestroy.SuppressProgress()) }
+	if options.suppressOutputs { result = append(result, optdestroy.SuppressOutputs()) }
+	if options.continueOnError { result = append(result, optdestroy.ContinueOnError()) }
+	if options.diff { result = append(result, optdestroy.Diff()) }
+	if options.configFile != "" { result = append(result, optdestroy.ConfigFile(options.configFile)) }
+	return result
+}
+
+func confirmPulumiOperation(ctx context.Context, operation string) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	file, err := os.OpenFile("/dev/tty", os.O_RDWR|syscall.O_NOCTTY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	stop := context.AfterFunc(ctx, func() { _ = file.Close() })
+	defer stop()
+	if _, err := fmt.Fprintf(file, "Preview complete for %s. Type APPLY to continue: ", operation); err != nil {
+		return false
+	}
+	line, err := bufio.NewReaderSize(file, 32).ReadString('\n')
+	return err == nil && strings.TrimSuffix(line, "\n") == "APPLY" && ctx.Err() == nil
 }
 
 func resolvePulumiWorkdir(workdir string) (string, error) {

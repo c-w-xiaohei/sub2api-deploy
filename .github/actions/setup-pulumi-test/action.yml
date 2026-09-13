@@ -12,3 +12,11 @@ runs:
         cli="$(command -v pulumi)"
         test "$("$cli" version 2>/dev/null)" = "v3.256.0"
         printf '%s\n' "EXTERNAL_PULUMI_CLI=$cli" "ENGINE_GRAPH_PULUMI_CLI=$cli" "PULUMI_SKIP_UPDATE_CHECK=true" >> "$GITHUB_ENV"
+    - shell: bash
+      run: |
+        set -euo pipefail
+        umask 077
+        provider="$RUNNER_TEMP/pulumi-import-fixture/pulumi-resource-sub2api-host"
+        mkdir -p "$(dirname "$provider")"
+        go build -o "$provider" ./cmd/pulumi-resource-sub2api-host
+        printf '%s\n' "PROVIDER_IMPORT_BINARY=$provider" >> "$GITHUB_ENV"

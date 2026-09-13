@@ -1,33 +1,33 @@
 package main
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 )
 
 const pulumiPlanCanary = "PULUMI_PLAN_SECRET_CANARY"
 
-func TestParsePulumiPlanBuildsOwnedArguments(t *testing.T) {
-	configPath := "/workspace/environments/production/Pulumi.production.yaml"
+func TestParsePulumiPlanMapsSupportedOptions(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		argv []string
-		want []string
+		operation string
+		message string
+		approve bool
 	}{
-		{"preview", []string{"pulumi", "production", "preview"}, []string{"preview", "--stack=production", "--config-file=" + configPath}},
-		{"up", []string{"pulumi", "production", "up", "--yes", "--message=release candidate"}, []string{"up", "--stack=production", "--config-file=" + configPath, "--yes", "--message=release candidate"}},
-		{"refresh", []string{"pulumi", "staging-2", "refresh", "-y"}, []string{"refresh", "--stack=staging-2", "--config-file=" + configPath, "-y"}},
-		{"destroy", []string{"pulumi", "production", "destroy", "--yes"}, []string{"destroy", "--stack=production", "--config-file=" + configPath, "--yes"}},
-		{"managed Host import", []string{"pulumi", "production", "import", "sub2api-host:index:Host", "host-edge", "edge", "--yes", "--message=adopt"}, []string{"up", "--stack=production", "--config-file=" + configPath, "--yes", "--message=adopt"}},
+		{"preview", []string{"pulumi", "production", "preview"}, "preview", "", false},
+		{"up", []string{"pulumi", "production", "up", "--yes", "--message=release candidate"}, "up", "release candidate", true},
+		{"refresh", []string{"pulumi", "staging-2", "refresh", "-y"}, "refresh", "", true},
+		{"destroy", []string{"pulumi", "production", "destroy", "--yes"}, "destroy", "", true},
+		{"managed Host import", []string{"pulumi", "production", "import", "sub2api-host:index:Host", "host-edge", "edge", "--yes", "--message=adopt"}, "up", "adopt", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			plan, err := parsePulumiPlan(test.argv)
 			if err != nil {
 				t.Fatalf("parsePulumiPlan(%q) error = %v", test.argv, err)
 			}
-			if got := plan.arguments(configPath); !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("arguments() = %#v, want %#v", got, test.want)
+			if plan.operation != test.operation || plan.options.message != test.message || plan.options.approve != test.approve {
+				t.Fatalf("plan = %#v, want operation=%q message=%q approve=%t", plan, test.operation, test.message, test.approve)
 			}
 		})
 	}
@@ -183,7 +183,6 @@ func TestParsePulumiPlanAcceptsAndRejectsImportShapes(t *testing.T) {
 }
 
 func TestParsePulumiPlanAcceptsDocumentedRemovalTargets(t *testing.T) {
-	configPath := "/workspace/environments/production/Pulumi.production.yaml"
 	argv := []string{
 		"pulumi", "production", "up",
 		"--target=urn:pulumi:production::sub2api-environment::cloudflare:index/dnsRecord:DnsRecord::dns-api-api-one-A",
@@ -195,15 +194,8 @@ func TestParsePulumiPlanAcceptsDocumentedRemovalTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsePulumiPlan(%q) error = %v", argv, err)
 	}
-	want := []string{
-		"up", "--stack=production", "--config-file=" + configPath,
-		"--target=urn:pulumi:production::sub2api-environment::cloudflare:index/dnsRecord:DnsRecord::dns-api-api-one-A",
-		"--target=urn:pulumi:production::sub2api-environment::sub2api-host:index:Host::host-Server_Key.with-many-segments-and-a-long-server-key-0123456789",
-		"--target=urn:pulumi:production::sub2api-environment::cloudflare:index/dnsRecord:DnsRecord::dns-app-with-thirty-one-character-id-Server_Key.with-many-segments-and-a-long-server-key-0123456789-AAAA",
-		"--target=urn:pulumi:production::sub2api-environment::upstash:index/redisDatabase:RedisDatabase::primary",
-	}
-	if got := plan.arguments(configPath); !reflect.DeepEqual(got, want) {
-		t.Fatalf("arguments() = %#v, want %#v", got, want)
+	if len(plan.options.targets) != 4 {
+		t.Fatalf("target count = %d, want 4", len(plan.options.targets))
 	}
 	for _, argv := range [][]string{
 		{"pulumi", "production", "destroy", "--target=urn:pulumi:production::sub2api-environment::sub2api-host:index:Host::host-api-two"},
