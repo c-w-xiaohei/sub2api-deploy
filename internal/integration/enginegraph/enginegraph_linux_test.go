@@ -937,7 +937,7 @@ func (h *engineGraphHarness) updateTargets(t *testing.T, configName, secretsName
 		options = append(options, optup.Target(urns))
 	}
 	_, updateErr := h.stack.Up(updateCtx, options...)
-	exportCtx, exportCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	exportCtx, exportCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer exportCancel()
 	snapshot, snapshotErr := h.exportCheckpoint(exportCtx)
 	if snapshotErr != nil { t.Fatalf("load exported checkpoint: %v", snapshotErr) }
@@ -991,7 +991,7 @@ func configureRevisionKey(ctx context.Context, workspace auto.Workspace, stackNa
 }
 
 func (h *engineGraphHarness) exportCheckpoint(ctx context.Context) (*automationtest.Checkpoint, error) {
-	export, err := h.stack.Export(ctx)
+	export, err := automationtest.ValidatedExport(ctx, h.stack)
 	if err != nil { return nil, err }
 	return automationtest.DecodeCheckpoint(export)
 }

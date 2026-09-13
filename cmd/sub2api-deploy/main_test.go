@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,14 +257,8 @@ func TestPublicCLIDeniedDangerousUpdateLeavesRemoteAndStateUntouched(t *testing.
 		t.Fatal(err)
 	}
 	prompt := task2WaitForPrompt(pty, 10*time.Second)
-	if differences := task2PromptDifferences(prompt, task2ApprovalSubject(task2Revision("db.example"))); len(differences) != 0 {
-		stages := []string{}
-		for _, name := range []string{"pulumi-started", "provider-rpc", "trace", "failure", "unexpected-action", "denied"} {
-			if _, err := os.Stat(filepath.Join(evidence, name)); err == nil {
-				stages = append(stages, name)
-			}
-		}
-		t.Fatalf("approval prompt subject differs at fields %v after stages %v", differences, stages)
+	if !task2PromptMatches(prompt, task2ApprovalSubject(task2Revision("db.example"))) {
+		t.Fatal("approval prompt did not contain the exact dangerous data-link subject")
 	}
 	if _, err := master.Write([]byte("NO\n")); err != nil {
 		t.Fatal(err)
@@ -783,36 +776,9 @@ func task2ArgumentValue(args []string, name string) string {
 	return ""
 }
 
-func task2PromptDifferences(prompt string, want hostcontract.ApprovalSubject) []string {
-	const prefix = "subject-base64url: "
-	start := strings.Index(prompt, prefix)
-	if start < 0 {
-		return []string{"prompt"}
-	}
-	encoded := strings.TrimSpace(strings.SplitN(prompt[start+len(prefix):], "\n", 2)[0])
-	canonical, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil {
-		return []string{"encoding"}
-	}
-	var got hostcontract.ApprovalSubject
-	if json.Unmarshal(canonical, &got) != nil {
-		return []string{"json"}
-	}
-	differences := []string{}
-	for name, equal := range map[string]bool{
-		"kind": got.Kind == want.Kind, "environment": got.Environment == want.Environment,
-		"resource": got.Resource == want.Resource, "appId": got.AppID == want.AppID,
-		"dataKind": got.DataKind == want.DataKind, "oldData": got.OldData == want.OldData,
-		"newData": got.NewData == want.NewData, "machine": got.Machine == want.Machine,
-		"ownership": got.Ownership == want.Ownership, "targetRevision": got.TargetRevision == want.TargetRevision,
-		"preserveData": got.PreserveData == want.PreserveData,
-	} {
-		if !equal {
-			differences = append(differences, name)
-		}
-	}
-	slices.Sort(differences)
-	return differences
+func task2PromptMatches(prompt string, want hostcontract.ApprovalSubject) bool {
+	canonical, err := json.Marshal(want)
+	return err == nil && strings.Contains(prompt, "subject-base64url: "+base64.RawURLEncoding.EncodeToString(canonical))
 }
 
 func task2AssertRedacted(t *testing.T, values ...string) {

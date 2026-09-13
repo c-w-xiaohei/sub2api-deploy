@@ -131,9 +131,79 @@ func DebugProviders(ports map[string]int) string {
 	return strings.Join(providers, ",")
 }
 
+// ValidatedExport exports a stack and uses the public Automation API to import
+// the unmodified payload into a disposable same-name file-backend stack. The
+// import runs Pulumi's checkpoint integrity validation without exposing the
+// payload.
+func ValidatedExport(ctx context.Context, source auto.Stack) (apitype.UntypedDeployment, error) {
+	exported, err := source.Export(ctx)
+	if err != nil {
+		return exported, err
+	}
+
+	sourceWorkspace := source.Workspace()
+	stackName := source.Name()
+	project, err := sourceWorkspace.ProjectSettings(ctx)
+	if err != nil {
+		return exported, err
+	}
+	settings, err := sourceWorkspace.StackSettings(ctx, stackName)
+	if err != nil {
+		return exported, err
+	}
+
+	root, err := os.MkdirTemp("", "sub2api-checkpoint-validation-")
+	if err != nil {
+		return exported, err
+	}
+	defer os.RemoveAll(root)
+
+	for _, directory := range []string{"workdir", "backend", "pulumi-home"} {
+		if err := os.Mkdir(filepath.Join(root, directory), 0o700); err != nil {
+			return exported, err
+		}
+	}
+
+	sourceEnv := sourceWorkspace.GetEnvVars()
+	env := make(map[string]string, len(sourceEnv)+2)
+	for name, value := range sourceEnv {
+		env[name] = value
+	}
+	env["PULUMI_BACKEND_URL"] = "file://" + filepath.ToSlash(filepath.Join(root, "backend"))
+	env["PULUMI_SKIP_UPDATE_CHECK"] = "true"
+
+	options := []auto.LocalWorkspaceOption{
+		auto.WorkDir(filepath.Join(root, "workdir")),
+		auto.Pulumi(sourceWorkspace.PulumiCommand()),
+		auto.PulumiHome(filepath.Join(root, "pulumi-home")),
+		auto.Project(*project),
+		auto.EnvVars(env),
+	}
+
+	secretsProvider := settings.SecretsProvider
+	if secretsProvider == "" && settings.EncryptionSalt != "" {
+		secretsProvider = "passphrase"
+	}
+	if secretsProvider != "" {
+		options = append(options, auto.SecretsProvider(secretsProvider))
+	}
+
+	disposableWorkspace, err := auto.NewLocalWorkspace(ctx, options...)
+	if err != nil {
+		return exported, err
+	}
+	disposableStack, err := auto.NewStack(ctx, stackName, disposableWorkspace)
+	if err != nil {
+		return exported, err
+	}
+	if err := disposableStack.Import(ctx, exported); err != nil {
+		return exported, err
+	}
+	return exported, nil
+}
+
 // DecodeExport converts the public Automation export payload into the public
-// apitype deployment shape. It intentionally does not validate Pulumi's
-// internal checkpoint integrity algorithm.
+// apitype deployment shape after ValidatedExport has checked its integrity.
 func DecodeExport(export apitype.UntypedDeployment) (*apitype.DeploymentV3, error) {
 	if len(bytes.TrimSpace(export.Deployment)) == 0 || bytes.Equal(bytes.TrimSpace(export.Deployment), []byte("null")) {
 		return &apitype.DeploymentV3{}, nil
