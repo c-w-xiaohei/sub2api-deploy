@@ -259,7 +259,13 @@ func TestPublicCLIDeniedDangerousUpdateLeavesRemoteAndStateUntouched(t *testing.
 	}
 	prompt := task2WaitForPrompt(pty, 10*time.Second)
 	if differences := task2PromptDifferences(prompt, task2ApprovalSubject(task2Revision("db.example"))); len(differences) != 0 {
-		t.Fatalf("approval prompt subject differs at fields %v", differences)
+		stages := []string{}
+		for _, name := range []string{"pulumi-started", "provider-rpc", "trace", "failure", "unexpected-action", "denied"} {
+			if _, err := os.Stat(filepath.Join(evidence, name)); err == nil {
+				stages = append(stages, name)
+			}
+		}
+		t.Fatalf("approval prompt subject differs at fields %v after stages %v", differences, stages)
 	}
 	if _, err := master.Write([]byte("NO\n")); err != nil {
 		t.Fatal(err)
