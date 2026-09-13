@@ -298,7 +298,9 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (apitype.Untyped
 	} else {
 		_, err = h.stack.Up(t.Context(), optup.Parallel(1), optup.Color(string(colors.Never)), optup.SuppressProgress(), optup.SuppressOutputs())
 	}
-	state, exportErr := h.stack.Export(t.Context())
+	exportCtx, exportCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer exportCancel()
+	state, exportErr := h.stack.Export(exportCtx)
 	if err == nil { err = exportErr }
 	return state, err
 }
