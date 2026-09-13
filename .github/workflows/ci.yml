@@ -36,6 +36,32 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: ./.github/actions/setup-pulumi-test
+      - name: Resolve SDK module graph in CI
+        run: go mod tidy
+      - name: Upload resolved SDK module graph
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-module-graph-${{ env.TARGET_SHA }}
+          path: |
+            go.mod
+            go.sum
+          if-no-files-found: error
+      - name: Require committed SDK module graph
+        run: git diff --exit-code -- go.mod go.sum
+      - name: Reject embedded Engine in build and test dependencies
+        run: |
+          set -euo pipefail
+          umask 077
+          deps="$(mktemp)"; errors="$(mktemp)"
+          trap 'rm -f "$deps" "$errors"' EXIT
+          if ! go list -deps -test ./cmd/... ./internal/... > "$deps" 2> "$errors"; then
+            printf '%s\n' 'Pulumi dependency inspection failed'
+            exit 1
+          fi
+          if grep -qE '^github\.com/pulumi/pulumi/pkg/v3/(engine|backend|resource/deploy)(/|$)' "$deps"; then
+            printf '%s\n' 'Embedded Pulumi Engine dependency remains'
+            exit 1
+          fi
       - name: Verify contracts and repository
         run: |
           npm ci
@@ -56,7 +82,7 @@ jobs:
         run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
-      - run: go mod verify
+      - run: go mod download && go mod verify
       - uses: ./.github/actions/setup-pulumi-test
       - name: Test Host controller and record required evidence
         run: |
@@ -114,7 +140,7 @@ jobs:
         run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
-      - run: go mod verify
+      - run: go mod download && go mod verify
       - name: Set isolated Engine workspace
         run: |
           printf '%s\n' "PULUMI_HOME=$RUNNER_TEMP/engine-graph-pulumi-home-$TARGET_SHA" "PULUMI_PLUGIN_PATH=$RUNNER_TEMP/engine-graph-pulumi-home-$TARGET_SHA/plugins" >> "$GITHUB_ENV"
@@ -135,7 +161,6 @@ jobs:
           chmod 0755 "$target"
           test "$("$target" version)" = "v3.256.0"
           printf '%s\n' "ENGINE_GRAPH_PULUMI_CLI=$target" >> "$GITHUB_ENV"
-          # TODO(Task 3): the migrated external Engine harness must invoke this absolute CLI and use PULUMI_PLUGIN_PATH with this runner, sampler, schema, and label; only implementation changes to external-engine.
       - name: Vet Engine Graph
         run: go vet ./internal/integration/enginegraph
       - name: Record required sanitized Engine Graph evidence
@@ -146,7 +171,7 @@ jobs:
           trace="$RUNNER_TEMP/engine-graph-trace-${TARGET_SHA}"; mkdir -m 0700 "$trace"; mkdir -m 0700 "$safe"
           test -x "$ENGINE_GRAPH_PULUMI_CLI"
           test "$("$ENGINE_GRAPH_PULUMI_CLI" version)" = "v3.256.0"
-          # This is the before-migration embedded-engine baseline; it does not execute the provisioned CLI.
+          # The SDK test harness invokes the pinned external CLI. GNU time reports maximum single-process RSS, not aggregate build memory.
           start_ms="$(date +%s%3N)"
           set +e
           /usr/bin/time -f '%M' -o "$rss" env ENGINE_GRAPH_TRACE_DIR="$trace" go test -json -count=1 -run "$tests" ./internal/integration/enginegraph > "$raw" 2> "$stderr"
@@ -165,9 +190,9 @@ jobs:
           NODE
           test ! -s "$stderr"
           RESOURCE_LABEL='engine-graph' RESOURCE_ELAPSED_MS="$elapsed_ms" node - "$rss" "$safe/engine-graph-resource.json" <<'NODE'
-          const fs=require('node:fs'),[rss,output]=process.argv.slice(2),peakRSSKiB=Number(fs.readFileSync(rss,'utf8').trim()),record={schema:'engine-graph-resource-v1',implementation:'embedded-engine',label:process.env.RESOURCE_LABEL,elapsedMilliseconds:Number(process.env.RESOURCE_ELAPSED_MS),peakRSSKiB};
+          const fs=require('node:fs'),[rss,output]=process.argv.slice(2),peakRSSKiB=Number(fs.readFileSync(rss,'utf8').trim()),record={schema:'engine-graph-resource-v1',implementation:'external-engine',label:process.env.RESOURCE_LABEL,elapsedMilliseconds:Number(process.env.RESOURCE_ELAPSED_MS),peakRSSKiB};
           if(!Number.isSafeInteger(record.elapsedMilliseconds)||record.elapsedMilliseconds<0||!Number.isSafeInteger(record.peakRSSKiB)||record.peakRSSKiB<0)throw Error('invalid resource record measurements');
-          const keys=['elapsedMilliseconds','implementation','label','peakRSSKiB','schema'];if(JSON.stringify(Object.keys(record).sort())!==JSON.stringify(keys)||record.schema!=='engine-graph-resource-v1'||record.implementation!=='embedded-engine'||record.label!=='engine-graph')throw Error('invalid resource record schema');
+          const keys=['elapsedMilliseconds','implementation','label','peakRSSKiB','schema'];if(JSON.stringify(Object.keys(record).sort())!==JSON.stringify(keys)||record.schema!=='engine-graph-resource-v1'||record.implementation!=='external-engine'||record.label!=='engine-graph')throw Error('invalid resource record schema');
           const text=JSON.stringify(record)+'\n';if(/AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|authorization|argv|env|log|state|secret/i.test(text))throw Error('resource record is not sanitized');fs.writeFileSync(output,text,{mode:0o600});
           NODE
           test "$status" -eq 0
@@ -204,7 +229,7 @@ jobs:
         run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
-      - run: go mod verify
+      - run: go mod download && go mod verify
       - name: Test Provider SSH and record required evidence
         run: |
           set -euo pipefail
@@ -252,7 +277,7 @@ jobs:
         run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
-      - run: go mod verify
+      - run: go mod download && go mod verify
       - name: Run normal and race Provider Runtime gates
         run: |
           set -euo pipefail
@@ -542,7 +567,7 @@ jobs:
         run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
-      - run: go mod verify
+      - run: go mod download && go mod verify
       - uses: ./.github/actions/setup-pulumi-test
       - name: Test Provider Import and record required evidence
         run: |

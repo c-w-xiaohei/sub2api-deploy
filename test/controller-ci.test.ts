@@ -163,7 +163,7 @@ describe("Task4 CI contracts", () => {
     expect(workflow).toContain("engine-graph-evidence-${{ env.TARGET_SHA }}");
   });
 
-  it("pins an isolated official Pulumi CLI and schema-validated embedded Engine baseline record", () => {
+  it("pins an isolated official Pulumi CLI and schema-validated external Engine resource record", () => {
     const parsedWorkflow = parseYAML(workflow) as {
       jobs: {
         "engine-graph": {
@@ -186,14 +186,13 @@ describe("Task4 CI contracts", () => {
     expect(install?.with).not.toHaveProperty("command");
     expect(setup?.run).toContain('test "$("$source" version)" = "v3.256.0"');
     expect(setup?.run).toContain('"ENGINE_GRAPH_PULUMI_CLI=$target" >> "$GITHUB_ENV"');
-    expect(setup?.run).toContain("TODO(Task 3): the migrated external Engine harness must invoke this absolute CLI and use PULUMI_PLUGIN_PATH with this runner, sampler, schema, and label; only implementation changes to external-engine.");
     expect(setup?.run).not.toMatch(/curl|wget/);
     expect(evidence?.run).toContain('"$ENGINE_GRAPH_PULUMI_CLI" version');
-    expect(evidence?.run).toContain("This is the before-migration embedded-engine baseline; it does not execute the provisioned CLI.");
+    expect(evidence?.run).toContain("maximum single-process RSS, not aggregate build memory");
     expect(evidence?.run).toContain('env ENGINE_GRAPH_TRACE_DIR="$trace" go test -json -count=1 -run "$tests" ./internal/integration/enginegraph');
     expect(evidence?.run).not.toContain("ENGINE_GRAPH_TEST_PROVIDER_DIR");
     expect(evidence?.run).toContain("/usr/bin/time -f '%M' -o \"$rss\"");
-    expect(evidence?.run).toContain("implementation:'embedded-engine'");
+    expect(evidence?.run).toContain("implementation:'external-engine'");
     expect(evidence?.run).toContain("schema:'engine-graph-resource-v1'");
     expect(evidence?.run).toContain("resource record is not sanitized");
     expect(evidence?.run).toContain("invalid resource record schema");

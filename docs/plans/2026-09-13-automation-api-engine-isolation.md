@@ -16,7 +16,7 @@
 - Use public Automation API and SDK interfaces where available. Keep direct subprocess management only in the `auto.PulumiCommand` adapter required to attach the custom Provider and its FD3 approval channel.
 - Do not run local Go builds, tests, `go list`, vet, formatter, Pulumi, Docker, package manager, compiler, or linker commands. Static inspection, `git diff --check`, and remote GitHub Actions are permitted.
 - CI is the sole behavior and resource verification environment. Do not permit local build/test use until an exact-SHA CI comparison records lower peak RSS and acceptable duration for the migrated heavy gates.
-- Measure the same commands on a fixed GitHub runner image and Go/Pulumi version. Record each command's elapsed duration and maximum resident set size in sanitized CI evidence; do not upload raw logs, environment, argv, frame, state, SQL, credentials, or runtime diagnostics.
+- Measure the same commands on a fixed GitHub runner image and Go/Pulumi version. The initial GNU time record is a warm-cache, maximum-single-process RSS observation, not aggregate build memory. A separate paired cold-cache compile/link comparison measures cgroup v2 memory peak (including accounted page cache), fixed concurrency, and duration for baseline and candidate on the same runner. Do not upload raw logs, environment, argv, frame, state, SQL, credentials, or runtime diagnostics.
 
 ## Tasks
 
@@ -41,7 +41,7 @@
 **Depends on:** Task 2 because tests consume the pinned CLI, provider discovery, and resource evidence contract.
 **Consumes / Produces:** Consumes Automation lifecycle/event/export interfaces and existing fixture topology. Produces external test Provider processes, a sanitized trace IPC mechanism, normalized checkpoint assertions, and a command resource sampler usable by Engine Graph and Provider Import.
 **Preserve:** Test provider behavior remains limited to the existing fake semantics; it never becomes production code. Event/checkpoint adapters preserve dependency, ordering, protected/state, import, secret, and retry assertions without importing Engine/backend/deploy types.
-**Requirements:** Test providers run as independent Pulumi Provider RPC processes. Their traces use fixed safe event grammar, mode-restricted files or inherited local IPC, and never contain targets, inputs, secrets, state, raw provider messages, or arbitrary error text. The sampler records only command label, elapsed milliseconds, and peak RSS KiB.
+**Requirements:** The Engine runs in the official CLI process. Test providers expose the SDK Provider RPC interface, either from a separate helper process or from a test-owned loopback gRPC server attached to that external Engine. Do not add a helper executable merely to separate a fake provider from the test harness. Their traces use fixed safe event grammar and never contain targets, inputs, secrets, state, raw provider messages, or arbitrary error text. The initial sampler records only command label, elapsed milliseconds, and peak RSS KiB; paired build measurements distinguish cgroup memory from RSS.
 **Acceptance:** One converted Engine Graph scenario proves real external CLI Engine scheduling and exports equivalent normalized checkpoint/event/trace evidence. The CI artifact contains an allowlisted resource record for the command.
 
 ### Task 4: Migrate Engine Graph And Provider Import
