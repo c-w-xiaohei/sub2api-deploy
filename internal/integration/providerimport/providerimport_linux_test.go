@@ -341,6 +341,7 @@ type providerRecorder struct {
 	mu       sync.Mutex
 	calls    []string
 	inputs   resource.PropertyMap
+	diffKeys []string
 }
 
 func (p *providerRecorder) record(call string) {
@@ -353,6 +354,7 @@ func (p *providerRecorder) reset() {
 	defer p.mu.Unlock()
 	p.calls = nil
 	p.inputs = nil
+	p.diffKeys = nil
 }
 func (p *providerRecorder) snapshot() []string {
 	p.mu.Lock()
@@ -380,7 +382,18 @@ func (p *providerRecorder) Check(ctx context.Context, req *pulumirpc.CheckReques
 }
 func (p *providerRecorder) Diff(ctx context.Context, req *pulumirpc.DiffRequest) (*pulumirpc.DiffResponse, error) {
 	p.record("Diff")
-	return p.upstream.Diff(ctx, req)
+	response, err := p.upstream.Diff(ctx, req)
+	if response != nil {
+		keys := make([]string, 0, len(response.DetailedDiff))
+		for key := range response.DetailedDiff {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		p.mu.Lock()
+		p.diffKeys = keys
+		p.mu.Unlock()
+	}
+	return response, err
 }
 func (p *providerRecorder) Read(ctx context.Context, req *pulumirpc.ReadRequest) (*pulumirpc.ReadResponse, error) {
 	p.record("Read")
@@ -1061,6 +1074,10 @@ func assertCanonicalHostInputs(t *testing.T, imported, programInputs resource.Pr
 func (h *harness) assertMeasuredCalls(t *testing.T, want []string) {
 	got := h.provider.recorder.snapshot()
 	if !reflect.DeepEqual(got, want) {
+		h.provider.recorder.mu.Lock()
+		diffKeys := append([]string(nil), h.provider.recorder.diffKeys...)
+		h.provider.recorder.mu.Unlock()
+		t.Logf("external Engine import diff fields: %v", diffKeys)
 		t.Fatalf("provider calls = %v, want %v", got, want)
 	}
 }
