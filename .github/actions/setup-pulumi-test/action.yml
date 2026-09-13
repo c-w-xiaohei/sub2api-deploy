@@ -1,0 +1,14 @@
+name: Pinned external Pulumi test engine
+description: Install the official CLI for SDK-driven integration tests
+runs:
+  using: composite
+  steps:
+    - uses: pulumi/actions@8582a9e8cc630786854029b4e09281acd6794b58
+      with:
+        pulumi-version: "3.256.0"
+    - shell: bash
+      run: |
+        set -euo pipefail
+        cli="$(command -v pulumi)"
+        test "$("$cli" version 2>/dev/null)" = "v3.256.0"
+        printf '%s\n' "EXTERNAL_PULUMI_CLI=$cli" "ENGINE_GRAPH_PULUMI_CLI=$cli" "PULUMI_SKIP_UPDATE_CHECK=true" >> "$GITHUB_ENV"

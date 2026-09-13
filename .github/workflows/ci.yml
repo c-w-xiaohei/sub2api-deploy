@@ -35,6 +35,7 @@ jobs:
         with: { go-version: "1.25.11", cache: true }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
+      - uses: ./.github/actions/setup-pulumi-test
       - name: Verify contracts and repository
         run: |
           npm ci
@@ -56,6 +57,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
       - run: go mod verify
+      - uses: ./.github/actions/setup-pulumi-test
       - name: Test Host controller and record required evidence
         run: |
           set -euo pipefail
@@ -541,6 +543,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.25.11", cache: true }
       - run: go mod verify
+      - uses: ./.github/actions/setup-pulumi-test
       - name: Test Provider Import and record required evidence
         run: |
           set -euo pipefail
