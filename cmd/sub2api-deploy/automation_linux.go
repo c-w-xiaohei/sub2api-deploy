@@ -12,13 +12,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/blang/semver"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
-	"gopkg.in/yaml.v3"
 )
 
 // attachedPulumiCommand is the Automation API boundary. The Engine remains in
@@ -28,6 +28,7 @@ type attachedPulumiCommand struct {
 	env     []string
 	decide  func(context.Context, hostcontract.ApprovalSubject) bool
 	version semver.Version
+	lifecycleSucceeded *atomic.Bool
 }
 
 var _ auto.PulumiCommand = attachedPulumiCommand{}
@@ -39,7 +40,7 @@ func newAttachedPulumiCommand(ctx context.Context, paths attachedExecutables, en
 	if err != nil {
 		return attachedPulumiCommand{}, errInvalidPulumiInputs
 	}
-	return attachedPulumiCommand{paths: paths, env: append([]string(nil), env...), decide: decide, version: version}, nil
+	return attachedPulumiCommand{paths: paths, env: append([]string(nil), env...), decide: decide, version: version, lifecycleSucceeded: &atomic.Bool{}}, nil
 }
 
 func (c attachedPulumiCommand) Version() semver.Version { return c.version }
@@ -52,12 +53,26 @@ func (c attachedPulumiCommand) Run(ctx context.Context, workdir string, stdin io
 	args = attachedNonInteractiveArgs(args)
 
 	var err error
-	if attachedLifecycle(args) {
+	lifecycle := attachedLifecycle(args)
+	if lifecycle {
 		err = runAttachedCommand(ctx, c.paths, workdir, stdin, args, env, io.MultiWriter(outputs...), io.MultiWriter(errorsOut...), c.decide)
 	} else {
 		err = runPulumiCommand(ctx, c.paths.pulumi, workdir, stdin, args, env, io.MultiWriter(outputs...), io.MultiWriter(errorsOut...))
 	}
+	if lifecycle && err == nil && c.lifecycleSucceeded != nil {
+		c.lifecycleSucceeded.Store(true)
+	}
 	return stdout.String(), stderr.String(), pulumiExitCode(err), err
+}
+
+func (c attachedPulumiCommand) beginLifecycle() {
+	if c.lifecycleSucceeded != nil {
+		c.lifecycleSucceeded.Store(false)
+	}
+}
+
+func (c attachedPulumiCommand) completedLifecycle() bool {
+	return c.lifecycleSucceeded != nil && c.lifecycleSucceeded.Load()
 }
 
 func attachedNonInteractiveArgs(args []string) []string {
@@ -208,72 +223,9 @@ func pulumiExitCode(err error) int {
 	return -2 // Automation API's unknownErrorCode sentinel.
 }
 
-func newStagedPulumiWorkspace(ctx context.Context, stagedPath, stackName string, projectYAML []byte, command attachedPulumiCommand) (auto.Workspace, error) {
-	if ctx == nil || stackName == "" || filepath.Base(stagedPath) != "Pulumi."+stackName+".yaml" || len(projectYAML) == 0 {
+func newStagedPulumiWorkspace(ctx context.Context, workdir, stagedPath, stackName string, command attachedPulumiCommand) (auto.Workspace, error) {
+	if ctx == nil || !filepath.IsAbs(workdir) || stackName == "" || filepath.Base(stagedPath) != "Pulumi."+stackName+".yaml" {
 		return nil, errInvalidStagedStack
 	}
-	workspaceDir := filepath.Dir(stagedPath)
-	projectPath := filepath.Join(workspaceDir, "Pulumi.yaml")
-	project, err := os.OpenFile(projectPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, errInvalidStagedStack
-	}
-	if writeStagedStack(project, projectYAML) != nil || project.Sync() != nil || project.Close() != nil {
-		_ = project.Close()
-		return nil, errInvalidStagedStack
-	}
-	return auto.NewLocalWorkspace(ctx, auto.WorkDir(workspaceDir), auto.Pulumi(command))
-}
-
-func stagedProjectYAML(projectYAML []byte, workdir string) ([]byte, error) {
-	if !validPulumiYAMLBytes(projectYAML) || !filepath.IsAbs(workdir) {
-		return nil, errInvalidStagedStack
-	}
-	var document yaml.Node
-	decoder := yaml.NewDecoder(bytes.NewReader(projectYAML))
-	if err := decoder.Decode(&document); err != nil || !validPulumiYAMLNode(&document) || document.Kind != yaml.DocumentNode || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil, errInvalidStagedStack
-	}
-	var trailing yaml.Node
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, errInvalidStagedStack
-	}
-
-	runtime := yamlMappingValue(document.Content[0], "runtime")
-	if runtime == nil {
-		return nil, errInvalidStagedStack
-	}
-	if runtime.Kind == yaml.ScalarNode && runtime.Tag == "!!str" && runtime.Value == "go" {
-		return projectYAML, nil
-	}
-	if runtime.Kind != yaml.MappingNode {
-		return nil, errInvalidStagedStack
-	}
-	options := yamlMappingValue(runtime, "options")
-	if options == nil || options.Kind != yaml.MappingNode {
-		return nil, errInvalidStagedStack
-	}
-	binary := yamlMappingValue(options, "binary")
-	if binary == nil || binary.Kind != yaml.ScalarNode || binary.Tag != "!!str" || binary.Value != "./bin/pulumi-program" {
-		return nil, errInvalidStagedStack
-	}
-	binary.Value = filepath.Join(workdir, "bin", "pulumi-program")
-	var rendered bytes.Buffer
-	encoder := yaml.NewEncoder(&rendered)
-	if err := encoder.Encode(&document); err != nil || encoder.Close() != nil {
-		return nil, errInvalidStagedStack
-	}
-	return rendered.Bytes(), nil
-}
-
-func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
-	if mapping == nil || mapping.Kind != yaml.MappingNode {
-		return nil
-	}
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Kind == yaml.ScalarNode && mapping.Content[index].Value == key {
-			return mapping.Content[index+1]
-		}
-	}
-	return nil
+	return auto.NewLocalWorkspace(ctx, auto.WorkDir(workdir), auto.Pulumi(command))
 }

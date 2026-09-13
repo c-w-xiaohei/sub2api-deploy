@@ -152,21 +152,13 @@ func runPulumiPlan(ctx context.Context, plan pulumiPlan, workdir, cliPath string
 	if err != nil {
 		return errInvalidPulumiInputs
 	}
-	projectYAML, err := readBoundedPulumiFile(filepath.Join(resolvedWorkdir, "Pulumi.yaml"))
-	if err != nil {
-		return errInvalidPulumiInputs
-	}
-	projectYAML, err = stagedProjectYAML(projectYAML, resolvedWorkdir)
-	if err != nil {
-		return errInvalidPulumiInputs
-	}
 	err = withNamedStagedStack(ctx, project, filepath.Join(resolvedWorkdir, "Pulumi."+plan.environment+".yaml"), "Pulumi."+plan.environment+".yaml", passphrase, values, func(stagedPath string) error {
 		pulumiEnv := append(childEnv, "PULUMI_CONFIG_PASSPHRASE_FILE="+filepath.Join(filepath.Dir(stagedPath), "passphrase"))
 		command, err := newAttachedPulumiCommand(ctx, executables, pulumiEnv, decide)
 		if err != nil {
 			return errInvalidStagedStack
 		}
-		workspace, err := newStagedPulumiWorkspace(ctx, stagedPath, plan.environment, projectYAML, command)
+		workspace, err := newStagedPulumiWorkspace(ctx, resolvedWorkdir, stagedPath, plan.environment, command)
 		if err != nil {
 			return errInvalidStagedStack
 		}
@@ -206,15 +198,32 @@ func runPulumiStack(ctx context.Context, workspace auto.Workspace, plan pulumiPl
 	case "preview":
 		_, err = stack.Preview(ctx, pulumiPreviewOptions(options, stdout, stderr)...)
 	case "up":
+		beginPulumiLifecycle(workspace)
 		_, err = stack.Up(ctx, pulumiUpOptions(options, stdout, stderr)...)
 	case "refresh":
+		beginPulumiLifecycle(workspace)
 		_, err = stack.Refresh(ctx, pulumiRefreshOptions(options, stdout, stderr)...)
 	case "destroy":
+		beginPulumiLifecycle(workspace)
 		_, err = stack.Destroy(ctx, pulumiDestroyOptions(options, stdout, stderr)...)
 	default:
 		return errInvalidPulumiInputs
 	}
+	if err != nil && completedPulumiLifecycle(workspace) {
+		return nil
+	}
 	return publicPulumiError(ctx, workspace, err)
+}
+
+func beginPulumiLifecycle(workspace auto.Workspace) {
+	if command, ok := workspace.PulumiCommand().(attachedPulumiCommand); ok {
+		command.beginLifecycle()
+	}
+}
+
+func completedPulumiLifecycle(workspace auto.Workspace) bool {
+	command, ok := workspace.PulumiCommand().(attachedPulumiCommand)
+	return ok && command.completedLifecycle()
 }
 
 func publicPulumiError(ctx context.Context, workspace auto.Workspace, err error) error {

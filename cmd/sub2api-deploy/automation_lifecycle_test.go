@@ -11,7 +11,6 @@ import (
 
 	"github.com/blang/semver"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
-	"gopkg.in/yaml.v3"
 )
 
 func TestRunPulumiStackUsesAutomationLifecycle(t *testing.T) {
@@ -41,26 +40,6 @@ func TestRunPulumiStackUsesAutomationLifecycle(t *testing.T) {
 	}
 	if command.calls[2][0] != "stack" || command.calls[2][1] != "output" || command.calls[3][0] != "stack" || command.calls[3][1] != "output" || command.calls[4][0] != "stack" || command.calls[4][1] != "history" {
 		t.Fatalf("Automation API did not complete the update lifecycle: %#v", command.calls)
-	}
-}
-
-func TestStagedProjectYAMLUpdatesOnlyTheRuntimeBinaryNode(t *testing.T) {
-	project := []byte("# project comment\nname: sub2api-environment\nruntime:\n  name: go\n  options:\n    binary: ./bin/pulumi-program\n    note: 'binary: ./bin/pulumi-program'\n")
-	updated, err := stagedProjectYAML(project, "/private/workspace")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document yaml.Node
-	if err := yaml.Unmarshal(updated, &document); err != nil {
-		t.Fatal(err)
-	}
-	runtime := yamlMappingValue(document.Content[0], "runtime")
-	options := yamlMappingValue(runtime, "options")
-	if binary := yamlMappingValue(options, "binary"); binary == nil || binary.Value != "/private/workspace/bin/pulumi-program" {
-		t.Fatalf("runtime binary = %#v", binary)
-	}
-	if note := yamlMappingValue(options, "note"); note == nil || note.Value != "binary: ./bin/pulumi-program" {
-		t.Fatalf("unrelated note changed = %#v", note)
 	}
 }
 
