@@ -1199,7 +1199,7 @@ func assertMaintenanceCheckpoint(t *testing.T, snapshot *automationtest.Checkpoi
 				t.Fatalf("maintenance checkpoint Host %s has no target object", resource.URN)
 			}
 			apps, ok := target.ObjectValue()["apps"]
-			if !ok || !apps.IsArray() || len(apps.ArrayValue()) != 0 {
+			if ok && (!apps.IsArray() || len(apps.ArrayValue()) != 0) {
 				t.Fatalf("maintenance checkpoint Host %s still projects App runtime: %v", resource.URN, target)
 			}
 			hosts[string(resource.ID)] = true
@@ -1266,7 +1266,11 @@ func assertAppPlacementCheckpoint(t *testing.T, snapshot *automationtest.Checkpo
 			t.Fatalf("configured Host %s has no target object", state.URN)
 		}
 		apps, ok := target.ObjectValue()["apps"]
-		if !ok || !apps.IsArray() {
+		if !ok {
+			appsByHost[string(state.ID)] = nil
+			continue
+		}
+		if !apps.IsArray() {
 			t.Fatalf("configured Host %s has no target apps array", state.URN)
 		}
 		appInputs := make([]resource.PropertyMap, 0, len(apps.ArrayValue()))
@@ -1309,7 +1313,7 @@ func assertPlacementFailureCheckpoint(t *testing.T, snapshot *automationtest.Che
 				t.Fatalf("partial bravo Host %s has no target object", state.URN)
 			}
 			apps, ok := target.ObjectValue()["apps"]
-			if !ok || !apps.IsArray() || len(apps.ArrayValue()) != 0 {
+			if ok && (!apps.IsArray() || len(apps.ArrayValue()) != 0) {
 				t.Fatalf("partial bravo Host %s target Apps = %v, want none", state.URN, apps)
 			}
 			bravoHosts++
@@ -1452,6 +1456,9 @@ func assertHostAppCount(t *testing.T, snapshot *automationtest.Checkpoint, hostI
 			continue
 		}
 		apps, ok := propertyAt(state.Inputs, "target", "apps")
+		if !ok && want == 0 {
+			return
+		}
 		if !ok || !apps.IsArray() || len(apps.ArrayValue()) != want {
 			t.Fatalf("%s target Apps = %v, want %d", hostID, apps, want)
 		}
