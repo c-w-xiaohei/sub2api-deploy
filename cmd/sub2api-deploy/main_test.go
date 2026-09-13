@@ -394,7 +394,7 @@ func task2PulumiHelper() {
 }
 
 func task2HostInputs(endpoint string) property.Map {
-	identity := property.New(property.NewMap(map[string]property.Value{"kind": property.New("postgres"), "providerId": property.New("db-1"), "endpoint": property.New(endpoint), "port": property.New(5432.0), "database": property.New("app"), "tlsServerName": property.New(endpoint)}))
+	identity := property.New(property.NewMap(map[string]property.Value{"kind": property.New("postgres"), "providerId": property.New("db-1"), "endpoint": property.New(endpoint), "port": property.New(5432.0), "database": property.New("app"), "tlsMode": property.New("require"), "tlsServerName": property.New(endpoint)}))
 	link := property.New(property.NewMap(map[string]property.Value{"name": property.New("main"), "identity": identity}))
 	app := property.New(property.NewMap(map[string]property.Value{"id": property.New("api"), "image": property.New("api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "hostname": property.New("api.example"), "readinessPath": property.New("/ready"), "initialAdminEmail": property.New("admin@example.test"), "dataLinks": property.New(property.NewArray([]property.Value{link}))}))
 	return property.NewMap(map[string]property.Value{

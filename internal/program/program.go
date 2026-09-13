@@ -380,17 +380,22 @@ func hostTarget(config environment.Config, secrets environment.Secrets, release,
 			links = append(links, redisLink(app.Redis.Name, fmt.Sprint(app.Redis.Database), redis, server, config))
 		}
 		settings := copyStringMap(app.Environment)
-		apps = append(apps, pulumi.Map{
+		value := pulumi.Map{
 			"id":                pulumi.String(id),
 			"image":             pulumi.String(app.Image),
 			"hostname":          pulumi.String(app.Hostname),
 			"readinessPath":     pulumi.String(app.ReadinessPath),
-			"drainTimeout":      pulumi.String(app.DrainTimeout.String()),
 			"initialBootstrap":  pulumi.Bool(server == servers[0]),
 			"initialAdminEmail": pulumi.String(app.InitialAdminEmail),
-			"runtimeSettings":   stringMapInput(settings),
 			"dataLinks":         links,
-		})
+		}
+		if timeout := app.DrainTimeout.String(); timeout != "" {
+			value["drainTimeout"] = pulumi.String(timeout)
+		}
+		if len(settings) != 0 {
+			value["runtimeSettings"] = stringMapInput(settings)
+		}
+		apps = append(apps, value)
 	}
 	services := localServices(config, secrets, server)
 	return pulumi.Map{
@@ -512,7 +517,6 @@ func hostSecrets(config environment.Config, secrets environment.Secrets, server 
 		value := pulumi.Map{
 			"jwtSecret":          pulumi.String(appSecret.JWTSecret),
 			"totpEncryptionKey":  pulumi.String(appSecret.TOTPEncryptionKey),
-			"runtimeEnvironment": stringMapInput(copyStringMap(appSecret.Environment)),
 			"postgres": pulumi.Map{
 				"username": pulumi.String(appSecret.Postgres.Username),
 				"password": pulumi.String(appSecret.Postgres.Password),
@@ -521,6 +525,9 @@ func hostSecrets(config environment.Config, secrets environment.Secrets, server 
 				"username": pulumi.String(redisUsername),
 				"password": redisPassword,
 			},
+		}
+		if environment := copyStringMap(appSecret.Environment); len(environment) != 0 {
+			value["runtimeEnvironment"] = stringMapInput(environment)
 		}
 		if server == appPlacementOrder(config, app)[0] {
 			value["initialAdminPassword"] = pulumi.String(appSecret.InitialAdminPassword)
