@@ -291,9 +291,9 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (apitype.Untyped
 		return apitype.UntypedDeployment{}, err
 	}
 	if preview {
-		_, err = h.stack.Preview(t.Context(), optpreview.Parallel(1), optpreview.Color(colors.Never), optpreview.SuppressProgress(), optpreview.SuppressOutputs())
+		_, err = h.stack.Preview(t.Context(), optpreview.Parallel(1), optpreview.Color(string(colors.Never)), optpreview.SuppressProgress(), optpreview.SuppressOutputs())
 	} else {
-		_, err = h.stack.Up(t.Context(), optup.Parallel(1), optup.Color(colors.Never), optup.SuppressProgress(), optup.SuppressOutputs())
+		_, err = h.stack.Up(t.Context(), optup.Parallel(1), optup.Color(string(colors.Never)), optup.SuppressProgress(), optup.SuppressOutputs())
 	}
 	state, exportErr := h.stack.Export(t.Context())
 	if err == nil { err = exportErr }

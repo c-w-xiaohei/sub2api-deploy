@@ -867,6 +867,8 @@ printf closed > "$SUB2API_TEST_PROVIDER_CLOSED"
 `)
 	writeExecutable(t, filepath.Join(bin, "pulumi"), `#!/bin/sh
 trap 'printf interrupted > "$SUB2API_TEST_PULUMI_CLEANUP"; exit 0' INT TERM
+if [ "$1" = version ]; then printf '%s\n' v3.256.0; exit 0; fi
+if [ "$1" = --non-interactive ] && [ "$2" = stack ] && [ "$3" = select ]; then exit 0; fi
 for arg; do case "$arg" in --config-file=*) config=${arg#--config-file=};; esac; done
 [ -n "$config" ] || exit 91
 printf '%s\n' "${config%/*}" > "$SUB2API_TEST_STAGED_PARENT"
