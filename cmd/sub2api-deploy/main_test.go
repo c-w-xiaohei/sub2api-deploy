@@ -356,7 +356,7 @@ func task2PulumiHelper() {
 		}
 		os.Exit(0)
 	}
-	if args[1] != "up" || !task2HasArgument(args, "--yes") || !task2HasArgument(args, "--skip-preview") || !task2HasArgument(args, "--exec-kind=auto.local") || !task2HasArgument(args, "--stack=production") {
+	if args[1] != "up" || !task2HasArgument(args, "--yes") || !task2HasArgument(args, "--skip-preview") || !task2HasArgument(args, "--exec-kind=auto.local") || task2ArgumentValue(args, "--stack") != "production" {
 		task2HelperFailure(evidence, fmt.Errorf("unexpected Pulumi invocation"))
 	}
 	for _, arg := range args {
