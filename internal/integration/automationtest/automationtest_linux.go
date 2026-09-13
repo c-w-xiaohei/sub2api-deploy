@@ -242,7 +242,11 @@ func ExportPropertyMap(values map[string]any) (resource.PropertyMap, error) {
 	if values == nil {
 		return resource.PropertyMap{}, nil
 	}
-	raw, err := json.Marshal(values)
+	normalized, err := normalizeDeploymentValues(values)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -251,4 +255,42 @@ func ExportPropertyMap(values map[string]any) (resource.PropertyMap, error) {
 		return nil, err
 	}
 	return plugin.UnmarshalProperties(&encoded, plugin.MarshalOptions{KeepUnknowns: true, KeepResources: true, KeepSecrets: true, KeepOutputValues: true, PropagateNil: true})
+}
+
+func normalizeDeploymentValues(value any) (any, error) {
+	switch typed := value.(type) {
+	case []any:
+		result := make([]any, len(typed))
+		for i, item := range typed {
+			normalized, err := normalizeDeploymentValues(item)
+			if err != nil {
+				return nil, err
+			}
+			result[i] = normalized
+		}
+		return result, nil
+	case map[string]any:
+		if typed[resource.SigKey] == resource.SecretSig {
+			plaintext, ok := typed["plaintext"]
+			if !ok || typed["ciphertext"] != nil {
+				return nil, fmt.Errorf("exported secret is not plaintext")
+			}
+			normalized, err := normalizeDeploymentValues(plaintext)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{resource.SigKey: resource.SecretSig, "value": normalized}, nil
+		}
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			normalized, err := normalizeDeploymentValues(item)
+			if err != nil {
+				return nil, err
+			}
+			result[key] = normalized
+		}
+		return result, nil
+	default:
+		return value, nil
+	}
 }

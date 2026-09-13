@@ -978,11 +978,11 @@ func decodeJSONValue(value any, into any) bool {
 }
 func deploymentPropertyMap(t *testing.T, values map[string]any) resource.PropertyMap {
 	t.Helper()
-	object, err := structpb.NewStruct(values)
+	properties, err := automationtest.ExportPropertyMap(values)
 	if err != nil {
 		t.Fatal("decode deployment properties")
 	}
-	return unmarshalProperties(object)
+	return properties
 }
 func secretOnlyProperty(values resource.PropertyMap, canary string, secret bool) bool {
 	for _, value := range values {
