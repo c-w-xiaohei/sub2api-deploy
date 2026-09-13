@@ -98,6 +98,9 @@ func TestEngineImportPreviewIsNoOpOrAcceptedDiff(t *testing.T) {
 		h.mu.Lock()
 		calls := h.provider.recorder.snapshot()
 		h.mu.Unlock()
+		if len(calls) == 0 {
+			t.Log("external Engine import failure stage: stack-up-before-provider-calls")
+		}
 		t.Fatalf("external Engine import update failed after calls=%v", calls)
 	}
 	h.assertImportResult(t, imported)

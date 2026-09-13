@@ -1,7 +1,6 @@
 package program
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
 	"github.com/pulumi/pulumi-cloudflare/sdk/v6/go/cloudflare"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 	"github.com/upstash/pulumi-upstash/sdk/go/upstash"
 )
 
@@ -177,11 +175,7 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 			"secrets": hostSecrets(validated.Config, secrets, serverID, managed),
 		}
 		if serverID == importTarget {
-			id, importErr := hostImportID(ctx, key, inputs)
-			if importErr != nil {
-				return nil, importErr
-			}
-			options = append(options, pulumi.Import(id))
+			options = append(options, pulumi.Import(hostImportID(key, inputs)))
 		}
 		err := ctx.RegisterResource(hostresource.HostToken, "host-"+serverID, inputs, &host, options...)
 		if err != nil {
@@ -192,8 +186,8 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 	return hosts, nil
 }
 
-func hostImportID(ctx *pulumi.Context, key hostcontract.RevisionKey, inputs pulumi.Map) (pulumi.ID, error) {
-	id := pulumi.ToOutput(inputs).ApplyT(func(value any) (pulumi.ID, error) {
+func hostImportID(key hostcontract.RevisionKey, inputs pulumi.Map) pulumi.IDOutput {
+	return pulumi.ToOutput(inputs).ApplyT(func(value any) (pulumi.ID, error) {
 		payload, err := json.Marshal(value)
 		if err != nil {
 			return "", fmt.Errorf("invalid Host import inputs")
@@ -208,17 +202,6 @@ func hostImportID(ctx *pulumi.Context, key hostcontract.RevisionKey, inputs pulu
 		}
 		return pulumi.ID(token), nil
 	}).(pulumi.IDOutput)
-	// Import IDs are a synchronous SDK requirement. Do not await through the
-	// engine context, which may itself be waiting for this registration.
-	resolved, err := internals.UnsafeAwaitOutput(context.Background(), id)
-	if err != nil || !resolved.Known {
-		return "", fmt.Errorf("invalid Host import inputs")
-	}
-	value, ok := resolved.Value.(pulumi.ID)
-	if !ok {
-		return "", fmt.Errorf("invalid Host import inputs")
-	}
-	return value, nil
 }
 
 func preflight(config environment.ValidatedConfig, secrets environment.Secrets) error {

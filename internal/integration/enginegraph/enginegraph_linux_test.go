@@ -939,6 +939,9 @@ func (h *engineGraphHarness) updateTargets(t *testing.T, configName, secretsName
 	_, updateErr := h.stack.Up(updateCtx, options...)
 	snapshot, snapshotErr := h.exportCheckpoint(updateCtx)
 	if snapshotErr != nil { t.Fatalf("load exported checkpoint: %v", snapshotErr) }
+	if updateErr != nil && len(h.trace.snapshot()) == 0 {
+		t.Log("external Engine failure stage: stack-up-before-provider-effects")
+	}
 	return snapshot, updateErr
 }
 
