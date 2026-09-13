@@ -275,7 +275,15 @@ func normalizeDeploymentValues(value any) (any, error) {
 			if !ok {
 				return nil, fmt.Errorf("exported secret is not plaintext")
 			}
-			normalized, err := normalizeDeploymentValues(plaintext)
+			text, ok := plaintext.(string)
+			if !ok {
+				return nil, fmt.Errorf("exported secret plaintext is invalid")
+			}
+			var decoded any
+			if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+				return nil, fmt.Errorf("exported secret plaintext is invalid")
+			}
+			normalized, err := normalizeDeploymentValues(decoded)
 			if err != nil {
 				return nil, err
 			}

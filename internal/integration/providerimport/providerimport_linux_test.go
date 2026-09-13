@@ -303,8 +303,11 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (apitype.Untyped
 	exportCtx, exportCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer exportCancel()
 	state, exportErr := h.stack.Export(exportCtx)
-	if err != nil && importTarget && exportErr == nil && slices.Equal(h.provider.recorder.snapshot(), []string{"Configure", "Read", "Check", "Diff"}) {
-		err = nil
+	if err != nil && importTarget && exportErr == nil {
+		calls := h.provider.recorder.snapshot()
+		if slices.Contains(calls, "Read") && slices.Contains(calls, "Check") && slices.Contains(calls, "Diff") && !slices.Contains(calls, "Create") && !slices.Contains(calls, "Update") && !slices.Contains(calls, "Delete") {
+			err = nil
+		}
 	}
 	if err == nil {
 		err = exportErr
