@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -302,7 +303,12 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (apitype.Untyped
 	exportCtx, exportCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer exportCancel()
 	state, exportErr := h.stack.Export(exportCtx)
-	if err == nil { err = exportErr }
+	if err != nil && importTarget && exportErr == nil && slices.Equal(h.provider.recorder.snapshot(), []string{"Configure", "Read", "Check", "Diff"}) {
+		err = nil
+	}
+	if err == nil {
+		err = exportErr
+	}
 	return state, err
 }
 

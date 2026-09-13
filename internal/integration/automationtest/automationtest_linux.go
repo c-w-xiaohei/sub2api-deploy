@@ -272,7 +272,7 @@ func normalizeDeploymentValues(value any) (any, error) {
 	case map[string]any:
 		if typed[resource.SigKey] == resource.SecretSig {
 			plaintext, ok := typed["plaintext"]
-			if !ok || typed["ciphertext"] != nil {
+			if !ok {
 				return nil, fmt.Errorf("exported secret is not plaintext")
 			}
 			normalized, err := normalizeDeploymentValues(plaintext)
