@@ -952,14 +952,19 @@ func (h *harness) assertImportResult(t *testing.T, deployment apitype.UntypedDep
 	state := singleHost(t, deployment)
 	preseeded := h.preseededState
 	if string(state.URN) != hostURN() {
+		t.Log("external Engine import assertion stage: resource-identity")
 		t.Fatalf("Host URN = %q, want %q", state.URN, hostURN())
 	}
 	if !strings.HasPrefix(string(state.ImportID), "hit1:") || state.ID != resource.ID(h.stableID()) {
+		t.Log("external Engine import assertion stage: import-identity")
 		t.Fatalf("Host state did not preserve the import token")
 	}
+	t.Log("external Engine import assertion stage: canonical-inputs")
 	assertCanonicalHostInputs(t, deploymentPropertyMap(t, state.Inputs), h.productionHostInputs)
+	t.Log("external Engine import assertion stage: checkpoint-outputs")
 	assertImportedCheckpoint(t, state, preseeded)
 	if !secretOnlyProperty(deploymentPropertyMap(t, state.Outputs), secretCanary, false) {
+		t.Log("external Engine import assertion stage: output-secret-scan")
 		t.Fatal("import checkpoint exposes the secret canary outside a secret property")
 	}
 }
