@@ -398,15 +398,20 @@ func hostTarget(config environment.Config, secrets environment.Secrets, release,
 		apps = append(apps, value)
 	}
 	services := localServices(config, secrets, server)
-	return pulumi.Map{
+	target := pulumi.Map{
 		"releaseArtifact": pulumi.String(release),
-		"apps":            apps,
-		"dataServices":    services,
 		"reverseProxy": pulumi.Map{
 			"image":     pulumi.String(config.ReverseProxy.Image),
 			"acmeEmail": pulumi.String(config.ReverseProxy.AcmeEmail),
 		},
 	}
+	if len(apps) != 0 {
+		target["apps"] = apps
+	}
+	if len(services) != 0 {
+		target["dataServices"] = services
+	}
+	return target
 }
 
 func postgresLink(id, database string, service environment.Postgres, appServer string, config environment.Config) pulumi.Map {
@@ -551,11 +556,14 @@ func hostSecrets(config environment.Config, secrets environment.Secrets, server 
 			local[id] = localSecrets(config, secrets, id, "redis")
 		}
 	}
-	return pulumi.ToSecret(pulumi.Map{
-		"reverseProxy":      pulumi.Map{"dnsChallengeToken": pulumi.String(secrets.ReverseProxy.DNSChallengeToken)},
-		"apps":              apps,
-		"localDataServices": local,
-	})
+	value := pulumi.Map{"reverseProxy": pulumi.Map{"dnsChallengeToken": pulumi.String(secrets.ReverseProxy.DNSChallengeToken)}}
+	if len(apps) != 0 {
+		value["apps"] = apps
+	}
+	if len(local) != 0 {
+		value["localDataServices"] = local
+	}
+	return pulumi.ToSecret(value)
 }
 
 func hostDependencies(server string, config environment.Config, hosts map[string]*hostResource, dockerDependencies map[string]map[string]bool) []pulumi.Resource {
