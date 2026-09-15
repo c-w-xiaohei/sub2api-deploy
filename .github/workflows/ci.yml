@@ -211,11 +211,12 @@ jobs:
           source="$(command -v pulumi)"
           test "$("$source" version)" = "v3.256.0"
           cli_dir="$RUNNER_TEMP/engine-graph-cli-$TARGET_SHA"
-          rm -rf "$cli_dir" "$PULUMI_HOME"
-          mkdir -m 0700 "$cli_dir" "$PULUMI_HOME" "$PULUMI_HOME/plugins"
+          pulumi_home="$RUNNER_TEMP/engine-graph-pulumi-home-$TARGET_SHA"
+          rm -rf "$cli_dir" "$pulumi_home"
+          mkdir -m 0700 "$cli_dir" "$pulumi_home" "$pulumi_home/plugins"
           cp "$source" "$cli_dir/pulumi"
           chmod 0755 "$cli_dir/pulumi"
-          printf '%s\n' "ENGINE_GRAPH_PULUMI_CLI=$cli_dir/pulumi" "PULUMI_HOME=$PULUMI_HOME" "PULUMI_PLUGIN_PATH=$PULUMI_HOME/plugins" >> "$GITHUB_ENV"
+          printf '%s\n' "ENGINE_GRAPH_PULUMI_CLI=$cli_dir/pulumi" "PULUMI_HOME=$pulumi_home" "PULUMI_PLUGIN_PATH=$pulumi_home/plugins" >> "$GITHUB_ENV"
       - name: Vet Engine Graph
         run: go vet ./internal/integration/enginegraph
       - name: Record required sanitized Engine Graph evidence
@@ -336,7 +337,7 @@ jobs:
           go_bin="$(command -v go)"
           gomodcache="$(go env GOMODCACHE)"
           test -d "$gomodcache"
-          candidate="$RUNNER_TEMP/provider-runtime-candidate-$TARGET_SHA"; consumer="$RUNNER_TEMP/provider-runtime-consumer-$TARGET_SHA"; raw="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.stderr"; image="$RUNNER_TEMP/provider-runtime-images-$TARGET_SHA.tar"; trace="$RUNNER_TEMP/provider-runtime-live-trace-$TARGET_SHA"; mkdir -p "$consumer"; mkdir -m 0700 "$trace"; chmod a+rX "$candidate" "$candidate/sub2api-controller-$TARGET_SHA.tar.gz"; tar -xzf "$candidate/sub2api-controller-$TARGET_SHA.tar.gz" -C "$consumer"; chmod -R a+rX "$consumer"; provider="$consumer/bundle/bin/pulumi-resource-sub2api-host"; provider_sha="$(sha256sum "$provider" | cut -d ' ' -f1)"; set +e; sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOPATH,GOENV env GOMODCACHE="$gomodcache" SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"; status=$?; set -e; python3 scripts/ci-evidence.py live-diagnostic "$raw"; test ! -s "$stderr"; test "$status" -eq 0; HOST_AMD64_SHA="$(sha256sum "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" | cut -d ' ' -f1)" sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" HOST_AMD64_SHA="$HOST_AMD64_SHA" python3 scripts/ci-evidence.py live-candidate "$raw" "$trace" "$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA" "$candidate/consumer-trace.json"
+          candidate="$RUNNER_TEMP/provider-runtime-candidate-$TARGET_SHA"; consumer="$RUNNER_TEMP/provider-runtime-consumer-$TARGET_SHA"; raw="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-live-$TARGET_SHA.stderr"; image="$RUNNER_TEMP/provider-runtime-images-$TARGET_SHA.tar"; trace="$RUNNER_TEMP/provider-runtime-live-trace-$TARGET_SHA"; mkdir -p "$consumer"; mkdir -m 0700 "$trace"; chmod a+rX "$candidate" "$candidate/sub2api-controller-$TARGET_SHA.tar.gz"; tar -xzf "$candidate/sub2api-controller-$TARGET_SHA.tar.gz" -C "$consumer"; chmod -R a+rX "$consumer"; provider="$consumer/bundle/bin/pulumi-resource-sub2api-host"; provider_sha="$(sha256sum "$provider" | cut -d ' ' -f1)"; set +e; sudo --preserve-env=CI,TARGET_SHA,GOCACHE,GOPATH,GOENV env GOMODCACHE="$gomodcache" SUB2API_PROVIDER_RUNTIME_LIVE=1 SUB2API_TEST_PROVIDER_BINARY="$provider" SUB2API_TEST_RELEASE_ROOT="$consumer/bundle" SUB2API_TEST_PROVIDER_SHA256="$provider_sha" SUB2API_PROVIDER_RUNTIME_LIVE_IMAGE_ARCHIVE="$image" PROVIDER_RUNTIME_LIVE_TRACE_DIR="$trace" "$go_bin" test -json -count=1 -timeout=11m -run '^TestProviderRuntimeCrossHostDataAdmissionLive$' ./internal/integration/providerruntime > "$raw" 2> "$stderr"; status=$?; set -e; python3 scripts/ci-evidence.py live-diagnostic "$raw"; test ! -s "$stderr"; test "$status" -eq 0; host_amd64_sha="$(sha256sum "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" | cut -d ' ' -f1)"; sudo env TARGET_SHA="$TARGET_SHA" PROVIDER_SHA="$provider_sha" HOST_AMD64_SHA="$host_amd64_sha" python3 scripts/ci-evidence.py live-candidate "$raw" "$trace" "$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA" "$candidate/consumer-trace.json"
       - name: Finalize Provider Runtime private files
         if: always()
         run: |

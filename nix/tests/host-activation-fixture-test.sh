@@ -70,8 +70,8 @@ chmod 0755 "$root/etc/docker"
 (umask 000; activate)
 [[ "$(stat -c %a "$root/etc/sub2api-nix-host")" == 700 ]] || fail 'activation record directory inherited an unsafe umask'
 jq -e . "$root/etc/docker/daemon.json" >/dev/null || fail 'invalid JSON'
-calls_before="$(rg -c '^nix-env ' "$log")"
-reloads_before="$(rg -c '^systemctl daemon-reload$' "$log")"
+calls_before="$(grep -c '^nix-env ' "$log")"
+reloads_before="$(grep -c '^systemctl daemon-reload$' "$log")"
 inode_before="$(stat -c %i "$root/etc/sub2api-nix-host/ownership.sha256")"
 
 # Matching bytes do not establish ownership of a symlink at a managed path.
@@ -91,8 +91,8 @@ open(sys.argv[1]+'.pid', 'w').write('fixture')
 PY
 SOCKET_ACTIVE=0 activate
 [[ "$(stat -c %F "$root/run/docker.sock")" == socket ]] || fail 'fixture socket is not UNIX'
-[[ "$calls_before" == "$(rg -c '^nix-env ' "$log")" ]] || fail 'idempotent activation changed profile'
-[[ "$reloads_before" == "$(rg -c '^systemctl daemon-reload$' "$log")" ]] || fail 'idempotent activation reloaded systemd'
+[[ "$calls_before" == "$(grep -c '^nix-env ' "$log")" ]] || fail 'idempotent activation changed profile'
+[[ "$reloads_before" == "$(grep -c '^systemctl daemon-reload$' "$log")" ]] || fail 'idempotent activation reloaded systemd'
 [[ "$inode_before" == "$(stat -c %i "$root/etc/sub2api-nix-host/ownership.sha256")" ]] || fail 'idempotent activation rewrote manifest'
 
 SOCKET_ACTIVE=0 activate --start; SOCKET_ACTIVE=0 activate --restart

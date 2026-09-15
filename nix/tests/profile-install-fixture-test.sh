@@ -51,7 +51,7 @@ done
 
 # Fetch complete prebuilt composition-tool closures. max-jobs=0 forbids a
 # source build when cache.nixos.org does not have them.
-fixture_shell="$(nix_prefetch build --no-link --print-out-paths nixpkgs#bash | rg -- '-bash-interactive-[^/]+$' | rg -v -- '-man$' | head -n1)"
+fixture_shell="$(nix_prefetch build --no-link --print-out-paths nixpkgs#bash | grep -E -- '-bash-interactive-[^/]+$' | grep -Ev -- '-man$' | head -n1)"
 fixture_coreutils="$(nix_prefetch build --no-link --print-out-paths nixpkgs#coreutils | head -n1)"
 [[ -x "$fixture_shell/bin/bash" && -x "$fixture_coreutils/bin/cp" ]] || fail 'prebuilt Nix composition tools are unavailable'
 fixture_store_path="$(HOME="$fixture_home" nix_offline store add-path --name fixture-controller-payload "$fixture_payload")"
@@ -117,8 +117,8 @@ PATH="$root/untrusted" "$generated_path/bin/sub2api-workspace-init" "$workspace"
 host_path="$(HOME="$fixture_home" nix_offline build --impure --no-link --print-out-paths "path:$fixture_flake#runtimePaths.x86_64-linux.host-environment")"
 unit="$host_path/etc/sub2api-nix-host/files/sub2api-nix-docker.service"
 manifest="$host_path/share/sub2api-runtime/activation-manifest"
-rg -Fq "ExecStart=$fixture_host_store_path/bin/dockerd" "$unit" || fail 'generated unit did not bind selected Docker payload'
-rg -Fq 'etc/sub2api-nix-host/files/sub2api-nix-docker.service /etc/systemd/system/sub2api-nix-docker.service' "$manifest" || fail 'generated manifest omitted Docker unit'
+grep -Fq "ExecStart=$fixture_host_store_path/bin/dockerd" "$unit" || fail 'generated unit did not bind selected Docker payload'
+grep -Fq 'etc/sub2api-nix-host/files/sub2api-nix-docker.service /etc/systemd/system/sub2api-nix-docker.service' "$manifest" || fail 'generated manifest omitted Docker unit'
 read -r unit_mode unit_hash unit_source unit_destination < <(awk '$4 == "/etc/systemd/system/sub2api-nix-docker.service"' "$manifest")
 [[ "$unit_mode" == 0644 ]] || fail 'manifest unit mode is not explicit'
 [[ "$unit_hash" == "$(sha256sum "$unit" | cut -d ' ' -f1)" ]] || fail 'manifest unit hash does not match generated file'
@@ -134,7 +134,7 @@ expected_output='profile-install-fixture-ran:payload-sops:payload-ssh'
 
 deriver="$(HOME="$fixture_home" nix-store --query --deriver "$fixture_store_path")"
 [[ -z "$deriver" || "$deriver" == unknown-deriver ]] || fail 'fixture payload has a derivation'
-if HOME="$fixture_home" nix-store --query --references "$generated_path" | rg -q '\.drv$'; then
+if HOME="$fixture_home" nix-store --query --references "$generated_path" | grep -q '\.drv$'; then
   fail 'generated environment references a derivation'
 fi
 [[ "$(readlink -f "$profile_executable")" == "$generated_path/bin/sub2api-deploy" ]] || fail 'profile executable does not resolve to generated environment'

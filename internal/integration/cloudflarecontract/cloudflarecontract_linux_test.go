@@ -303,8 +303,8 @@ func readProviderPort(t *testing.T, reader *bufio.Reader, done <-chan struct{}, 
 	}()
 	select {
 	case result := <-line:
-		port, err := strconv.Atoi(result.value)
-		if result.err != nil || port < 1 || port > 65535 {
+		port, parseErr := strconv.Atoi(result.value)
+		if result.err != nil || parseErr != nil || port < 1 || port > 65535 {
 			t.Fatalf("official provider did not report a valid loopback port (%s)", stderr.summary())
 		}
 		return result.value
