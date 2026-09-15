@@ -158,6 +158,48 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 ci_evidence.verify_candidate_hashes(directory, trace)
 
+    def test_live_candidate_accepts_content_addressed_release_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            raw = directory / "live.jsonl"
+            events = [
+                {"Action": "output", "Test": "TestProviderRuntimeCrossHostDataAdmissionLive", "Output": "live ssh docker preflight: socket=present container=ok network=ok container-discovery=empty network-discovery=empty docker-host=unset docker-context=unset docker-config=unset\n"},
+            ]
+            events.extend({"Action": "output", "Test": "TestProviderRuntimeCrossHostDataAdmissionLive", "Output": "live milestone: %s\n" % milestone} for milestone in ci_evidence.LIVE_MILESTONES)
+            events.append({"Action": "pass", "Test": "TestProviderRuntimeCrossHostDataAdmissionLive"})
+            raw.write_text("".join(json.dumps(event) + "\n" for event in events))
+            trace = directory / "trace"
+            trace.mkdir(mode=0o700)
+            target = "a" * 40
+            provider = "b" * 64
+            host = "c" * 64
+            record = {key: True for key in (
+                "dataHostPass", "appHostPass", "appDataEnvironmentAuthenticated", "appReadyAfterData",
+                "postgresPass", "postgresWrongPasswordDenied", "postgresCatalog", "redisPass",
+                "redisWrongPasswordDenied", "redisDefaultDenied", "redisACL", "postgresDrop",
+                "redisDrop", "foreignTableUnchanged",
+            )}
+            record.update({
+                "test": "TestProviderRuntimeCrossHostDataAdmissionLive",
+                "providerSHA256": provider,
+                "hostAMD64SHA256": host,
+                "releasedBoundary": "sub2api-host-controller@sha256:" + hashlib.sha256(target.encode()).hexdigest(),
+                "foreignTableSHA256": "d" * 64,
+            })
+            live = trace / "mx-allowlist-live.json"
+            live.write_text(json.dumps(record) + "\n")
+            live.chmod(0o600)
+            previous = {key: os.environ.get(key) for key in ("TARGET_SHA", "PROVIDER_SHA", "HOST_AMD64_SHA")}
+            os.environ.update({"TARGET_SHA": target, "PROVIDER_SHA": provider, "HOST_AMD64_SHA": host})
+            try:
+                ci_evidence.live_candidate(raw, trace, directory / "safe", directory / "consumer-trace.json")
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        del os.environ[key]
+                    else:
+                        os.environ[key] = value
+
     def test_metadata_rejects_archive_hash_tampering(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "metadata.json"

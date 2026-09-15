@@ -177,7 +177,6 @@ func exportCloudflareCompatCheckpoint(t *testing.T, stack auto.Stack) *automatio
 func assertOldCloudflareCompatIdentity(t *testing.T, checkpoint *automationtest.Checkpoint) {
 	t.Helper()
 	const dnsURN = "urn:pulumi:canary::cloudflare-checkpoint-compat::cloudflare:index/dnsRecord:DnsRecord::dns-api-A"
-	const recordAliasURN = "urn:pulumi:canary::cloudflare-checkpoint-compat::cloudflare:index/record:Record::dns-api-A"
 	for _, state := range checkpoint.Resources {
 		if string(state.URN) != dnsURN {
 			continue
@@ -185,12 +184,9 @@ func assertOldCloudflareCompatIdentity(t *testing.T, checkpoint *automationtest.
 		if state.Type != "cloudflare:index/dnsRecord:DnsRecord" || state.ID != "cloudflare-dns-api-A" {
 			t.Fatalf("old SDK-contract DNS identity = type:%q id:%q, want fixed DnsRecord/%q", state.Type, state.ID, "cloudflare-dns-api-A")
 		}
-		for _, alias := range state.Aliases {
-			if string(alias) == recordAliasURN {
-				return
-			}
-		}
-		t.Fatalf("old SDK-contract DNS aliases = %v, want %s", state.Aliases, recordAliasURN)
+		// Pulumi v3.256.0 consumes aliases during registration and clears them
+		// before persisting state. The RPC compatibility tests cover alias shape.
+		return
 	}
 	t.Fatalf("old SDK-contract checkpoint lacks fixed DNS resource %s", dnsURN)
 }

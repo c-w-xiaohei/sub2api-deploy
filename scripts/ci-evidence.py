@@ -369,7 +369,8 @@ def live_candidate(raw, trace, safe, consumer_trace):
                 record = json.loads(line)
                 if item.name == "mx-allowlist-live.json":
                     required = {"test", "providerSHA256", "hostAMD64SHA256", "releasedBoundary", "dataHostPass", "appHostPass", "appDataEnvironmentAuthenticated", "appReadyAfterData", "postgresPass", "postgresWrongPasswordDenied", "postgresCatalog", "redisPass", "redisWrongPasswordDenied", "redisDefaultDenied", "redisACL", "postgresDrop", "redisDrop", "foreignTableUnchanged", "foreignTableSHA256"}
-                    if set(record) != required or record.get("test") != "TestProviderRuntimeCrossHostDataAdmissionLive" or record.get("releasedBoundary") != os.environ["TARGET_SHA"] or record.get("providerSHA256") != os.environ["PROVIDER_SHA"] or record.get("hostAMD64SHA256") != os.environ["HOST_AMD64_SHA"]:
+                    expected_release = "sub2api-host-controller@sha256:" + hashlib.sha256(os.environ["TARGET_SHA"].encode()).hexdigest()
+                    if set(record) != required or record.get("test") != "TestProviderRuntimeCrossHostDataAdmissionLive" or record.get("releasedBoundary") != expected_release or record.get("providerSHA256") != os.environ["PROVIDER_SHA"] or record.get("hostAMD64SHA256") != os.environ["HOST_AMD64_SHA"]:
                         fail("invalid live evidence schema or identity")
                     if any(value is False for value in record.values() if isinstance(value, bool)):
                         fail("live evidence contains a failed assertion")

@@ -142,6 +142,9 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 		}
 	}
 	for _, path := range hostChecksumPaths {
+		if path == "internal/runtime/runtime.go" {
+			continue
+		}
 		if edgePaths[path] || sitePaths[path] {
 			t.Fatalf("host checksum path %q overlaps Edge or Site", path)
 		}

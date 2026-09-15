@@ -7,6 +7,7 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/cloudflareresource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 )
@@ -145,26 +146,29 @@ func TestCloudflareInputsPreserveUnknownAndSecretRPCValues(t *testing.T) {
 		t.Fatalf("register unknown and secret inputs: %v", err)
 	}
 	record := requireCloudflareCompatResource(t, mocks.resources, "unknown")
-	if !record.Inputs["name"].IsComputed() || !record.Inputs["content"].IsSecret() {
-		t.Fatalf("DNS unknown/secret propagation = %v", record.Inputs)
+	recordInputs := cloudflareRPCInputs(t, record)
+	if !recordInputs["name"].IsComputed() || !recordInputs["content"].IsSecret() {
+		t.Fatalf("DNS unknown/secret propagation = computed:%t secret:%t", recordInputs["name"].IsComputed(), recordInputs["content"].IsSecret())
 	}
 	setting := requireCloudflareCompatResource(t, mocks.resources, "unknown-setting")
-	if !setting.Inputs["value"].IsComputed() {
-		t.Fatalf("zone-setting unknown propagation = %v", setting.Inputs)
+	settingInputs := cloudflareRPCInputs(t, setting)
+	if !settingInputs["value"].IsComputed() {
+		t.Fatal("zone-setting unknown value was not preserved in the registration RPC")
 	}
 }
 
 func TestLegacyCloudflareCallersPreservePersistedIdentities(t *testing.T) {
 	mocks := &cloudflareCompatMocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		var edge, site, preflight pulumi.ResourceState
+		var edge, site pulumi.ResourceState
+		var preflight pulumi.CustomResourceState
 		if err := ctx.RegisterComponentResource("sub2api:host:Edge", "edge", &edge); err != nil {
 			return err
 		}
 		if err := ctx.RegisterComponentResource("sub2api:host:Site", "site-code2", &site); err != nil {
 			return err
 		}
-		if err := ctx.RegisterComponentResource("test:index:Preflight", "preflight", &preflight); err != nil {
+		if err := ctx.RegisterResource("test:index:Preflight", "preflight", pulumi.Map{}, &preflight); err != nil {
 			return err
 		}
 		provider, err := createCloudflareProvider(ctx, &edge, &preflight, pulumi.ToSecret(pulumi.String("token")).(pulumi.StringOutput), true)
@@ -216,6 +220,19 @@ func TestLegacyCloudflareCallersPreservePersistedIdentities(t *testing.T) {
 	if record.Inputs["name"].StringValue() != "code2.example.test" || record.Inputs["type"].StringValue() != "AAAA" || record.Inputs["zoneId"].StringValue() != "zone" {
 		t.Fatalf("legacy DNS inputs = %v", record.Inputs)
 	}
+}
+
+func cloudflareRPCInputs(t *testing.T, args pulumi.MockResourceArgs) resource.PropertyMap {
+	t.Helper()
+	inputs, err := plugin.UnmarshalProperties(args.RegisterRPC.GetObject(), plugin.MarshalOptions{
+		KeepUnknowns:  true,
+		KeepSecrets:   true,
+		KeepResources: true,
+	})
+	if err != nil {
+		t.Fatalf("decode Cloudflare registration RPC inputs: %v", err)
+	}
+	return inputs
 }
 
 func requireCloudflareCompatResource(t *testing.T, resources []pulumi.MockResourceArgs, name string) pulumi.MockResourceArgs {
