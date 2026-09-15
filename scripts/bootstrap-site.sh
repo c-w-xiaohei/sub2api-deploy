@@ -25,15 +25,15 @@ umask 077
 : "${APP_ENV_CONFIGURED:?APP_ENV_CONFIGURED is required}"
 
 if [[ "$SITE_ID" == code2 && "$SITE_RUNTIME_ROOT" == runtime && -f "$SITE_RUNTIME_ROOT/oidc.env" ]]; then
-  printf '%s' "${APP_ENV_JSON:?APP_ENV_JSON is required}" | npx --no-install tsx scripts/verify-legacy-app-env.ts "$SITE_RUNTIME_ROOT/oidc.env" "$APP_ENV_CONFIGURED"
+  printf '%s' "${APP_ENV_JSON:?APP_ENV_JSON is required}" | sub2api-deploy runtime legacy-env "$SITE_RUNTIME_ROOT/oidc.env" "$APP_ENV_CONFIGURED"
 fi
 
-npx --no-install tsx scripts/host-preflight.ts check "$CONFIGURED_SITE_IDS" "$HOST_STATE_PATH"
-npx --no-install tsx src/deployment-preflight.ts check "$SITE_DEPLOY_STATE_PATH" "$SITE_BOOTSTRAP_MARKER_PATH" "$POSTGRES_MODE" "$REDIS_MODE"
+sub2api-deploy runtime host-preflight check "$CONFIGURED_SITE_IDS" "$HOST_STATE_PATH"
+sub2api-deploy runtime preflight check "$SITE_DEPLOY_STATE_PATH" "$SITE_BOOTSTRAP_MARKER_PATH" "$POSTGRES_MODE" "$REDIS_MODE"
 [[ ! -f "$SITE_DEPLOY_STATE_PATH" ]] || exit 0
 mkdir -p "$BLUE_DATA_PATH" "$GREEN_DATA_PATH"
-printf '%s' "$RUNTIME_JSON" | npx --no-install tsx scripts/render-runtime-env.ts write "$SITE_RUNTIME_ENV_PATH" --slot=blue --slot-data-dir=blue
-printf '%s' "${APP_ENV_JSON:?APP_ENV_JSON is required}" | npx --no-install tsx scripts/render-runtime-env.ts write-app "$SITE_APP_ENV_PATH"
+printf '%s' "$RUNTIME_JSON" | sub2api-deploy runtime dotenv write "$SITE_RUNTIME_ENV_PATH" --slot=blue --slot-data-dir=blue
+printf '%s' "${APP_ENV_JSON:?APP_ENV_JSON is required}" | sub2api-deploy runtime dotenv write-app "$SITE_APP_ENV_PATH"
 export SLOT=blue SLOT_DATA_DIR=blue AUTO_SETUP=true
 source scripts/site-compose-common.sh
 
@@ -46,11 +46,11 @@ previous_route="$SITE_ROUTE_PATH.before-bootstrap"
 had_route=false
 [[ -f "$SITE_ROUTE_PATH" ]] && had_route=true
 [[ -f "$SITE_ROUTE_PATH" ]] && cp "$SITE_ROUTE_PATH" "$previous_route"
-npx --no-install tsx scripts/render-site-route.ts write traefik/dynamic/site.yml "$SITE_ROUTE_PATH" "$SITE_ID" "$DOMAIN" blue "$BLUE_EDGE_ALIAS"
+sub2api-deploy runtime route write traefik/dynamic/site.yml "$SITE_ROUTE_PATH" "$SITE_ID" "$DOMAIN" blue "$BLUE_EDGE_ALIAS"
 if ! bash scripts/probe-origin-strict.sh "$DOMAIN" "$ORIGIN_IP" /health || ! bash scripts/probe-origin.sh "$DOMAIN" /health; then
   if [[ "$had_route" == true ]]; then mv -f "$previous_route" "$SITE_ROUTE_PATH"; else rm -f "$SITE_ROUTE_PATH"; fi
   exit 1
 fi
 rm -f "$previous_route"
-npx --no-install tsx scripts/write-deploy-state.ts write "$SITE_DEPLOY_STATE_PATH" "{\"activeSlot\":\"blue\",\"activeImage\":\"$SUB2API_IMAGE\",\"postgresMode\":\"$POSTGRES_MODE\",\"redisMode\":\"$REDIS_MODE\"}"
-npx --no-install tsx scripts/write-bootstrap-marker.ts write "$SITE_BOOTSTRAP_MARKER_PATH"
+sub2api-deploy runtime state write "$SITE_DEPLOY_STATE_PATH" "{\"activeSlot\":\"blue\",\"activeImage\":\"$SUB2API_IMAGE\",\"postgresMode\":\"$POSTGRES_MODE\",\"redisMode\":\"$REDIS_MODE\"}"
+sub2api-deploy runtime marker write "$SITE_BOOTSTRAP_MARKER_PATH"

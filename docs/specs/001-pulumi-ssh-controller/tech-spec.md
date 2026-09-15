@@ -53,6 +53,19 @@
 
 ## 3. 技术方案
 
+### 3.0 后续运行环境决定（2026-09-14）
+
+[Nix Runtime Spec](./nix-runtime-spec.md) 记录用户确认的运行环境方案：
+只用 Nix，不用 NixOS；项目继续用 Go/现有 CI 构建；运行端只能消费
+GitHub 上的已发布预构建产物，不得回退源码构建。控制机和目标 Host 的
+软件环境分别声明，普通 Linux 的必要系统接入集中到显式 activation。
+该补充不改变 Pulumi graph/checkpoint、Host lifecycle 或秘密所有权。
+验收见 [Nix Runtime Test Spec](./nix-runtime-test-spec.md)。
+
+另见 [Cloudflare SDK Isolation](./cloudflare-sdk-isolation.md)：保留官方
+Cloudflare Provider，移除全量生成 Go SDK 的编译依赖；两者不是同一个
+组件。该变更不改变资源 identity、秘密与 checkpoint 兼容语义。
+
 ### 3.1 方案主线与完整控制链
 
 控制机上的 `sub2api-deploy` 是薄入口：选择 Environment、解密 SOPS、执行严格预检、构造仅本次操作可见的批准通道，并调用标准 Pulumi 命令。它不保存 plan、资源图、operation ledger 或远端 journal 副本。Environment Program 把已验证的环境语义投影成官方 cloud resources 和每服务器一个 `Host` resource；Pulumi 保有 graph、preview、diff、state、protect、secret tracking、aliases、history 和 stack update lock。

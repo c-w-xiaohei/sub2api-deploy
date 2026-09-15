@@ -11,12 +11,12 @@ umask 077
 
 source scripts/edge-compose-common.sh
 
-sing_box_server_name="$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.serverName)' "$SING_BOX_CONFIG")"
-sing_box_target="$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.target)' "$SING_BOX_CONFIG")"
+sing_box_server_name="$(printf '%s' "$SING_BOX_CONFIG" | sub2api-deploy runtime json-field --stdin serverName)"
+sing_box_target="$(printf '%s' "$SING_BOX_CONFIG" | sub2api-deploy runtime json-field --stdin target)"
 mkdir -p "$EDGE_RUNTIME_ROOT/dynamic"
-node -e 'process.stdout.write(JSON.stringify({TRAEFIK_IMAGE: process.env.TRAEFIK_IMAGE, ACME_EMAIL: process.env.ACME_EMAIL, CLOUDFLARE_DNS_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN, EDGE_RUNTIME_ROOT: process.env.EDGE_RUNTIME_ROOT}))' \
-  | npx --no-install tsx scripts/render-runtime-env.ts write "$EDGE_RUNTIME_ROOT/edge.env"
-npx --no-install tsx scripts/render-edge-config.ts write "$EDGE_RUNTIME_ROOT" traefik/traefik.yml traefik/dynamic/sing-box.yml "$ACME_EMAIL" "$sing_box_server_name" "$sing_box_target"
+sub2api-deploy runtime edge-env \
+  | sub2api-deploy runtime dotenv write "$EDGE_RUNTIME_ROOT/edge.env"
+sub2api-deploy runtime edge write "$EDGE_RUNTIME_ROOT" traefik/traefik.yml traefik/dynamic/sing-box.yml "$ACME_EMAIL" "$sing_box_server_name" "$sing_box_target"
 if [[ ! -f "$EDGE_RUNTIME_ROOT/acme.json" ]]; then
   temporary="$EDGE_RUNTIME_ROOT/.acme.$$.tmp"
   : > "$temporary"

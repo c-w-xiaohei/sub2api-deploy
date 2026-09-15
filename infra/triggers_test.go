@@ -104,7 +104,7 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 	for _, path := range edgeChecksumPaths {
 		edgePaths[path] = true
 	}
-	for _, required := range []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "scripts/render-edge-config.ts", "scripts/render-runtime-env.ts", "traefik/dynamic/sing-box.yml"} {
+	for _, required := range []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "internal/runtime/runtime.go", "traefik/dynamic/sing-box.yml"} {
 		if !edgePaths[required] {
 			t.Fatalf("edge checksum omits %q", required)
 		}
@@ -113,17 +113,17 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 	for _, path := range siteChecksumPaths {
 		sitePaths[path] = true
 	}
-	for _, required := range []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/read-runtime-env.cjs", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "scripts/render-site-route.ts", "scripts/render-runtime-env.ts", "scripts/verify-legacy-app-env.ts", "scripts/deployment-mode.ts", "scripts/write-deploy-state.ts", "scripts/write-bootstrap-marker.ts", "src/deployment-preflight.ts", "traefik/dynamic/site.yml"} {
+	for _, required := range []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "internal/runtime/runtime.go", "traefik/dynamic/site.yml"} {
 		if !sitePaths[required] {
 			t.Fatalf("site checksum omits %q", required)
 		}
 	}
-	for _, edgeOnly := range []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "scripts/render-edge-config.ts", "traefik/dynamic/sing-box.yml"} {
+	for _, edgeOnly := range []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "traefik/dynamic/sing-box.yml"} {
 		if sitePaths[edgeOnly] {
 			t.Fatalf("Site checksum includes Edge-only path %q", edgeOnly)
 		}
 	}
-	for _, siteOnly := range []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/read-runtime-env.cjs", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "scripts/render-site-route.ts", "scripts/deployment-mode.ts", "scripts/write-deploy-state.ts", "scripts/write-bootstrap-marker.ts", "src/deployment-preflight.ts", "traefik/dynamic/site.yml"} {
+	for _, siteOnly := range []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "traefik/dynamic/site.yml"} {
 		if edgePaths[siteOnly] {
 			t.Fatalf("Edge checksum includes Site-only path %q", siteOnly)
 		}
@@ -136,12 +136,9 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 	for _, path := range neonEndpointChecksumPaths {
 		endpointPaths[path] = true
 	}
-	for _, required := range []string{"scripts/node-env.sh", "scripts/create-neon-project.ts", "scripts/fetch-neon-connection.ts", "scripts/reconcile-neon-endpoint.ts", "scripts/validate-neon-region.ts"} {
-		if !endpointPaths[required] {
-			t.Fatalf("Neon endpoint checksum omits %q", required)
-		}
-		if edgePaths[required] || sitePaths[required] || hostPaths[required] {
-			t.Fatalf("Neon endpoint-only path %q is owned by another checksum", required)
+	for _, required := range []string{"internal/runtime/runtime.go"} {
+		if !endpointPaths[required] || !edgePaths[required] || !sitePaths[required] || !hostPaths[required] {
+			t.Fatalf("shared runtime path %q is omitted from an owning checksum", required)
 		}
 	}
 	for _, path := range hostChecksumPaths {
@@ -149,7 +146,7 @@ func TestChecksumBoundariesKeepOwnerSpecificFilesIsolated(t *testing.T) {
 			t.Fatalf("host checksum path %q overlaps Edge or Site", path)
 		}
 	}
-	for _, required := range []string{"scripts/host-preflight.ts", "scripts/finalize-host-state.sh", "scripts/write-host-state.cjs"} {
+	for _, required := range []string{"scripts/finalize-host-state.sh", "internal/runtime/runtime.go"} {
 		if !hostPaths[required] {
 			t.Fatalf("host checksum omits %q", required)
 		}

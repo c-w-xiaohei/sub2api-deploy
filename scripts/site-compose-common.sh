@@ -19,7 +19,7 @@ export SITE_RUNTIME_ROOT
 
 site_runtime_value() {
   local key="$1"
-  node scripts/read-runtime-env.cjs "$SITE_RUNTIME_ROOT/runtime.env" "$key"
+  sub2api-deploy runtime read-env "$SITE_RUNTIME_ROOT/runtime.env" "$key"
 }
 
 SITE_COMPOSE=(

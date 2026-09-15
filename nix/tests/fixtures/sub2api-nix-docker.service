@@ -1,0 +1,16 @@
+[Unit]
+Description=Sub2API Nix Docker daemon
+After=network-online.target sub2api-nix-docker.socket
+Wants=network-online.target
+Requires=sub2api-nix-docker.socket
+
+[Service]
+Type=notify
+Environment=PATH=/nix/store/fixture-runtime/bin
+ExecStart=/nix/store/fixture-runtime/bin/dockerd --config-file=/etc/docker/daemon.json --data-root=/var/lib/docker -H fd://
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

@@ -46,6 +46,18 @@ supported_module() {
 
 module_list() {
   local module_path
+  # GetRequiredPlugins asks the language host for `go list -m -json all`.
+  # This is release plugin metadata, not the program's compile dependency graph:
+  # Cloudflare registrations intentionally do not import the generated SDK.
+  for module_path in "$@"; do
+    if [[ "$module_path" == "all" ]]; then
+      json_module github.com/c-w-xiaohei/sub2api-deploy
+      json_module github.com/pulumi/pulumi/sdk/v3
+      json_module github.com/pulumi/pulumi-cloudflare/sdk/v6
+      json_module github.com/upstash/pulumi-upstash/sdk
+      return
+    fi
+  done
   for module_path in "$@"; do
     case "$module_path" in
       -*|'') continue ;;

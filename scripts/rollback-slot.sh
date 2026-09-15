@@ -9,10 +9,10 @@ state_file="${SITE_DEPLOY_STATE_PATH:?SITE_DEPLOY_STATE_PATH is required}"
 [[ -f "$state_file" ]] || { printf '%s\n' "no deployment state" >&2; exit 1; }
 POSTGRES_MODE="${POSTGRES_MODE:?POSTGRES_MODE is required}"
 REDIS_MODE="${REDIS_MODE:?REDIS_MODE is required}"
-npx --no-install tsx scripts/deployment-mode.ts check "$state_file" "$POSTGRES_MODE" "$REDIS_MODE"
-previous_slot="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (!s.previousSlot || !s.previousImage) process.exit(1); process.stdout.write(s.previousSlot)' "$state_file")"
-previous_image="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.previousImage)' "$state_file")"
-active_slot="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeSlot)' "$state_file")"
+sub2api-deploy runtime deployment-mode check "$state_file" "$POSTGRES_MODE" "$REDIS_MODE"
+previous_slot="$(sub2api-deploy runtime read-state "$state_file" previousSlot)"
+previous_image="$(sub2api-deploy runtime read-state "$state_file" previousImage)"
+active_slot="$(sub2api-deploy runtime read-state "$state_file" activeSlot)"
 domain="${1:?domain is required}"
 
 site_stop_service "sub2api-${previous_slot}"
@@ -35,7 +35,7 @@ had_route=false
 [[ -f "$SITE_ROUTE_PATH" ]] && had_route=true
 [[ -f "$SITE_ROUTE_PATH" ]] && cp "$SITE_ROUTE_PATH" "$previous_route"
 edge_alias="$BLUE_EDGE_ALIAS"; [[ "$previous_slot" == green ]] && edge_alias="$GREEN_EDGE_ALIAS"
-npx --no-install tsx scripts/render-site-route.ts write traefik/dynamic/site.yml "$SITE_ROUTE_PATH" "$SITE_ID" "$domain" "$previous_slot" "$edge_alias"
+sub2api-deploy runtime route write traefik/dynamic/site.yml "$SITE_ROUTE_PATH" "$SITE_ID" "$domain" "$previous_slot" "$edge_alias"
 if ! bash scripts/probe-origin.sh "$domain" "/health"; then
   if [[ "$had_route" == true ]]; then mv -f "$previous_route" "$SITE_ROUTE_PATH"; else rm -f "$SITE_ROUTE_PATH"; fi
   site_stop_service "sub2api-${previous_slot}"
@@ -43,5 +43,5 @@ if ! bash scripts/probe-origin.sh "$domain" "/health"; then
 fi
 rm -f "$previous_route"
 site_stop_service "sub2api-${active_slot}"
-state_json="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const old={activeSlot:s.activeSlot,activeImage:s.activeImage}; s.activeSlot=s.previousSlot; s.activeImage=s.previousImage; s.previousSlot=old.activeSlot; s.previousImage=old.activeImage; process.stdout.write(JSON.stringify(s))' "$state_file")"
-npx --no-install tsx scripts/write-deploy-state.ts write "$state_file" "$state_json"
+state_json="$(sub2api-deploy runtime swap-state "$state_file")"
+sub2api-deploy runtime state write "$state_file" "$state_json"

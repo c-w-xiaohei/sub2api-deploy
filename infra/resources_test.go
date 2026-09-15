@@ -208,7 +208,7 @@ func TestManagedNeonProjectSeparatesMetadataAndSecretConnectionOutput(t *testing
 		t.Fatal("managed project command must not request or print a connection URI")
 	}
 	connection := requireResource(t, resources, "site-code3-neon-connection")
-	if !strings.Contains(connection.Inputs["create"].StringValue(), "fetch-neon-connection.ts") {
+	if !strings.Contains(connection.Inputs["create"].StringValue(), "sub2api-deploy runtime neon-connection") {
 		t.Fatalf("managed connection command = %q", connection.Inputs["create"].StringValue())
 	}
 	if !connection.Inputs["environment"].ObjectValue()["NEON_API_KEY"].IsSecret() {
@@ -557,7 +557,7 @@ func assertSiteCommands(t *testing.T, resources map[string]pulumi.MockResourceAr
 		if suffix == "reconcile" {
 			project := requireResource(t, resources, "site-"+siteID+"-neon-project")
 			if _, ok := resources["site-"+siteID+"-neon-region"]; !ok {
-				if project.TypeToken != "command:local:Command" || !strings.Contains(project.Inputs["create"].StringValue(), "create-neon-project.ts") {
+				if project.TypeToken != "command:local:Command" || !strings.Contains(project.Inputs["create"].StringValue(), "sub2api-deploy runtime neon-project") {
 					t.Fatalf("%s must use command-owned Neon project", project.Name)
 				}
 				endpoint := requireResource(t, resources, "site-"+siteID+"-neon-endpoint-settings")
@@ -590,7 +590,7 @@ func assertSiteCommands(t *testing.T, resources map[string]pulumi.MockResourceAr
 			if endpoint.TypeToken != "command:local:Command" {
 				t.Fatalf("%s type = %q", endpoint.Name, endpoint.TypeToken)
 			}
-			if !strings.HasPrefix(endpoint.Inputs["create"].StringValue(), "bash scripts/node-env.sh ") {
+			if endpoint.Inputs["create"].StringValue() != "sub2api-deploy runtime neon-endpoint" {
 				t.Fatalf("%s does not resolve the release-bundle Node runtime at execution time", endpoint.Name)
 			}
 			endpointEnvironment := endpoint.Inputs["environment"].ObjectValue()

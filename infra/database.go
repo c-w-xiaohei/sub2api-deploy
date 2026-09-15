@@ -196,12 +196,12 @@ func siteDatabaseInputs(ctx *pulumi.Context, site, preflight pulumi.Resource, la
 				return siteDatabaseResult{}, err
 			}
 		} else {
-			command, err := newCommand(ctx, "site-"+siteID+"-neon-project", "bash scripts/node-env.sh npx --no-install tsx scripts/create-neon-project.ts", pulumi.StringMap{"NEON_API_KEY": apiKey, "NEON_PROJECT_NAME": pulumi.String(ManagedNeonProjectName(spec.ResourcePrefix)), "NEON_REGION": pulumi.String(spec.Database.Region), "NEON_PROJECT_STATE_FILE": pulumi.String(layout.RuntimeRoot + "/neon-project.json")}, []string{"neon-project-v1", siteID, endpointChecksum, spec.Database.Region, ManagedNeonProjectName(spec.ResourcePrefix)}, site, preflight)
+			command, err := newCommand(ctx, "site-"+siteID+"-neon-project", "sub2api-deploy runtime neon-project", pulumi.StringMap{"NEON_API_KEY": apiKey, "NEON_PROJECT_NAME": pulumi.String(ManagedNeonProjectName(spec.ResourcePrefix)), "NEON_REGION": pulumi.String(spec.Database.Region), "NEON_PROJECT_STATE_FILE": pulumi.String(layout.RuntimeRoot + "/neon-project.json")}, []string{"neon-project-v1", siteID, endpointChecksum, spec.Database.Region, ManagedNeonProjectName(spec.ResourcePrefix)}, site, preflight)
 			if err != nil {
 				return siteDatabaseResult{}, err
 			}
 			project = managedNeonProjectFromCommand(command)
-			connectionCommand, err := newCommand(ctx, "site-"+siteID+"-neon-connection", "bash scripts/node-env.sh npx --no-install tsx scripts/fetch-neon-connection.ts", pulumi.StringMap{"NEON_API_KEY": apiKey, "NEON_PROJECT_ID": project.ProjectID()}, []string{"neon-connection-v1", siteID, endpointChecksum}, site, preflight, command)
+			connectionCommand, err := newCommand(ctx, "site-"+siteID+"-neon-connection", "sub2api-deploy runtime neon-connection", pulumi.StringMap{"NEON_API_KEY": apiKey, "NEON_PROJECT_ID": project.ProjectID()}, []string{"neon-connection-v1", siteID, endpointChecksum}, site, preflight, command)
 			if err != nil {
 				return siteDatabaseResult{}, err
 			}

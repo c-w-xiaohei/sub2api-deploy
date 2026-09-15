@@ -12,11 +12,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/cloudflareresource"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/environment"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostimport"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
-	"github.com/pulumi/pulumi-cloudflare/sdk/v6/go/cloudflare"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/upstash/pulumi-upstash/sdk/go/upstash"
 )
@@ -86,9 +86,9 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		}
 	}
 
-	var cloudflareProvider *cloudflare.Provider
+	var cloudflareProvider *cloudflareresource.Provider
 	if hasCloudflare(validated.Config) {
-		cloudflareProvider, err = cloudflare.NewProvider(ctx, "cloudflare", &cloudflare.ProviderArgs{
+		cloudflareProvider, err = cloudflareresource.NewProvider(ctx, "cloudflare", &cloudflareresource.ProviderArgs{
 			ApiToken: secretStringPtr(secrets.Cloudflare.APIToken),
 		})
 		if err != nil {
@@ -120,7 +120,7 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 				if net.ParseIP(address).To4() == nil {
 					recordType = "AAAA"
 				}
-				_, err := cloudflare.NewDnsRecord(ctx, "dns-"+appID+"-"+serverID+"-"+recordType, &cloudflare.DnsRecordArgs{
+				_, err := cloudflareresource.NewDnsRecord(ctx, "dns-"+appID+"-"+serverID+"-"+recordType, &cloudflareresource.DnsRecordArgs{
 					Name:    pulumi.String(app.Hostname),
 					Content: pulumi.StringPtr(address),
 					Proxied: pulumi.BoolPtr(true),
@@ -520,8 +520,8 @@ func hostSecrets(config environment.Config, secrets environment.Secrets, server 
 			redisPassword = pulumi.String(appSecret.Redis.Password)
 		}
 		value := pulumi.Map{
-			"jwtSecret":          pulumi.String(appSecret.JWTSecret),
-			"totpEncryptionKey":  pulumi.String(appSecret.TOTPEncryptionKey),
+			"jwtSecret":         pulumi.String(appSecret.JWTSecret),
+			"totpEncryptionKey": pulumi.String(appSecret.TOTPEncryptionKey),
 			"postgres": pulumi.Map{
 				"username": pulumi.String(appSecret.Postgres.Username),
 				"password": pulumi.String(appSecret.Postgres.Password),

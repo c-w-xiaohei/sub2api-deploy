@@ -18,7 +18,7 @@
 - Preserve: 保留 Host identity、revision、approval、secret、OpenSSH、journal、unknown-result、blue/green、Read 保留 ID 和 preserve-data Delete 合同。
 - Preserve: `infra/**` 与现有 legacy writer 保持不变；当前产品实现不切换现有生产实例、不移动 state、不触碰 cloud physical IDs。
 - Exclude: 迁移、production cutover、真实云/VPS/公网、业务数据正确性、SingBox、第二套 engine/graph/state、常驻 Agent、controller service、operation DB 和 test selector registry。
-- Verification: 本地仅允许读取、编辑、搜索、`git diff --check` 等轻量静态检查。所有测试、build、vet、race、Node、Pulumi、SSH、Docker 和 release assembly 只在精确远端 SHA 的 GitHub Actions 中执行。
+- Verification: 本地仅允许读取、编辑、搜索、`git diff --check` 等轻量静态检查。所有测试、build、vet、race、Pulumi、SSH、Docker 和 release assembly 只在精确远端 SHA 的 GitHub Actions 中执行。
 - TDD: 每个行为任务先发布 test-only RED SHA；只有确认预期行为失败后才发布最小实现 GREEN SHA。
 - Scheduling: 并行任务写路径不得重叠；`.github/workflows/**`、`go.mod`、`go.sum` 和 release shared artifacts 串行接管。
 
@@ -26,7 +26,7 @@
 
 ### Task 1: Exact-SHA CI Evidence Foundation
 
-**Owns:** `.github/workflows/ci.yml`, `test/controller-ci.test.ts`
+**Owns:** `.github/workflows/ci.yml`, `scripts/ci-evidence.py`
 
 **Depends on:** none
 
@@ -118,7 +118,7 @@
 
 ### Task 9: Target Supported Release Candidate
 
-**Owns:** `scripts/release-bundle.sh`, `scripts/release-bundle-files.txt`, `scripts/verify-release.sh`, `scripts/pulumi-go-shim.sh`, `test/release-bundle.test.ts`, `test/pulumi-runtime.test.ts`, `Pulumi.production.example.yaml`, `README.md`
+**Owns:** `scripts/release-bundle.sh`, `scripts/release-bundle-files.txt`, `scripts/verify-release.sh`, `scripts/pulumi-go-shim.sh`, `Pulumi.production.example.yaml`, `README.md`
 
 **Depends on:** Tasks 2、3、4、8；只消费 public CLI、target Program build、accepted Program graph 和 Import-capable Provider binary
 

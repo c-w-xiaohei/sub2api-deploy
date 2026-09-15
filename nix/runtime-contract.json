@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "supportedSystems": {
+    "controller": ["x86_64-linux"],
+    "host-environment": ["x86_64-linux", "aarch64-linux"]
+  },
+  "executablePaths": {
+    "controller": [
+      "bin/sub2api-deploy", "bin/go", "bin/pulumi", "bin/pulumi-language-go", "bin/sops", "bin/ssh",
+      "bin/pulumi-program", "bin/pulumi-resource-sub2api-host",
+      "artifacts/sub2api-host/sub2api-host-linux-amd64", "artifacts/sub2api-host/sub2api-host-linux-arm64",
+      "workspace/bin/pulumi-program", "tools/bin/sh", "tools/bin/cp", "tools/bin/mkdir",
+      "tools/bin/chmod", "tools/bin/printf", "tools/bin/sha256sum", "tools/bin/cut",
+      "tools/bin/tr", "tools/bin/rm", "tools/bin/dirname", "tools/bin/readlink", "tools/bin/ln", "tools/bin/uname"
+    ],
+    "host-environment": [
+      "bin/docker", "bin/dockerd", "bin/containerd", "bin/runc", "bin/nft", "bin/ssh",
+      "tools/bin/sh", "tools/bin/cp", "tools/bin/mkdir", "tools/bin/chmod", "tools/bin/printf",
+      "tools/bin/sha256sum", "tools/bin/cut", "tools/bin/tr", "tools/bin/rm"
+    ]
+  },
+  "requiredPaths": {
+    "controller": [
+      "bin/sub2api-deploy", "bin/go", "bin/pulumi", "bin/pulumi-language-go", "bin/sops", "bin/ssh",
+      "bin/pulumi-program", "bin/pulumi-resource-sub2api-host",
+      "artifacts/sub2api-host/manifest.json", "artifacts/sub2api-host/sub2api-host-linux-amd64",
+      "artifacts/sub2api-host/sub2api-host-linux-arm64", "workspace/Pulumi.yaml",
+      "workspace/bin/pulumi-program", "workspace/bin/plugins", "go.mod",
+      "scripts/pulumi-plugins/cloudflare/pulumi-plugin.json",
+      "scripts/pulumi-plugins/upstash/pulumi-plugin.json", "share/sub2api-runtime/inventory.json",
+      "tools/bin/sh", "tools/bin/cp", "tools/bin/mkdir", "tools/bin/chmod",
+      "tools/bin/printf", "tools/bin/sha256sum", "tools/bin/cut", "tools/bin/tr",
+      "tools/bin/rm", "tools/bin/dirname", "tools/bin/readlink", "tools/bin/ln", "tools/bin/uname"
+    ],
+    "host-environment": [
+      "bin/docker", "bin/dockerd", "bin/containerd", "bin/runc", "bin/nft", "bin/ssh",
+      "share/sub2api-runtime/inventory.json", "tools/bin/sh", "tools/bin/cp",
+      "tools/bin/mkdir", "tools/bin/chmod", "tools/bin/printf", "tools/bin/sha256sum",
+      "tools/bin/cut", "tools/bin/tr", "tools/bin/rm"
+    ]
+  }
+}

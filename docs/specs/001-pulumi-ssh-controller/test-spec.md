@@ -26,12 +26,28 @@ must drive the pinned official Pulumi CLI through the public Automation SDK;
 repository test binaries must not import the Engine/backend/deploy implementation.
 Test-owned loopback Provider RPC servers remain valid fake providers, while the
 Engine scheduling, checkpoint, preview, and import behavior must remain real.
-The production Program and Host Provider retain their official SDKs.
+The production Program and Host Provider retain the public Pulumi SDK. The
+Cloudflare-specific generated SDK boundary is subsequently narrowed by
+[Cloudflare SDK Isolation](./cloudflare-sdk-isolation.md); the official
+Cloudflare Provider executable remains authoritative.
 
 Historical Task 4 evidence is bound to `46be3e2` and does not verify this migration.
 Current exact-SHA functional and resource evidence is tracked in
 `../../plans/automation-api-migration-evidence.md`. Local builds/tests remain
 prohibited; warm single-process RSS is not aggregate build memory evidence.
+
+### Runtime Infrastructure Amendments (2026-09-14)
+
+- Nix scope and current pending evidence are recorded in
+  [Nix Runtime Spec](./nix-runtime-spec.md) and
+  [Nix Runtime Test Spec](./nix-runtime-test-spec.md).
+- Removal of the previous script runtime must preserve legacy adoption,
+  explicit rollback, strict persisted-state validation, Neon failure semantics,
+  sanitized CI evidence, and exact-byte release promotion. Replacement Go and
+  Shell/Python tests must execute those behaviors; deleting the old test runner
+  is not permission to drop their assertions.
+- Current dirty-worktree changes have not run exact-SHA CI. Past successful
+  Automation migration runs do not establish acceptance of these amendments.
 
 | Module | Interface under test | Production seam | Candidate test adapter / path | Required integration boundary | Owner |
 | --- | --- | --- | --- | --- | --- |
@@ -41,7 +57,7 @@ prohibited; warm single-process RSS is not aggregate build memory evidence.
 | Host process | stdin/stdout one-request process | `cmd/sub2api-host` | `cmd/sub2api-host/main_test.go` | process -> temp runtime/test-only command runner | Host-process/Runtime |
 | Host runtime | inspect/reconcile/retire -> observation/result | filesystem + Docker/route/probe commands | `internal/hostruntime/*_test.go` tempFS + recordingRunner | Provider lifecycle connects through test-only seam | Runtime |
 | Public CLI | user command/SOPS/approval -> Pulumi invocation | released `sub2api-deploy` | `cmd/sub2api-deploy/*_test.go` fake executable + PTY | public command must invoke attached Provider/Pulumi path | CLI |
-| Release | release inputs -> verifiable bundle | GHA release assembly | `test/release-bundle.test.ts`; `cmd/sub2api-environment/main_test.go` fixture | target exact-SHA assembled artifact consumed separately | Release |
+| Release | release inputs -> verifiable bundle | GHA release assembly | `scripts/release-bundle.sh`; `cmd/sub2api-environment/main_test.go` fixture | target exact-SHA assembled artifact consumed separately | Release |
 
 `WithMocks` proves registration/projection only, not Engine/backend transitions. Recording transport proves Provider calls only, not host-key semantics. Loopback proves OpenSSH behavior only. `recordingRunner` never proves Docker. No test seam may add a production public API, permanent two-Host root, or controller state.
 
@@ -56,7 +72,7 @@ prohibited; warm single-process RSS is not aggregate build memory evidence.
 | `internal/hostruntime/runtime_test.go`, `reconcile_test.go` | tempFS/journal/lock, recovery, blue/green rollback, preserve-data/retire, recordingRunner containment | candidate-unverified / implementation-present-evidence-pending | Provider Runtime includes a two-Host candidate/live harness; no exact-SHA evidence |
 | `cmd/sub2api-deploy/*_test.go` | staged stack helpers, fake executable process handling, attached Provider helpers, PTY exact approval, target validation | candidate-unverified / implementation-present-evidence-pending | public CLI subprocess/PTY evidence remains CI-only |
 | `cmd/sub2api-environment/main_test.go` | executable-relative manifest fixture and caller mock diagnostics | candidate-unverified / implementation-present-evidence-pending | target release artifact consumption |
-| `test/release-bundle.test.ts` | fixture assembly, manifest/ELF/tamper/archive/workflow structural checks | candidate-unverified / implementation-present-evidence-pending | target release harness/workflow exists; exact-SHA candidate evidence is pending |
+| `scripts/release-bundle.sh` | fixture assembly, manifest/ELF/tamper/archive checks | candidate-unverified / implementation-present-evidence-pending | target release harness/workflow exists; exact-SHA candidate evidence is pending |
 
 ## 2. Dependency Integration Environment
 
@@ -167,7 +183,7 @@ SingBox has no MX row: it is explicitly excluded from 001, not a skipped impleme
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | MX-CLI-01 (new, helper) | TR-SEC-04/05, TR-DATA-01 | EP+Decision | fake PATH, staged input, PTY | internal CLI helper | existing tests assert private stack staging/passphrase separation and exact PTY challenge mechanics | helper-specific cleanup/redaction only; it makes no public command dispatch claim | fake executables + PTY | CLI | `TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi`, `TestTerminalApprovalAdapterRequiresTerminalAndAcceptsExactPTYChallenge` | planned `GHA@REMOTE_SHA:cli-helper` | candidate-unverified / implementation-present-evidence-pending |
 | MX-CLI-02 (new, public) | TR-STATE-01, TR-SEC-04/05, TR-DATA-01..03 | Decision+Negative | released CLI and ordinary user command | invoke public `pulumi` command | supported public command stages SOPS, starts attached Provider/Pulumi with exact approval channel | invalid/input failure starts neither process; declined approval may occur after both start but creates no SSH write, journal intent or runtime mutation, and reaps both processes/fd | planned CLI subprocess + fake executables/PTY | CLI | planned: `TestPublicCLIWiresPulumiProviderAndApproval` | planned `GHA@REMOTE_SHA:public-cli` | implementation-present/evidence-pending + harness-gap |
-| MX-RELEASE-01 (new, fixture) | TR-LC-CREATE-02 | Negative | fixture components/manifest | fixture assemble/verify | existing test asserts manifest, ELF metadata, tamper rejection | invalid archive/artifact never reaches verifier consumer | release fixture | Release | `test/release-bundle.test.ts: assembles the control plane and a strict, verifiable Host artifact manifest` | planned `GHA@REMOTE_SHA:release-fixture` | candidate-unverified / implementation-present-evidence-pending |
+| MX-RELEASE-01 (new, fixture) | TR-LC-CREATE-02 | Negative | fixture components/manifest | fixture assemble/verify | release bundle verifier asserts manifest, ELF metadata, and tamper rejection | invalid archive/artifact never reaches verifier consumer | release fixture | Release | `scripts/release-bundle.sh: assembles the control plane and a strict, verifiable Host artifact manifest` | planned `GHA@REMOTE_SHA:release-fixture` | candidate-unverified / implementation-present-evidence-pending |
 | MX-RELEASE-02 (new, target) | TR-LC-CREATE-02, AC-12 | Decision | target exact-SHA supported release input | assemble candidate then consume it in isolation | candidate contains CLI、Program、Provider 和双架构 Host artifacts with verified manifest，active inventory不含 legacy execution surface | malformed/missing target artifact cannot reach Create | target-release workflow + isolated consumer harness | Release | target candidate consumer in workflow | `GHA@REMOTE_SHA:target-release` | implementation-present/evidence-pending; no exact-SHA candidate evidence, published release not claimed |
 | MX-SEC-01 (`TS-P0-SEC-01`) | TR-SEC-04/05, TR-OBS-03 | Negative | distinct per-layer canaries | Program/SSH/runtime execution | existing symbols only cover their named local diagnostic/property boundary | planned cross-layer scan must find zero in argv/output/log/stderr/journal/non-target Host | module seams; planned layered artifacts | Security | `TestRunDoesNotExposeStderrCanary`, `TestBootstrapRejectsInvalidMachineBeforeStateOrMutationWithoutSecretLeak`; planned: `TestLayeredSecretCanaryContainment` | planned `GHA@REMOTE_SHA:secret-boundaries` | candidate-unverified / implementation-present-evidence-pending |
 

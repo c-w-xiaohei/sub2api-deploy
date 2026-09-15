@@ -5,7 +5,6 @@ go 1.25.11
 require (
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/pkg/term v1.1.0
-	github.com/pulumi/pulumi-cloudflare/sdk/v6 v6.18.0
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-go-provider v1.4.1
 	github.com/pulumi/pulumi/sdk/v3 v3.256.0

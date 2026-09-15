@@ -1,0 +1,9 @@
+[Unit]
+Description=Sub2API Nix Docker socket
+
+[Socket]
+ListenStream=/run/docker.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

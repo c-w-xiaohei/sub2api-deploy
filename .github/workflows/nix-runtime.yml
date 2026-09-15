@@ -1,0 +1,48 @@
+name: Nix Runtime Fixture
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "agent/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-fixtures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # NixOS/nix-installer-action's main commit was resolved through GitHub's
+      # API; the explicit upstream installer release supplies only CI's Nix CLI.
+      - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6
+        with:
+          installer-version: "2.35.2"
+          add-channel: "false"
+          init: "yes"
+          enable-kvm: "false"
+      - name: Run Nix runtime fixtures
+        run: |
+          set -euo pipefail
+          python3 scripts/tests/nix_release_descriptor_test.py
+          bash nix/tests/runtime-fixture-test.sh
+          bash nix/tests/controller-workspace-fixture-test.sh
+          bash nix/tests/host-activation-fixture-test.sh
+          bash nix/tests/environments-fixture-test.sh
+          bash nix/tests/profile-install-fixture-test.sh
+      - name: State fixture evidence boundary
+        run: |
+          printf '%s\n' 'The CI fixture proves Nix can install and run a local opaque store path.'
+          printf '%s\n' 'It is not a real runtime release, GitHub asset, ELF/library, or production activation proof.'
+      - name: Record exact-SHA fixture evidence
+        run: |
+          python3 - <<'PY' > "$RUNNER_TEMP/nix-runtime-evidence.json"
+          import json, os
+          print(json.dumps({"schemaVersion": 1, "sha": os.environ["GITHUB_SHA"], "tests": "runtime-fixtures"}, sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nix-runtime-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/nix-runtime-evidence.json
+          retention-days: 30

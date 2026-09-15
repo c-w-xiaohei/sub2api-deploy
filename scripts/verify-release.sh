@@ -12,15 +12,11 @@ mapfile -t packages < "$package_file"
 target_packages=()
 infra_found=false
 for package in "${packages[@]}"; do
-  if [[ "$package" == "$module/infra" ]]; then
-    infra_found=true
-    continue
-  fi
+  [[ "$package" == "$module/infra" ]] && infra_found=true
   target_packages+=("$package")
 done
 [[ "$infra_found" == true ]] || { printf 'release verification failed: legacy infra package was not enumerated\n' >&2; exit 1; }
 ((${#target_packages[@]} > 0)) || { printf 'release verification failed: no target Go packages were enumerated\n' >&2; exit 1; }
-# Legacy infra source remains in the repository but is not target release verification surface.
 go test -count=1 "${target_packages[@]}"
 go vet "${target_packages[@]}"
 go mod verify

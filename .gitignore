@@ -1,4 +1,3 @@
-node_modules/
 dist/
 release/
 .pulumi/
@@ -7,6 +6,7 @@ release/
 !.env.example
 Pulumi.*.yaml
 !Pulumi.production.example.yaml
-runtime/
+/runtime/
+__pycache__/
 *.log
 tmp/

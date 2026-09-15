@@ -2,7 +2,7 @@
 
 ## Status
 
-CI-ready / exact-SHA evidence pending. No local npm, Go, build, release, Docker,
+CI-ready / exact-SHA evidence pending. No local Go, build, release, Docker,
 or privileged command was run for this wiring.
 
 ## Delivered Wiring
@@ -66,6 +66,6 @@ image approval; approved immutable production image digests remain external.
 
 ## Verification Limit
 
-YAML parsing, Node syntax checks for the static contract tests, and scoped diff
-checks passed locally. Exact-SHA execution, privileged namespace behavior,
+Python syntax checks for the evidence helper and scoped diff checks passed
+locally. Exact-SHA execution, privileged namespace behavior,
 image availability, and promotion evidence remain pending CI.

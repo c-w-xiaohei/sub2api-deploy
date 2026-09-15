@@ -14,7 +14,7 @@ state_file="${SITE_DEPLOY_STATE_PATH:?SITE_DEPLOY_STATE_PATH is required}"
 : "${GREEN_EDGE_ALIAS:?GREEN_EDGE_ALIAS is required}"
 POSTGRES_MODE="${POSTGRES_MODE:?POSTGRES_MODE is required}"
 REDIS_MODE="${REDIS_MODE:?REDIS_MODE is required}"
-npx --no-install tsx scripts/deployment-mode.ts check "$state_file" "$POSTGRES_MODE" "$REDIS_MODE"
+sub2api-deploy runtime deployment-mode check "$state_file" "$POSTGRES_MODE" "$REDIS_MODE"
 APP_PROBE_PATH="${APP_PROBE_PATH:?APP_PROBE_PATH is required}"
 DRAIN_SECONDS="${DRAIN_SECONDS:?DRAIN_SECONDS is required}"
 export APP_PROBE_PATH DRAIN_SECONDS
@@ -22,11 +22,11 @@ drain_seconds="${DRAIN_SECONDS:-10}"
 public_probe_path="/health"
 
 if [[ -f "$state_file" ]]; then
-  active_slot="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeSlot)' "$state_file")"
+  active_slot="$(sub2api-deploy runtime read-state "$state_file" activeSlot)"
 else
   active_slot=blue
 fi
-previous_image="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(s.activeImage)' "$state_file")"
+previous_image="$(sub2api-deploy runtime read-state "$state_file" activeImage)"
 if [[ "$active_slot" == blue ]]; then inactive_slot=green; else inactive_slot=blue; fi
 
 # The inactive volume must be stopped before copying install/config markers.
@@ -54,7 +54,7 @@ had_route=false
 [[ -f "$SITE_ROUTE_PATH" ]] && had_route=true
 [[ -f "$SITE_ROUTE_PATH" ]] && cp "$SITE_ROUTE_PATH" "$previous_route"
 edge_alias="$BLUE_EDGE_ALIAS"; [[ "$inactive_slot" == green ]] && edge_alias="$GREEN_EDGE_ALIAS"
-npx --no-install tsx scripts/render-site-route.ts write traefik/dynamic/site.yml "$SITE_ROUTE_PATH" "$SITE_ID" "$domain" "$inactive_slot" "$edge_alias"
+sub2api-deploy runtime route write traefik/dynamic/site.yml "$SITE_ROUTE_PATH" "$SITE_ID" "$domain" "$inactive_slot" "$edge_alias"
 if ! bash scripts/probe-origin.sh "$domain" "$public_probe_path"; then
   if [[ "$had_route" == true ]]; then mv -f "$previous_route" "$SITE_ROUTE_PATH"; else rm -f "$SITE_ROUTE_PATH"; fi
   site_stop_service "sub2api-${inactive_slot}"
@@ -64,5 +64,5 @@ rm -f "$previous_route"
 
 sleep "$drain_seconds"
 site_stop_service "sub2api-${active_slot}"
-state_json="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); s.previousSlot=s.activeSlot; s.previousImage=s.activeImage; s.activeSlot=process.argv[2]; s.activeImage=process.argv[3]; process.stdout.write(JSON.stringify(s))' "$state_file" "$inactive_slot" "$image")"
-npx --no-install tsx scripts/write-deploy-state.ts write "$state_file" "$state_json"
+state_json="$(sub2api-deploy runtime transition-state "$state_file" "$inactive_slot" "$image")"
+sub2api-deploy runtime state write "$state_file" "$state_json"

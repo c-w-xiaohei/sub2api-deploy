@@ -16,7 +16,7 @@ type neonProjectLike interface {
 func validateNeonRegion(ctx *pulumi.Context, site pulumi.Resource, siteID string, project *neonProject, apiKey pulumi.StringInput, region string, preflight pulumi.Resource, endpointChecksum string) (*local.Command, error) {
 	environment := pulumi.StringMap{"NEON_API_KEY": apiKey, "NEON_PROJECT_ID": project.ID(), "NEON_ENDPOINT_HOST": project.Default_endpoint_host, "NEON_REGION": pulumi.String(region)}
 	triggers := []string{"neon-region-validation-v1", siteID, endpointChecksum, region}
-	return newCommand(ctx, "site-"+siteID+"-neon-region", "bash scripts/node-env.sh npx --no-install tsx scripts/validate-neon-region.ts", environment, triggers, site, preflight, project)
+	return newCommand(ctx, "site-"+siteID+"-neon-region", "sub2api-deploy runtime neon-region", environment, triggers, site, preflight, project)
 }
 
 func reconcileNeonEndpointSettings(ctx *pulumi.Context, site pulumi.Resource, siteID string, project neonProjectLike, apiKey pulumi.StringInput, region string, compute NeonComputeSpec, preflight, regionValidation pulumi.Resource, endpointChecksum string) (*local.Command, error) {
@@ -33,7 +33,7 @@ func reconcileNeonEndpointSettings(ctx *pulumi.Context, site pulumi.Resource, si
 	if regionValidation != nil {
 		dependencies = append(dependencies, regionValidation)
 	}
-	return newCommand(ctx, "site-"+siteID+"-neon-endpoint-settings", "bash scripts/node-env.sh npx --no-install tsx scripts/reconcile-neon-endpoint.ts", environment, triggers, site, dependencies...)
+	return newCommand(ctx, "site-"+siteID+"-neon-endpoint-settings", "sub2api-deploy runtime neon-endpoint", environment, triggers, site, dependencies...)
 }
 
 func formatFloat(value float64) string { return fmt.Sprintf("%g", value) }

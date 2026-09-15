@@ -104,7 +104,7 @@ func deployHostGraph(ctx *pulumi.Context, host HostSpec, layouts []SiteLayout, s
 	if err != nil {
 		return HostGraphExports{}, err
 	}
-	preflight, err := newHostCommand(ctx, "host-preflight", "npx --no-install tsx scripts/host-preflight.ts check \"$CONFIGURED_SITE_IDS\" \"$HOST_STATE_PATH\" \"$ALLOW_PENDING_LEGACY_PREVIEW\" \"$EXPECTED_SITE_MODES\"", pulumi.StringMap{
+	preflight, err := newHostCommand(ctx, "host-preflight", "sub2api-deploy runtime host-preflight check \"$CONFIGURED_SITE_IDS\" \"$HOST_STATE_PATH\" \"$ALLOW_PENDING_LEGACY_PREVIEW\" \"$EXPECTED_SITE_MODES\"", pulumi.StringMap{
 		"CONFIGURED_SITE_IDS": pulumi.String(configuredSiteIDs), "HOST_STATE_PATH": pulumi.String(hostStatePath),
 		"ALLOW_PENDING_LEGACY_PREVIEW": pulumi.String(fmt.Sprintf("%t", ctx.DryRun() && os.Getenv("ALLOW_PENDING_LEGACY_PREVIEW") == "1")),
 		"EXPECTED_SITE_MODES":          pulumi.String(expectedModes),
@@ -194,10 +194,10 @@ func hostChecksum() (string, error) {
 	return checksumFiles(hostChecksumPaths)
 }
 
-var edgeChecksumPaths = []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "scripts/render-edge-config.ts", "scripts/render-runtime-env.ts", "traefik/traefik.yml", "traefik/dynamic/sing-box.yml"}
-var siteChecksumPaths = []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/read-runtime-env.cjs", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "scripts/probe-origin.sh", "scripts/probe-origin-strict.sh", "scripts/render-site-route.ts", "scripts/render-runtime-env.ts", "scripts/verify-legacy-app-env.ts", "scripts/deployment-mode.ts", "scripts/write-deploy-state.ts", "scripts/write-bootstrap-marker.ts", "src/deployment-preflight.ts", "traefik/dynamic/site.yml"}
-var neonEndpointChecksumPaths = []string{"scripts/node-env.sh", "scripts/create-neon-project.ts", "scripts/fetch-neon-connection.ts", "scripts/reconcile-neon-endpoint.ts", "scripts/validate-neon-region.ts"}
-var hostChecksumPaths = []string{"scripts/host-preflight.ts", "scripts/finalize-host-state.sh", "scripts/write-host-state.cjs"}
+var edgeChecksumPaths = []string{"compose/edge.yml", "scripts/edge-compose-common.sh", "scripts/reconcile-edge.sh", "traefik/traefik.yml", "traefik/dynamic/sing-box.yml", "internal/runtime/runtime.go"}
+var siteChecksumPaths = []string{"compose/site.yml", "compose/upstream.yml", "scripts/site-compose-common.sh", "scripts/reconcile-site.sh", "scripts/bootstrap-site.sh", "scripts/application-release.sh", "scripts/switch-slot.sh", "scripts/rollback-slot.sh", "scripts/probe-origin.sh", "scripts/probe-origin-strict.sh", "traefik/dynamic/site.yml", "internal/runtime/runtime.go"}
+var neonEndpointChecksumPaths = []string{"internal/runtime/runtime.go"}
+var hostChecksumPaths = []string{"scripts/finalize-host-state.sh", "internal/runtime/runtime.go"}
 
 func checksumFiles(candidates []string) (string, error) {
 	files := make([]string, 0, len(candidates))

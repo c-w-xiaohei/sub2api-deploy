@@ -130,7 +130,7 @@ Host内部派生并隐藏：
 
 - 一个VPS一个Pulumi Stack。
 - Pulumi在目标VPS本地运行。
-- Go Program通过`command.local.Command`调用Shell/TypeScript和本地Docker Compose。
+- Go Program通过`command.local.Command`调用legacy Shell helper和本地Docker Compose；新的runtime helper由`sub2api-deploy runtime`提供。
 - 每Host包含共享Edge和多个隔离Site。
 - Cloudflare、Neon和Upstash与Host Stack耦合。
 - 现有blue/green、preflight、adoption和state脚本是迁移行为证据。
@@ -141,7 +141,7 @@ Host内部派生并隐藏：
 - `deploy/infra/commands.go`使用`command.local.Command`。
 - `deploy/scripts/reconcile-site.sh`管理本机data/App/route和probe。
 - `deploy/scripts/application-release.sh`与`switch-slot.sh`管理image blue/green。
-- `deploy/scripts/host-preflight.ts`、`deployment-preflight.ts`和state writers提供adoption/ownership证据。
+- `deploy/internal/runtime`和legacy state/adoption writers提供adoption/ownership证据。
 - `deploy/infra/cloudflare.go`、`database.go`、`redis.go`包含现有云资源身份和生命周期。
 - Go版本固定`1.25.11`，不得升级。
 - 当前环境实际有Go 1.25.11和Docker 29.3.0；不能以“本地没有Go/Docker”为spec前提。
@@ -229,7 +229,11 @@ Remote state不是第二份环境配置；控制机本地临时批准或命令�
 
 不做冒烟测试。真实公网endpoint、云服务可用性和最终用户路径探测不属于自动化测试、部署后验收或完成门槛。`sub2api-host`在reconcile期间执行的Host本机health/readiness检查是安全切换和依赖排序的运行时前置条件，不是冒烟测试；它不得扩展为公网或端到端探测。
 
-禁止本地构建。不得在开发机执行`go build`、`npm run build`、release bundle assembly或其他二进制/发布产物构建命令；所有构建与发布产物验证必须由CI环境执行并提供证据。本地只运行单元测试、静态检查、格式/语法检查和不生成发布产物的rehearsal。
+本地验证遵循仓库 `AGENTS.md`：只允许用户明确授权的窄范围、串行、低并发
+Go 构建或测试，并先拒绝 Pulumi Engine 与全量 Cloudflare SDK 依赖闭包；
+禁止 broad `./...`、本地 release assembly、Docker/生产 Pulumi 和资源基准。
+发布产物及完整功能验收仍必须由 exact-SHA CI 提供证据。Node 工具链已
+移除，不再存在本地 `npm run build` 路径。
 
 ## 11. 远端弃用分支的可参考内容
 

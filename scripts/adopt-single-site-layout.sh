@@ -11,7 +11,7 @@ edge_root="$runtime_root/edge"; edge_env="$edge_root/edge.env"; edge_static="$ed
 
 require_legacy() { [[ -f "$legacy_state" && ! -e "$host_state" ]] || { printf 'expected legacy deploy state and no host state\n' >&2; exit 1; }; }
 require_apply_inputs() { : "${TRAEFIK_IMAGE:?TRAEFIK_IMAGE is required}" "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required}" "${ACME_EMAIL:?ACME_EMAIL is required}" "${SING_BOX_SERVER_NAME:?SING_BOX_SERVER_NAME is required}" "${SING_BOX_TARGET:?SING_BOX_TARGET is required}" "${DOMAIN:?DOMAIN is required}" "${ORIGIN_IP:?ORIGIN_IP is required}" "${APP_PROBE_PATH:?APP_PROBE_PATH is required}" "${SING_BOX_VERIFY_COMMAND:?SING_BOX_VERIFY_COMMAND is required}" "${POSTGRES_MODE:?POSTGRES_MODE is required}" "${REDIS_MODE:?REDIS_MODE is required}"; [[ "$POSTGRES_MODE" == docker || "$POSTGRES_MODE" == neon ]] || { printf 'POSTGRES_MODE must be docker or neon\n' >&2; exit 1; }; [[ "$REDIS_MODE" == docker || "$REDIS_MODE" == upstash ]] || { printf 'REDIS_MODE must be docker or upstash\n' >&2; exit 1; }; }
-slot() { node -e 'const x=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if(!["blue","green"].includes(x.activeSlot)) process.exit(1); process.stdout.write(x.activeSlot)' "$legacy_state"; }
+slot() { sub2api-deploy runtime read-state "$legacy_state" activeSlot; }
 one_legacy() { local value; value="$(docker ps -q --filter label=com.docker.compose.project=sub2api --filter "label=com.docker.compose.service=$1" --filter status=running)"; [[ -n "$value" && "$value" != *$'\n'* ]] || { printf 'expected exactly one running labeled legacy %s container\n' "$1" >&2; exit 1; }; printf '%s' "$value"; }
 container_labels() { docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}/{{index .Config.Labels "com.docker.compose.service"}}' "$1"; }
 network_labels() { docker network inspect -f '{{index .Labels "com.docker.compose.project"}}' sub2api-edge; }
@@ -37,7 +37,7 @@ read_journal() {
 }
 set_journal() { local key="$1" value="$2" tmp="$journal.$$.next" line; while IFS= read -r line; do [[ "$line" == "$key="* ]] && line="$key=$value"; printf '%s\n' "$line"; done < "$journal" > "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$journal"; read_journal; }
 write_journal() { local tmp="$journal.$$.tmp"; (umask 077; printf 'version=1\nenvironment=%s\nsite=code2\nhost_state=%s\nlegacy_project=sub2api\nlegacy_traefik=%s\nactive_slot=%s\nactive_app=%s\nedge_project=sub2api-edge\nedge_root=%s\nroute=%s\nroute_backup=%s\nroute_preexisting=%s\nroute_backup_intent=false\nroute_backup_created=false\nroute_write_intent=false\nedge_network=sub2api-edge\nnetwork_intent=false\nnetwork_created=false\nattachment_intent=false\nattachment_created=false\nedge_container=uncreated\nedge_container_preexisting=false\nedge_container_intent=false\nedge_dynamic_dir_created=false\nedge_env_intent=false\nedge_env_created=false\nedge_static_intent=false\nedge_static_created=false\nedge_singbox_intent=false\nedge_singbox_created=false\nacme_destination_preexisting=%s\nacme_intent=false\nacme_created=false\nlegacy_state_backup=%s\nlegacy_state_backup_intent=false\nlegacy_state_backup_created=false\nlegacy_state_adopted=false\nstate=prepared\n' "$environment" "$host_state" "$legacy_traefik" "$active_slot" "$active_app" "$edge_root" "$route" "$route_backup" "$route_preexisting" "$acme_preexisting" "$legacy_state_backup" > "$tmp"); chmod 600 "$tmp"; mv -f "$tmp" "$journal"; }
-mapping_state() { node -e 'const x=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const want=process.argv[2]; const ok=x.version===1&&x.sites?.length===1&&x.sites[0]==="code2"&&x.legacyCode2?.runtimeRoot==="runtime"&&x.legacyCode2?.composeProject==="sub2api"&&x.legacyCode2?.routeLayout==="flat"&&(want==="either"||x.legacyCode2?.handoverComplete===(want==="complete")); process.exit(ok?0:1)' "$host_state" "$1"; }
+mapping_state() { sub2api-deploy runtime mapping-state "$host_state" "$1"; }
 rollback_pair() { case "${j[state]}" in prepared) [[ ! -e "$host_state" ]] || mapping_state pending ;; pending) mapping_state pending ;; completing) mapping_state either ;; complete) mapping_state complete ;; *) return 1 ;; esac; }
 validate_owned_resources() {
   [[ "$(container_labels "${j[legacy_traefik]}")" == sub2api/traefik && "$(container_labels "${j[active_app]}")" == "sub2api/sub2api-${j[active_slot]}" ]] || { printf 'journaled legacy container labels changed\n' >&2; exit 1; }
@@ -68,13 +68,13 @@ restore() {
 }
 stage_edge() {
   if [[ ! -d "$edge_root/dynamic" ]]; then set_journal edge_dynamic_dir_created true; mkdir -p "$edge_root/dynamic"; fi
-  set_journal edge_env_intent true; TRAEFIK_IMAGE="$TRAEFIK_IMAGE" CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" ACME_EMAIL="$ACME_EMAIL" EDGE_RUNTIME_ROOT="$edge_root" node -e 'process.stdout.write(JSON.stringify({TRAEFIK_IMAGE:process.env.TRAEFIK_IMAGE,CLOUDFLARE_DNS_API_TOKEN:process.env.CLOUDFLARE_API_TOKEN,ACME_EMAIL:process.env.ACME_EMAIL,EDGE_RUNTIME_ROOT:process.env.EDGE_RUNTIME_ROOT}))' | npx --no-install tsx scripts/render-runtime-env.ts write "$edge_env"; set_journal edge_env_created true
-  set_journal edge_static_intent true; set_journal edge_singbox_intent true; npx --no-install tsx scripts/render-edge-config.ts write "$edge_root" traefik/traefik.yml traefik/dynamic/sing-box.yml "$ACME_EMAIL" "$SING_BOX_SERVER_NAME" "$SING_BOX_TARGET"; set_journal edge_static_created true; set_journal edge_singbox_created true
+  set_journal edge_env_intent true; TRAEFIK_IMAGE="$TRAEFIK_IMAGE" CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" ACME_EMAIL="$ACME_EMAIL" EDGE_RUNTIME_ROOT="$edge_root" sub2api-deploy runtime edge-env | sub2api-deploy runtime dotenv write "$edge_env"; set_journal edge_env_created true
+  set_journal edge_static_intent true; set_journal edge_singbox_intent true; sub2api-deploy runtime edge write "$edge_root" traefik/traefik.yml traefik/dynamic/sing-box.yml "$ACME_EMAIL" "$SING_BOX_SERVER_NAME" "$SING_BOX_TARGET"; set_journal edge_static_created true; set_journal edge_singbox_created true
   if [[ "${j[acme_destination_preexisting]}" == false ]]; then set_journal acme_intent true; [[ -f "$legacy_acme" ]] && cp -p "$legacy_acme" "$edge_acme" || : > "$edge_acme"; chmod 600 "$edge_acme"; set_journal acme_created true; fi
 }
 
 if [[ "$mode" == dry-run ]]; then require_legacy; printf 'dry-run: no files, Docker, network, or host state will be changed\n'; exit 0; fi
-if [[ "$mode" == prepare-preview ]]; then require_legacy; node scripts/write-host-state.cjs write-legacy "$host_state" code2 pending; exit 0; fi
+if [[ "$mode" == prepare-preview ]]; then require_legacy; sub2api-deploy runtime host-state write-legacy "$host_state" code2 pending; exit 0; fi
 if [[ "$mode" == rollback ]]; then read_journal; rollback_pair || { printf 'journal and host state are not a recoverable pair\n' >&2; exit 1; }; restore; exit 0; fi
 if [[ "$mode" == retire-journal ]]; then
   read_journal
@@ -92,26 +92,26 @@ exists_network && { printf 'sub2api-edge network already exists; refusing owners
 existing_edge="$(docker ps -aq --filter label=com.docker.compose.project=sub2api-edge --filter label=com.docker.compose.service=traefik)"; [[ -z "$existing_edge" ]] || { printf 'Edge container already exists\n' >&2; exit 1; }
 route_preexisting=false; [[ -f "$route" ]] && route_preexisting=true; acme_preexisting=false; [[ -f "$edge_acme" ]] && acme_preexisting=true
 write_journal; trap 'read_journal; rollback_pair; restore' ERR
-if node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(s.postgresMode && s.redisMode ? 0 : 1)' "$legacy_state"; then
-  npx --no-install tsx scripts/deployment-mode.ts check "$legacy_state" "$POSTGRES_MODE" "$REDIS_MODE"
+if sub2api-deploy runtime has-modes "$legacy_state"; then
+  sub2api-deploy runtime deployment-mode check "$legacy_state" "$POSTGRES_MODE" "$REDIS_MODE"
 else
   [[ ! -e "$legacy_state_backup" ]] || { printf 'legacy deploy-state backup already exists; refusing overwrite\n' >&2; exit 1; }
   set_journal legacy_state_backup_intent true
   [[ -f "$legacy_state_backup" ]] || cp -p "$legacy_state" "$legacy_state_backup"
   set_journal legacy_state_backup_created true
-  npx --no-install tsx scripts/deployment-mode.ts adopt "$legacy_state" "$POSTGRES_MODE" "$REDIS_MODE"
+  sub2api-deploy runtime deployment-mode adopt "$legacy_state" "$POSTGRES_MODE" "$REDIS_MODE"
   set_journal legacy_state_adopted true
 fi
-node scripts/write-host-state.cjs write-legacy "$host_state" code2 pending; set_journal state pending
+sub2api-deploy runtime host-state write-legacy "$host_state" code2 pending; set_journal state pending
 stage_edge; if [[ "$route_preexisting" == true ]]; then set_journal route_backup_intent true; cp -p "$route" "$route_backup"; set_journal route_backup_created true; fi
 set_journal network_intent true; set_journal edge_container_intent true; EDGE_RUNTIME_ROOT="$edge_root" TRAEFIK_IMAGE="$TRAEFIK_IMAGE" CLOUDFLARE_DNS_API_TOKEN="$CLOUDFLARE_API_TOKEN" ACME_EMAIL="$ACME_EMAIL" docker compose --project-name sub2api-edge --env-file "$edge_env" -f compose/edge.yml create traefik
 exists_network && [[ "$(network_labels)" == sub2api-edge ]] || exit 1; set_journal network_created true
 edge_container="$(docker ps -aq --filter label=com.docker.compose.project=sub2api-edge --filter label=com.docker.compose.service=traefik)"; [[ -n "$edge_container" && "$edge_container" != *$'\n'* && "$(container_labels "$edge_container")" == sub2api-edge/traefik ]] || exit 1; set_journal edge_container "$edge_container"
 set_journal attachment_intent true; docker network connect --alias "sub2api-$active_slot" sub2api-edge "$active_app"; set_journal attachment_created true
-set_journal route_write_intent true; npx --no-install tsx scripts/render-site-route.ts write traefik/dynamic/site.yml "$route" code2 "$DOMAIN" "$active_slot" "sub2api-$active_slot"
+set_journal route_write_intent true; sub2api-deploy runtime route write traefik/dynamic/site.yml "$route" code2 "$DOMAIN" "$active_slot" "sub2api-$active_slot"
 docker stop "$legacy_traefik"; wait_for_ports_released; EDGE_RUNTIME_ROOT="$edge_root" TRAEFIK_IMAGE="$TRAEFIK_IMAGE" CLOUDFLARE_DNS_API_TOKEN="$CLOUDFLARE_API_TOKEN" ACME_EMAIL="$ACME_EMAIL" docker compose --project-name sub2api-edge --env-file "$edge_env" -f compose/edge.yml start traefik
 if ! bash scripts/probe-origin-strict.sh "$DOMAIN" "$ORIGIN_IP" "$APP_PROBE_PATH" || ! bash scripts/probe-origin.sh "$DOMAIN" "$APP_PROBE_PATH" || ! bash -c "$SING_BOX_VERIFY_COMMAND"; then
   docker logs "$edge_container" 2>&1 || true
   false
 fi
-set_journal state completing; node scripts/write-host-state.cjs write-legacy "$host_state" code2 complete; set_journal state complete; trap - ERR
+set_journal state completing; sub2api-deploy runtime host-state write-legacy "$host_state" code2 complete; set_journal state complete; trap - ERR

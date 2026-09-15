@@ -6,7 +6,7 @@
 
 ## Current State And Gaps
 
-- 当前生产实现仍是每VPS一个本地Pulumi Stack，通过`command.local.Command`调用Shell/TypeScript。
+- 当前生产实现仍是每VPS一个本地Pulumi Stack，通过`command.local.Command`调用Shell helper；运行时状态和模板操作已收敛到Go CLI。
 - 当前未提交validate切片已经实现严格YAML、SOPS解密、引用/secret校验和OpenSSH alias预检，但拒绝maintenance空placement，并把server key和SSH alias混为同一值。
 - 现有Compose、blue/green、preflight、state和code2 adoption测试提供行为证据，但目标Host Provider、远端runtime和Environment Program尚未实现。
 - Cloudflare和Upstash已有官方Provider实现；Neon当前混合第三方alpha Provider与本地API command，目标官方Provider的无损迁移能力需独立验证。
@@ -18,7 +18,7 @@
 - Go固定`1.25.11`。
 - 所有行为变更先写失败测试，观察RED后再实现GREEN。
 - 共享checkout中每波writer独占路径，不stage、不commit；`go.mod/go.sum`一次只由一个任务拥有。
-- 禁止本地构建：不得执行`go build`、`npm run build`、release bundle assembly或其他binary/发布产物构建命令。构建和产物验证只在CI运行；本地只运行单元测试、vet、格式/语法检查和不生成发布产物的rehearsal。
+- 禁止本地构建：不得执行`go build`、release bundle assembly或其他binary/发布产物构建命令。构建和产物验证只在CI运行；本地只运行允许的静态检查。
 
 ## Tasks
 

@@ -72,6 +72,23 @@ func TestPulumiPluginDiscovery(t *testing.T) {
 	}
 }
 
+func TestProgramTargetUsesDedicatedGoEntrypoint(t *testing.T) {
+	pulumiData, err := os.ReadFile("../../Pulumi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildData, err := os.ReadFile("../../scripts/build-pulumi-release.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pulumiData), "binary: ./bin/pulumi-program") {
+		t.Fatal("Pulumi manifest does not select the bundled program")
+	}
+	if !strings.Contains(string(buildData), "./cmd/sub2api-environment") || strings.Contains(string(buildData), "./infra") {
+		t.Fatal("release build does not target the environment program")
+	}
+}
+
 func (m *callerMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
 	m.mu.Lock()
 	m.resources = append(m.resources, args)

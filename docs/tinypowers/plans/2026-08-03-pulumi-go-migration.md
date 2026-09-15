@@ -1,10 +1,10 @@
 # Pulumi Go Runtime Migration Plan
 
-**Source:** User request to replace the entire Pulumi IaC program with Go after the TypeScript program stalled during preview on a 720 MiB VPS.
+**Source:** User request to replace the entire Pulumi IaC program with Go after the prior language-host program stalled during preview on a 720 MiB VPS.
 
-**Goal:** Replace the Pulumi Node.js/TypeScript language host with a Go program while preserving resource URNs, configuration keys, command behavior, secret handling, and the existing shell deployment runtime.
+**Goal:** Replace the Pulumi language host and all deployment helper scripts with Go while preserving resource URNs, configuration keys, command behavior, secret handling, and the existing shell deployment runtime.
 
-**Approach:** Move only the Pulumi resource graph into `infra/`; keep `scripts/`, `compose/`, `traefik/`, and the small TypeScript compatibility helper used directly by shell scripts. Pin Go provider modules and pair Neon alpha Go SDK with the alpha.1 provider binary.
+**Approach:** Keep the Pulumi resource graph in `infra/` and put the runtime/state/Neon helper behind `sub2api-deploy runtime`; keep `scripts/`, `compose/`, and `traefik/` as shell/configuration surfaces. Pin Go provider modules and pair Neon alpha Go SDK with the alpha.1 provider binary.
 
 ## Global Constraints
 - Keep project name `sub2api-vps-deploy` and all existing Pulumi configuration keys.
@@ -16,8 +16,8 @@
 ## Requirements and Scope
 - Change `Pulumi.yaml` from `runtime: nodejs` to Go with `main: ./infra` or a documented prebuilt binary path.
 - Add a Go Pulumi program covering config validation, Cloudflare DNS/SSL resources, optional Neon Project, optional Upstash Redis database, three local commands, outputs, and all existing runtime payload fields.
-- Preserve `src/deployment-preflight.ts` because `scripts/reconcile-site.sh` and `scripts/bootstrap-site.sh` invoke it directly.
-- Preserve runtime Vitest tests; migrate Pulumi-host pure behavior tests to Go tests.
+- Migrate the prior deployment preflight and all runtime helpers to `internal/runtime`; preserve their state formats, atomicity, and safety checks.
+- Preserve runtime behavior tests in Go; migrate CI/release contract checks to standard-library Python and Go tests.
 - Pin Cloudflare `v6.18.0`, Command `v1.2.1`, Upstash `v0.5.0`, and Neon alpha SDK commit `601a1132b2200425bad604f1c8bd434f24e9178d`.
 
 ## Tasks
@@ -72,22 +72,22 @@
 
 **Acceptance:** Pulumi Go mocks or an equivalent offline resource graph test confirms type tokens, names, critical inputs, options, and exports.
 
-### Task 4: Remove Pulumi TypeScript host dependencies and update operations docs
+### Task 4: Remove script language runtime dependencies and update operations docs
 
 **Depends on:** Task 3
 
 **Files:**
 - Delete: `src/index.ts`, `src/config.ts`, `src/database.ts`, `src/redis.ts`, `src/cloudflare.ts`, `src/command-triggers.ts`
-- Delete: their Pulumi-host Vitest tests after equivalent Go coverage exists
-- Modify: `package.json`, `tsconfig.json`, `README.md`, `Pulumi.production.example.yaml`, `.gitignore`
-- Create: `scripts/build-pulumi.sh` if prebuilt binary mode is selected
+- Delete: their former Pulumi-host tests after equivalent Go coverage exists
+- Modify: `README.md`, `Pulumi.production.example.yaml`, `.gitignore`, CI/release workflows
+- Create: `internal/runtime`, `scripts/ci-evidence.py`
 
 **Requirements:**
-- Keep Node dependencies only for runtime TS helpers and their tests.
+- Remove the former JavaScript dependency graph and all helper sources from the active deployment path.
 - Document whether the VPS uses `main: ./infra` or a prebuilt Linux binary; prefer prebuilt binary if local Go compilation is too costly.
 - Document the mandatory preflight state export and preview-only verification before production `up`.
 
-**Acceptance:** No Pulumi entrypoint imports TypeScript; shell runtime checks still pass; clean dependency installation remains reproducible.
+**Acceptance:** No production, legacy, test, or CI path invokes a Node runtime; shell runtime checks still pass; the Go helper and Python evidence parser are reproducible from the repository toolchain.
 
 ### Task 5: Verify offline and migration safety
 
@@ -107,4 +107,4 @@
 - No Neon data migration or resource creation in this code change.
 - No shell, Compose, Traefik, or Sub2API application behavior rewrite.
 - No forced state rename/remove/replace operations.
-- No claim that Go eliminates all Node memory use; shell runtime helpers still use Node during infrastructure reconciliation.
+- No claim that Go changes the Pulumi Engine boundary; the official Pulumi executable remains external.
