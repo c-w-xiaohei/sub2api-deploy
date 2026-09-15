@@ -411,7 +411,7 @@ jobs:
           consumer="$RUNNER_TEMP/target-release-consumer-$TARGET_SHA"
           archive="sub2api-controller-$TARGET_SHA.tar.gz"
           [[ "$archive" =~ ^sub2api-controller-[0-9a-f]{40}\.tar\.gz$ ]]
-          test "$(cat "$candidate/$archive.sha256")" = "$(sha256sum "$candidate/$archive")"
+          test "$(cut -d ' ' -f1 "$candidate/$archive.sha256")" = "$(sha256sum "$candidate/$archive" | cut -d ' ' -f1)"
           forbidden='AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |CrossHost[A-Za-z0-9_]*(Password|Secret)'
           for artifact_file in "$candidate/metadata.json" "$candidate/consumer-trace.json" "$consumer/bundle/Pulumi.production.example.yaml" "$consumer/bundle/Pulumi.yaml" "$consumer/bundle/README.md" "$consumer/bundle/go.mod" "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$consumer/bundle/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json" "$consumer/bundle/scripts/pulumi-plugins/upstash/pulumi-plugin.json"; do
             ! grep -qiE "$forbidden" "$artifact_file"
