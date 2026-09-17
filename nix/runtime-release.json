@@ -1,3 +1,20 @@
 {
+  "controller": {
+    "hostPayload": {
+      "aarch64-linux": {
+        "path": "artifacts/sub2api-host/sub2api-host-linux-arm64",
+        "sha256": "7e51211c390e7cb31c172bb1dc6896606c23dfdbd2d1913be8468a07283d62ec"
+      },
+      "x86_64-linux": {
+        "path": "artifacts/sub2api-host/sub2api-host-linux-amd64",
+        "sha256": "f428ee7bcf5ae7aefde9f665b7464c9b7253f7fb393edb685c5012a2e3478e80"
+      }
+    },
+    "hostRelease": "sub2api-host-controller@sha256:4bd688a5feb261627f0cab2bd9af03a82d4f9144238dc23b907d59f463497b39",
+    "narHash": "sha256-OIz8q7sGUzSO6n7ycu0GN9GRG2A+MnCDc2vLpGbTbio=",
+    "projectCommit": "bbcc78f23b8210222fc67294dc736b2158b3eab5",
+    "url": "https://github.com/c-w-xiaohei/sub2api-deploy/releases/download/v0.2.25/sub2api-controller-bbcc78f23b8210222fc67294dc736b2158b3eab5.tar.gz",
+    "version": "v0.2.25"
+  },
   "schemaVersion": 2
 }
