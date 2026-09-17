@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import tempfile
 import unittest
@@ -46,6 +47,12 @@ class EvidenceTests(unittest.TestCase):
         for missing in symbols:
             with self.subTest(missing=missing), self.assertRaises(SystemExit):
                 self.required([event for event in events if event["Test"] != missing], selector)
+
+    def test_host_controller_metadata_matches_workflow_selector(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        selectors = re.findall(r"tests='\^\(([^']+)\)\$'", workflow)
+        host = [value.split("|") for value in selectors if "TestRegisterFoundationGraph" in value]
+        self.assertEqual(host, [ci_evidence.GATE_SYMBOLS["host-controller"]])
 
     def test_required_rejects_fail_skip_and_duplicate_terminals(self):
         for events in (
