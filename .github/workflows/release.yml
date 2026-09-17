@@ -286,20 +286,20 @@ jobs:
           fi
           if test "$release_status" -eq 0; then
             python3 - "$release_json" "$TAG_NAME" <<'PY'
-            import json, os, sys
-            value = json.load(open(sys.argv[1]))
-            if value.get("draft") or value.get("prerelease") or value.get("tag_name") != sys.argv[2]:
-                raise SystemExit("existing release has the wrong tag or publication state")
-            expected = {
-                "sub2api-controller-%s.tar.gz" % os.environ["TAG_SHA"],
-                "sub2api-controller-%s.tar.gz.sha256" % os.environ["TAG_SHA"],
-                "metadata.json", "runtime-release.json",
-                "nix-runtime-descriptor-%s.tar.gz" % os.environ["TAG_NAME"],
-                "nix-runtime-descriptor-%s.tar.gz.sha256" % os.environ["TAG_NAME"],
-            }
-            actual = {asset.get("name") for asset in value.get("assets", [])}
-            if actual != expected:
-                raise SystemExit("existing release asset inventory differs")
+          import json, os, sys
+          value = json.load(open(sys.argv[1]))
+          if value.get("draft") or value.get("prerelease") or value.get("tag_name") != sys.argv[2]:
+              raise SystemExit("existing release has the wrong tag or publication state")
+          expected = {
+              "sub2api-controller-%s.tar.gz" % os.environ["TAG_SHA"],
+              "sub2api-controller-%s.tar.gz.sha256" % os.environ["TAG_SHA"],
+              "metadata.json", "runtime-release.json",
+              "nix-runtime-descriptor-%s.tar.gz" % os.environ["TAG_NAME"],
+              "nix-runtime-descriptor-%s.tar.gz.sha256" % os.environ["TAG_NAME"],
+          }
+          actual = {asset.get("name") for asset in value.get("assets", [])}
+          if actual != expected:
+              raise SystemExit("existing release asset inventory differs")
           PY
             existing="$RUNNER_TEMP/existing-release"
             mkdir "$existing"
@@ -329,23 +329,23 @@ jobs:
           fi
           if test "$tag_status" -eq 0; then
             python3 - "$tag_ref" "$TAG_NAME" "$TAG_SHA" <<'PY'
-            import json, sys
-            ref, tag, sha = sys.argv[1:]
-            value = json.load(open(ref))
-            obj = value.get("object", {})
-            if value.get("ref") != f"refs/tags/{tag}" or obj.get("type") != "commit" or obj.get("sha") != sha:
-                raise SystemExit("existing remote tag is not the requested exact lightweight commit ref")
+          import json, sys
+          ref, tag, sha = sys.argv[1:]
+          value = json.load(open(ref))
+          obj = value.get("object", {})
+          if value.get("ref") != f"refs/tags/{tag}" or obj.get("type") != "commit" or obj.get("sha") != sha:
+              raise SystemExit("existing remote tag is not the requested exact lightweight commit ref")
           PY
           elif test "$(<"$RUNNER_TEMP/release-exists")" = false; then
             gh api "repos/$GITHUB_REPOSITORY/git/refs" \
               -f "ref=refs/tags/$TAG_NAME" -f "sha=$TAG_SHA" >/dev/null
             gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" > "$tag_ref"
             python3 - "$tag_ref" "$TAG_NAME" "$TAG_SHA" <<'PY'
-            import json, sys
-            ref, tag, sha = sys.argv[1:]
-            value = json.load(open(ref))
-            if value.get("ref") != f"refs/tags/{tag}" or value.get("object", {}).get("type") != "commit" or value.get("object", {}).get("sha") != sha:
-                raise SystemExit("new remote tag did not bind the exact commit")
+          import json, sys
+          ref, tag, sha = sys.argv[1:]
+          value = json.load(open(ref))
+          if value.get("ref") != f"refs/tags/{tag}" or value.get("object", {}).get("type") != "commit" or value.get("object", {}).get("sha") != sha:
+              raise SystemExit("new remote tag did not bind the exact commit")
           PY
           elif test "$(<"$RUNNER_TEMP/release-exists")" = true; then
             printf '%s\n' 'existing release has no remotely resolvable tag' >&2
