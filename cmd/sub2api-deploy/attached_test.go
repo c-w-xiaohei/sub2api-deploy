@@ -399,7 +399,7 @@ printf '%s\n' "$PULUMI_DEBUG_PROVIDERS" >> "$SUB2API_ATTACHED_PULUMI_LOG"
 printf '%s\n' "$fd3" >> "$SUB2API_ATTACHED_PULUMI_LOG"
 case "$SUB2API_ATTACHED_PULUMI_MODE" in
   failure) exit 23 ;;
-  blocked) if [ -n "$SUB2API_ATTACHED_PULUMI_READY" ]; then printf x > "$SUB2API_ATTACHED_PULUMI_READY"; fi; trap 'printf "%s\\n" pulumi-closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0' INT TERM; while :; do :; done ;;
+  blocked) trap 'printf "%s\\n" pulumi-closed >> "$SUB2API_ATTACHED_CLEANUP_LOG"; exit 0' INT TERM; if [ -n "$SUB2API_ATTACHED_PULUMI_READY" ]; then printf x > "$SUB2API_ATTACHED_PULUMI_READY"; fi; while :; do :; done ;;
   release-success) printf x > "$SUB2API_ATTACHED_PULUMI_READY"; read _ < "$SUB2API_ATTACHED_PULUMI_RELEASE"; exit 0 ;;
   success-ready) printf x > "$SUB2API_ATTACHED_PULUMI_EXITED"; exit 0 ;;
 esac

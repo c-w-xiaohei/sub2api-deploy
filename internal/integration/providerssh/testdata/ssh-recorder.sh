@@ -31,6 +31,20 @@ done
 printf started > "$started_file"
 cat > "$stdin_file"
 
+after_terminator=0
+remote=
+for arg do
+  if [ "$after_terminator" -eq 1 ]; then
+    after_terminator=2
+  elif [ "$after_terminator" -eq 2 ]; then
+    remote=$arg
+    break
+  elif [ "$arg" = -- ]; then
+    after_terminator=1
+  fi
+done
+[ -n "$remote" ] || { printf 'missing fixed remote command\n' >&2; exit 64; }
+
 mode=normal
 if [ -f "$SSH_MODE_FILE" ]; then
   mode=$(cat "$SSH_MODE_FILE")
@@ -69,6 +83,17 @@ if [ "$mode" = host-key ]; then
   printf 'Host key verification failed\n' > "$diagnostic"
   exit 255
 fi
+
+if [ "$remote" = "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host probe" ]; then
+  printf 's2p2:Linux\namd64\nmid1:0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54\n%s\n%s\n' \
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+    'release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  exit 0
+fi
+[ "$remote" = "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host stdio" ] || {
+  printf 'unexpected fixed remote command\n' >&2
+  exit 64
+}
 
 ready_tmp=$trace_dir/call-$call.ready.tmp.$$
 : > "$ready_tmp"

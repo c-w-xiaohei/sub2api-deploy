@@ -151,7 +151,7 @@ jobs:
           stderr="$RUNNER_TEMP/host-controller-${TARGET_SHA}-${{ matrix.arch }}.stderr"
           safe="$RUNNER_TEMP/host-controller-safe-${TARGET_SHA}-${{ matrix.arch }}"
           trap 'rm -f "$raw" "$stderr"' EXIT
-          tests='^(TestRegisterFoundationGraph|TestRegisterPreservesComputedUpstashOutputs|TestConfigAndHostCheckPreservePropertyClassesWithoutEffects|TestRunUsesFixedSSHArgvAndFramedStdin|TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry|TestStdioProcessExitsAfterOneFrameAndRejectsTwo|TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi)$'
+          tests='^(TestRegisterFoundationGraph|TestRegisterPreservesComputedUpstashOutputs|TestConfigAndHostCheckPreservePropertyClassesWithoutEffects|TestRunUsesOnlyTheFixedHostCommand|TestProbeUsesTheFixedProbeCommand|TestFixedRemoteCommandInventoryHasOnlyProbeAndStdio|TestRunOperationHoldsLockAcrossEffectAndResponseLossRetry|TestStdioProcessExitsAfterOneFrameAndRejectsTwo|TestRunPulumiPlanStagesPrivateStackAndKeepsPassphraseOutOfPulumi)$'
           set +e
           go test -json -count=1 -run "$tests" ./internal/... ./cmd/... > "$raw" 2> "$stderr"
           status=$?

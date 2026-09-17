@@ -107,9 +107,12 @@ func TestProviderProcessUsesScriptedSSHTransport(t *testing.T) {
 	}
 	first, err := provider.client.Update(t.Context(), &request)
 	if err == nil || first != nil {
-		t.Fatal("response-loss update returned a response; expected the lost SSH response to fail the RPC")
+		t.Fatalf("response-loss update returned response=%v err=%v; expected the lost SSH response to fail the RPC", first, err)
 	}
 	if err := waitForProviderFile(filepath.Join(traceDir, "call-2.stdin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForProviderFile(filepath.Join(traceDir, "call-3.stdin")); err != nil {
 		t.Fatal(err)
 	}
 	assertProviderStateDirectorySafe(t, filepath.Join(traceDir, "state.pending"))
@@ -117,25 +120,25 @@ func TestProviderProcessUsesScriptedSSHTransport(t *testing.T) {
 	if err != nil || second == nil {
 		t.Fatal("same-key response-loss resume did not succeed")
 	}
-	if err := waitForProviderFile(filepath.Join(traceDir, "call-5.stdin")); err != nil {
+	if err := waitForProviderFile(filepath.Join(traceDir, "call-7.stdin")); err != nil {
 		t.Fatal(err)
 	}
 
-	assertProviderSSHInvocation(t, traceDir, 1, providerAlias, providerSecret)
-	assertProviderSSHInvocation(t, traceDir, 2, providerAlias, providerSecret)
-	assertProviderSSHInvocation(t, traceDir, 3, providerAlias, providerSecret)
-	assertProviderSSHInvocation(t, traceDir, 4, providerAlias, providerSecret)
-	assertProviderSSHInvocation(t, traceDir, 5, providerAlias, providerSecret)
-	assertProviderFile(t, filepath.Join(traceDir, "call-1.stdin"), inspectFrame)
-	assertProviderFile(t, filepath.Join(traceDir, "call-2.stdin"), reconcileFrame)
-	assertProviderFile(t, filepath.Join(traceDir, "call-3.stdin"), inspectFrame)
-	assertProviderFile(t, filepath.Join(traceDir, "call-4.stdin"), reconcileFrame)
-	assertProviderFile(t, filepath.Join(traceDir, "call-5.stdin"), inspectFrame)
-	if got := providerSSHCallCount(t, traceDir); got != 5 {
-		t.Fatalf("SSH calls after response-loss resume = %d, want 5 including final inspect", got)
+	for call := 1; call <= 7; call++ {
+		assertProviderSSHInvocation(t, traceDir, call, providerAlias, providerSecret)
 	}
-	if _, err := os.Stat(filepath.Join(traceDir, "call-6.stdin")); !os.IsNotExist(err) {
-		t.Fatalf("response-loss resume issued an unexpected sixth SSH call")
+	assertProviderFile(t, filepath.Join(traceDir, "call-1.stdin"), inspectFrame)
+	assertProviderFile(t, filepath.Join(traceDir, "call-2.stdin"), nil)
+	assertProviderFile(t, filepath.Join(traceDir, "call-3.stdin"), reconcileFrame)
+	assertProviderFile(t, filepath.Join(traceDir, "call-4.stdin"), inspectFrame)
+	assertProviderFile(t, filepath.Join(traceDir, "call-5.stdin"), nil)
+	assertProviderFile(t, filepath.Join(traceDir, "call-6.stdin"), reconcileFrame)
+	assertProviderFile(t, filepath.Join(traceDir, "call-7.stdin"), inspectFrame)
+	if got := providerSSHCallCount(t, traceDir); got != 7 {
+		t.Fatalf("SSH calls after response-loss resume = %d, want 7 including probes and final inspect", got)
+	}
+	if _, err := os.Stat(filepath.Join(traceDir, "call-8.stdin")); !os.IsNotExist(err) {
+		t.Fatalf("response-loss resume issued an unexpected eighth SSH call")
 	}
 	assertProviderFile(t, filepath.Join(traceDir, "effect-marker"), []byte("reconcile-effect\n"))
 	effectLog := mustReadProviderFile(t, filepath.Join(traceDir, "effect.log"))
@@ -276,7 +279,7 @@ func startProvider(t *testing.T, mode string) (*providerProcess, string, string)
 		"SSH_TRACE_DIR="+traceDir,
 		"SSH_RESPONSE_DIR="+responseDir,
 		"SSH_MODE_FILE="+modeFile,
-		"SSH_DROP_RESPONSE_CALL=2",
+		"SSH_DROP_RESPONSE_CALL=3",
 		"SSH_EXPECTED_INSPECT_FRAME="+filepath.Join(traceDir, "expected-inspect-frame"),
 		"SSH_EXPECTED_RECONCILE_FRAME="+filepath.Join(traceDir, "expected-reconcile-frame"),
 		"SSH_EXPECTED_OPERATION_KEY="+filepath.Join(traceDir, "expected-operation-key"),
@@ -336,7 +339,7 @@ func providerInputs(t *testing.T, image string) (property.Map, hostcontract.Targ
 }
 
 func providerObservation(target hostcontract.Target, revision string) hostcontract.StableObservation {
-	return hostcontract.StableObservation{Machine: hostcontract.MachineIdentity{Value: "machine-a"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner-a"}, HostRelease: target.ReleaseArtifact, AppliedRevision: revision, Ready: true, Apps: []hostcontract.AppObservation{{ID: target.Apps[0].ID, ActiveImage: target.Apps[0].Image, Ready: true}}}
+	return hostcontract.StableObservation{Machine: hostcontract.MachineIdentity{Value: "mid1:0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54"}, Ownership: hostcontract.OwnershipIdentity{Value: "owner-a"}, HostRelease: target.ReleaseArtifact, AppliedRevision: revision, Ready: true, Apps: []hostcontract.AppObservation{{ID: target.Apps[0].ID, ActiveImage: target.Apps[0].Image, Ready: true}}}
 }
 
 func providerRevision(t *testing.T, key []byte, identity hostcontract.ResourceIdentity, target hostcontract.Target, secrets hostcontract.Secrets) string {
@@ -452,7 +455,11 @@ func providerStableID(identity hostcontract.ResourceIdentity) string {
 func assertProviderSSHInvocation(t *testing.T, traceDir string, call int, alias, secret string) {
 	t.Helper()
 	args := strings.Split(strings.TrimSuffix(string(mustReadProviderFile(t, filepath.Join(traceDir, fmt.Sprintf("call-%d.args", call)))), "\n"), "\n")
-	want := []string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "-E", "<client-log>", "--", alias, "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host stdio"}
+	remote := "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host stdio"
+	if call == 2 || call == 5 {
+		remote = "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host probe"
+	}
+	want := []string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "-E", "<client-log>", "--", alias, remote}
 	if len(args) != len(want) {
 		t.Fatalf("SSH call %d argv length = %d, want %d", call, len(args), len(want))
 	}

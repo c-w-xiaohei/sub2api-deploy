@@ -104,6 +104,11 @@ if printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_HOST_COMMAND" -; then
   digest=$(awk -F= '$1 == "operationDigest" { count++; value=$2 } END { if (count == 1) print value }' "$metadata")
   case "$action" in inspect|reconcile|retire-preserve-data) ;; *) rm -f "$response"; printf 'fixture invalid Host action\n' >&2; exit 64 ;; esac
   [ ${#digest} -eq 64 ] && case "$digest" in *[!0123456789abcdef]*) false ;; *) true ;; esac || { rm -f "$response"; printf 'fixture invalid Host digest\n' >&2; exit 64; }
+  # Preserve reconcile evidence for the exact-SHA boundary assertion while the
+  # per-SSH copy remains available for response-loss auditing.
+  if [ "$action" = reconcile ] && [ -n "${PROVIDER_RUNTIME_REQUEST_DIGEST:-}" ]; then
+    cp "$metadata" "$PROVIDER_RUNTIME_REQUEST_DIGEST"
+  fi
   exec 8>"$trace/ssh.ordinal.lock"
   flock -x 8
   queue="$trace/host-action.queue"
