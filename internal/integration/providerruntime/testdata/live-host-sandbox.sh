@@ -52,6 +52,7 @@ fi
 name=${1:?}
 root=${LIVE_ROOT:?}
 host=${LIVE_HOST_BINARY:?}
+release=${LIVE_HOST_RELEASE:?}
 images=${LIVE_IMAGE_ARCHIVE:?}
 log="$root/$name.private.log"
 stage=mount-setup
@@ -59,6 +60,7 @@ dockerd=
 sshd=
 cleanup_failed=0
 shutdown_requested=0
+nix_mounted=0
 host_mount_namespace=$(readlink "/proc/$$/ns/mnt")
 process_alive() {
   pid=$1
@@ -150,6 +152,9 @@ cleanup() {
   stop_group "$dockerd" || cleanup_failed=1
   cleanup_host_runtime || cleanup_failed=1
   stop_group "$sshd" || cleanup_failed=1
+  if [ "$nix_mounted" -eq 1 ]; then
+    umount /nix 2>/dev/null || cleanup_failed=1
+  fi
   [ "$cleanup_failed" -eq 0 ] || status=1
   exit "$status"
 }
@@ -170,6 +175,23 @@ mount -t tmpfs -o mode=0700,size=256m tmpfs /var/lib
 mount -t tmpfs -o mode=0755,size=32m tmpfs /var/run
 mkdir -p /usr/local/libexec /var/run/sshd /var/run/sub2api-runtime
 chmod 0700 /var/run/sub2api-runtime
+profile_root="$root/$name/nix-profile"
+profile="$profile_root/var/nix/profiles/sub2api-host"
+mkdir -p "$profile/bin" "$profile/libexec" "$profile/share/sub2api-host"
+cp "$host" "$profile/libexec/sub2api-host"
+chmod 0555 "$profile/libexec/sub2api-host"
+printf '%s' "$release" > "$profile/share/sub2api-host/release"
+chmod 0444 "$profile/share/sub2api-host/release"
+cat > "$profile/bin/sub2api-host" <<'SH'
+#!/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+exec /nix/var/nix/profiles/sub2api-host/libexec/sub2api-host "$@"
+SH
+chmod 0555 "$profile/bin/sub2api-host"
+mount --bind "$profile_root" /nix
+nix_mounted=1
+mount -o remount,bind,ro /nix
 printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$root/$name/supervisor"
 printf '%s\n' '{}' >"$root/$name/daemon.json"
 stage=docker-start

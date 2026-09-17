@@ -10,6 +10,7 @@ shift
 data_pid=
 app_pid=
 cleanup_failed=0
+nix_created=0
 process_alive() {
   pid=$1
   kill -0 "$pid" 2>/dev/null || return 1
@@ -59,6 +60,9 @@ cleanup() {
   signal_group "$app_pid"
   wait_group "$data_pid"
   wait_group "$app_pid"
+  if [ "$nix_created" -eq 1 ]; then
+    rmdir /nix 2>/dev/null || cleanup_failed=1
+  fi
   umount "$root/cgroup-host" 2>/dev/null || cleanup_failed=1
   ip netns del "${LIVE_DATA_NS:?}" 2>/dev/null || true
   ip netns del "${LIVE_APP_NS:?}" 2>/dev/null || true
@@ -75,6 +79,10 @@ for binary in bash dockerd docker sshd ssh sudo nft ip psql redis-cli openssl un
 done
 
 mkdir -p "$root/cgroup-host"
+if [ ! -e /nix ]; then
+  mkdir /nix
+  nix_created=1
+fi
 mount --bind /sys/fs/cgroup "$root/cgroup-host"
 mount --bind "$root/home" /root
 printf '%s\n' 'SUB2API_LIVE_STAGE=network-setup' >&2

@@ -358,6 +358,7 @@ func (f *liveFixture) environment() []string {
 		"SUB2API_PROVIDER_RUNTIME_LIVE_ROOT=" + f.root,
 		"LIVE_ROOT=" + f.root,
 		"LIVE_HOST_BINARY=" + f.artifacts.host,
+		"LIVE_HOST_RELEASE=" + f.artifacts.release,
 		"LIVE_IMAGE_ARCHIVE=" + f.artifacts.images,
 		"LIVE_TRACE=" + f.trace,
 		"LIVE_BRIDGE=" + f.bridge,
@@ -4496,11 +4497,13 @@ func TestLiveHostSandboxEstablishesPrivateDockerRuntimeBeforeDaemon(t *testing.T
 		t.Fatal(err)
 	}
 	runtimeDirectorySetup := []byte("mkdir -p /usr/local/libexec /var/run/sshd /var/run/sub2api-runtime\nchmod 0700 /var/run/sub2api-runtime")
+	hostProfileSetup := []byte("mount --bind \"$profile_root\" /nix\nnix_mounted=1\nmount -o remount,bind,ro /nix")
 	dockerdStart := []byte("XDG_RUNTIME_DIR=/var/run/sub2api-runtime setsid dockerd")
 	runtimeDirectorySetupIndex := bytes.Index(source, runtimeDirectorySetup)
+	hostProfileSetupIndex := bytes.Index(source, hostProfileSetup)
 	dockerdStartIndex := bytes.Index(source, dockerdStart)
-	if runtimeDirectorySetupIndex < 0 || dockerdStartIndex < 0 || runtimeDirectorySetupIndex >= dockerdStartIndex {
-		t.Fatal("live Docker runtime directory is not private and established before daemon startup")
+	if runtimeDirectorySetupIndex < 0 || hostProfileSetupIndex < 0 || dockerdStartIndex < 0 || runtimeDirectorySetupIndex >= hostProfileSetupIndex || hostProfileSetupIndex >= dockerdStartIndex {
+		t.Fatal("live Host profile and Docker runtime are not private and established before daemon startup")
 	}
 }
 
