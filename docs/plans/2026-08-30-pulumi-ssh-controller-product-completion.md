@@ -4,6 +4,16 @@
 
 **Goal:** 补齐 001 产品本体，使薄 CLI、Environment Program、唯一 `Host` Provider、系统 OpenSSH、按需 `sub2api-host`、目标 release 和分层测试证据形成受支持链路。现有实例与旧云资源迁移另行处理。
 
+## Superseded Historical Plan
+
+Task E supersedes the earlier release-promotion and Provider artifact-bootstrap
+boundary recorded below. The current authority is descriptor schema 2 with one
+exact candidate and two `hostPayload` records; Hosts install and activate that
+descriptor before Provider operations, and the Provider only probes and invokes
+the fixed Nix profile. The original plan remains useful for historical task
+ownership and dependencies, but its release sequence is replaced by exact-SHA
+CI/Nix gates, formal `v0.2.25`, and the separate post-release lock update.
+
 ## Current State And Gaps
 
 - Host contract、Provider lifecycle、OpenSSH、远端 state/journal、blue/green、本地 data/proxy、approval 和 preserve-data 已有较完整实现，但当前源码测试尚无本轮精确远端 SHA 的动态证据。

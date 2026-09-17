@@ -5,15 +5,27 @@ on:
   push:
     branches: ["main", "agent/**"]
   workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact 40-character commit SHA to verify
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  TARGET_SHA: ${{ inputs.target_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   runtime-fixtures:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA" && { test "$GITHUB_EVENT_NAME" != workflow_dispatch || test "$GITHUB_SHA" = "$TARGET_SHA"; }'
       # NixOS/nix-installer-action's main commit was resolved through GitHub's
       # API; the explicit upstream installer release supplies only CI's Nix CLI.
       - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6
@@ -26,23 +38,145 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/tests/nix_release_descriptor_test.py
-          bash nix/tests/runtime-fixture-test.sh
+          if jq -e 'has("controller")' nix/runtime-release.json >/dev/null; then
+            printf '%s\n' 'runtime-fixture-test.sh is the empty-lock pre-release fixture; formal lock gate runs below.'
+          else
+            bash nix/tests/runtime-fixture-test.sh
+          fi
+          bash nix/tests/install-runtime-fixture-test.sh
           bash nix/tests/controller-workspace-fixture-test.sh
           bash nix/tests/host-activation-fixture-test.sh
           bash nix/tests/environments-fixture-test.sh
           bash nix/tests/profile-install-fixture-test.sh
       - name: State fixture evidence boundary
         run: |
-          printf '%s\n' 'The CI fixture proves Nix can install and run a local opaque store path.'
-          printf '%s\n' 'It is not a real runtime release, GitHub asset, ELF/library, or production activation proof.'
+          printf '%s\n' 'The fixture builds the production Nix compositor with a local project candidate.'
+          printf '%s\n' 'Release promotion separately binds the descriptor to exact CI candidate bytes.'
       - name: Record exact-SHA fixture evidence
         run: |
           python3 - <<'PY' > "$RUNNER_TEMP/nix-runtime-evidence.json"
           import json, os
-          print(json.dumps({"schemaVersion": 1, "sha": os.environ["GITHUB_SHA"], "tests": "runtime-fixtures"}, sort_keys=True))
+          print(json.dumps({"schemaVersion": 1, "sha": os.environ["TARGET_SHA"], "tests": "runtime-fixtures"}, sort_keys=True))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: nix-runtime-evidence-${{ github.run_id }}
+          name: nix-runtime-evidence-${{ env.TARGET_SHA }}
           path: ${{ runner.temp }}/nix-runtime-evidence.json
           retention-days: 30
+
+  host-candidate:
+    name: Host Candidate (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+            architecture: amd64
+            goarch: amd64
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA" && { test "$GITHUB_EVENT_NAME" != workflow_dispatch || test "$GITHUB_SHA" = "$TARGET_SHA"; }'
+      - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6
+        with:
+          installer-version: "2.35.2"
+          add-channel: "false"
+          init: "yes"
+          enable-kvm: "false"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.11"
+          cache: true
+      - run: go mod download && go mod verify
+      - name: Build and run the local candidate Host environment
+        run: |
+          set -euo pipefail
+          export GOMAXPROCS=2
+          root="$RUNNER_TEMP/nix-host-candidate-$TARGET_SHA-${{ matrix.architecture }}"
+          payload="$root/payload"
+          mkdir -p "$payload"
+          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build -p=1 -trimpath -o "$payload/sub2api-host" ./cmd/sub2api-host
+          source_sha256="$(sha256sum "$payload/sub2api-host" | cut -d ' ' -f1)"
+          release_sha="$(printf %s "$TARGET_SHA" | sha256sum | cut -d ' ' -f1)"
+          host_release="sub2api-host-controller@sha256:$release_sha"
+          chmod 0755 "$payload/sub2api-host"
+          host_payload="$(nix --extra-experimental-features 'nix-command flakes fetch-tree' store add-path --name "sub2api-host-candidate-${{ matrix.architecture }}" "$payload/sub2api-host")"
+          expression="let
+            flake = builtins.getFlake \"path:$GITHUB_WORKSPACE\";
+            pkgs = import flake.inputs.nixpkgs { system = \"${{ matrix.system }}\"; };
+            compose = import $GITHUB_WORKSPACE/nix/environments.nix;
+          in compose {
+            inherit pkgs;
+            role = \"host-environment\";
+            hostPayload = { path = builtins.storePath \"$host_payload\"; release = \"$host_release\"; };
+            controllerWorkspaceInit = $GITHUB_WORKSPACE/nix/controller-workspace-init.sh;
+            hostActivate = $GITHUB_WORKSPACE/nix/host-activate.sh;
+          }"
+          host="$(nix --extra-experimental-features 'nix-command flakes fetch-tree' build --impure --no-link --option max-jobs 1 --option cores 1 --print-out-paths --expr "$expression")"
+          test -f "$host/bin/sub2api-host" && test ! -L "$host/bin/sub2api-host" && test -x "$host/bin/sub2api-host"
+          test -f "$host/libexec/sub2api-host" && test ! -L "$host/libexec/sub2api-host" && test -x "$host/libexec/sub2api-host"
+          test "$(<"$host/share/sub2api-host/release")" = "$host_release"
+          composed_sha256="$(sha256sum "$host/libexec/sub2api-host" | cut -d ' ' -f1)"
+          test "$composed_sha256" = "$source_sha256"
+          "$host/bin/docker" --version
+          "$host/bin/nft" --version
+          "$host/bin/iptables" --version
+          "$host/bin/ssh" -V
+          probe="$("$host/bin/sub2api-host" probe)"
+          [[ "$probe" == s2p2:Linux$'\n'"${{ matrix.goarch }}"$'\n'* ]]
+          test "$(printf '%s\n' "$probe" | sed -n '4p')" = "$composed_sha256"
+          test "$(printf '%s\n' "$probe" | sed -n '5p')" = "$host_release"
+          TARGET_SHA="$TARGET_SHA" SYSTEM="${{ matrix.system }}" ARCHITECTURE="${{ matrix.architecture }}" SOURCE_HOST_SHA256="$source_sha256" COMPOSED_HOST_SHA256="$composed_sha256" RELEASE_IDENTITY="$host_release" python3 - <<'PY' > "$RUNNER_TEMP/nix-host-candidate-evidence.json"
+          import json
+          import os
+
+          print(json.dumps({
+              "schemaVersion": 1,
+              "TARGET_SHA": os.environ["TARGET_SHA"],
+              "system": os.environ["SYSTEM"],
+              "architecture": os.environ["ARCHITECTURE"],
+              "sourceHostSHA256": os.environ["SOURCE_HOST_SHA256"],
+              "composedHostSHA256": os.environ["COMPOSED_HOST_SHA256"],
+              "releaseIdentity": os.environ["RELEASE_IDENTITY"],
+          }, sort_keys=True, separators=(",", ":")))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nix-host-candidate-${{ env.TARGET_SHA }}-${{ matrix.system }}
+          path: ${{ runner.temp }}/nix-host-candidate-evidence.json
+          if-no-files-found: error
+
+  formal-release-lock:
+    name: Formal Release Lock
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA" && { test "$GITHUB_EVENT_NAME" != workflow_dispatch || test "$GITHUB_SHA" = "$TARGET_SHA"; }'
+      - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6
+        with:
+          installer-version: "2.35.2"
+          add-channel: "false"
+          init: "yes"
+          enable-kvm: "false"
+      - name: Evaluate and build formal Controller and Host when locked
+        run: |
+          set -euo pipefail
+          if ! jq -e 'has("controller")' nix/runtime-release.json >/dev/null; then
+            printf '%s\n' 'runtime-release.json has no controller; local candidate Host fixture is the pre-release gate.'
+            exit 0
+          fi
+          nix --extra-experimental-features 'nix-command flakes fetch-tree' eval --impure .#packages.x86_64-linux.controller >/dev/null
+          nix --extra-experimental-features 'nix-command flakes fetch-tree' eval --impure .#packages.x86_64-linux.host-environment >/dev/null
+          nix --extra-experimental-features 'nix-command flakes fetch-tree' build --impure --no-link --option max-jobs 1 --option cores 1 .#packages.x86_64-linux.controller
+          nix --extra-experimental-features 'nix-command flakes fetch-tree' build --impure --no-link --option max-jobs 1 --option cores 1 .#packages.x86_64-linux.host-environment

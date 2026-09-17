@@ -8,10 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
-	"github.com/c-w-xiaohei/sub2api-deploy/internal/artifact"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	p "github.com/pulumi/pulumi-go-provider"
@@ -20,9 +17,7 @@ import (
 
 const hostToken = "sub2api-host:index:Host"
 
-var providerExecutable = os.Executable
-
-// New creates the Host provider using only artifacts shipped beside its executable.
+// New creates the Host provider using the preinstalled Nix Host profile.
 func New(version string) p.Provider {
 	return newProvider(newHost(version))
 }
@@ -30,17 +25,7 @@ func New(version string) p.Provider {
 // NewWithApproval creates a provider whose dangerous lifecycle operations may use
 // the supplied process-scoped approval channel.
 func NewWithApproval(version string, approve func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error)) p.Provider {
-	path, err := providerExecutable()
-	if err != nil {
-		return newProvider(newHostWithDependencies(version, lifecycleDependencies{
-			transport: openssh.New(),
-			artifact: func() (artifactBundle, error) {
-				return artifactBundle{}, errArtifactUnavailable
-			},
-			approve: approve,
-		}))
-	}
-	return newProvider(newHostAtExecutableWithApproval(version, path, approve))
+	return newProvider(newHostWithDependencies(version, lifecycleDependencies{transport: openssh.New(), approve: approve}))
 }
 
 func newProvider(h *host) p.Provider {
@@ -48,34 +33,7 @@ func newProvider(h *host) p.Provider {
 }
 
 func newHost(version string) *host {
-	path, err := providerExecutable()
-	if err != nil {
-		return newHostWithDependencies(version, lifecycleDependencies{transport: openssh.New(), artifact: func() (artifactBundle, error) { return artifactBundle{}, errArtifactUnavailable }})
-	}
-	return newHostAtExecutable(version, path)
-}
-
-func newHostAtExecutable(version, path string) *host {
-	return newHostAtExecutableWithApproval(version, path, nil)
-}
-
-func newHostAtExecutableWithApproval(version, path string, approve func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error)) *host {
-	return newHostWithDependencies(version, lifecycleDependencies{
-		transport: openssh.New(),
-		artifact: func() (artifactBundle, error) {
-			return loadReleaseBundle(path)
-		},
-		approve: approve,
-	})
-}
-
-func loadReleaseBundle(providerPath string) (artifactBundle, error) {
-	root := filepath.Join(filepath.Dir(filepath.Dir(providerPath)), "artifacts", "sub2api-host")
-	bundle, err := artifact.LoadBundle(root)
-	if err != nil {
-		return artifactBundle{}, err
-	}
-	return artifactBundle{Root: bundle.Root, Manifest: bundle.Manifest}, nil
+	return newHostWithDependencies(version, lifecycleDependencies{transport: openssh.New()})
 }
 
 type host struct {

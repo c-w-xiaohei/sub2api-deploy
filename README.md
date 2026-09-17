@@ -4,6 +4,14 @@
 operations. Pulumi remains the only graph, checkpoint, retry, and state engine:
 the CLI does not store a plan or run a removal workflow for you.
 
+For Nix-based Controller and Ubuntu Host installation, first deployment,
+reboot, upgrade, and troubleshooting, see
+[`docs/runbooks/nix-controller-host.md`](docs/runbooks/nix-controller-host.md).
+The first formal Nix release is promoted from an exact-SHA candidate; after
+promotion, the maintainer must download and byte-compare its generated
+`runtime-release.json`, build the locked Controller/Host environments, and
+commit the lock update. The complete command sequence is in the runbook.
+
 ## Capability Boundary
 
 Cross-Host Docker PostgreSQL and Redis passed all eight Task 4 gates at

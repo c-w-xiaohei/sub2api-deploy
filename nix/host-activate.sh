@@ -1,9 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Explicit, bounded Ubuntu/systemd integration for a prebuilt Host payload.
 set -euo pipefail
 umask 077
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
 
 activation_root=""
 root_path() { printf '%s%s\n' "$activation_root" "$1"; }
@@ -20,10 +18,26 @@ esac
 
 [[ "${EUID}" -eq 0 ]] || fail "must be run as root"
 [[ -z "${SUB2API_HOST_ACTIVATION_TEST_ROOT:-}${SUB2API_HOST_RUNTIME_ROOT:-}" ]] || fail "test runtime overrides are not accepted"
-runtime_root="$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+script_path="${BASH_SOURCE[0]}"
+[[ "$script_path" == /* ]] || fail "activation must be invoked by an absolute path"
+script_path="$(readlink -f -- "$script_path")"
+[[ ! -L "$script_path" ]] || fail "activation target must be a non-symlink path"
+script_dir="${script_path%/*}"
+runtime_root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
 [[ -d "$runtime_root" && ! -L "$runtime_root" ]] || fail "runtime payload must be a real directory"
 expected_owner=0
-
+runtime_store_root="/nix/store"
+[[ "$runtime_root" == "$runtime_store_root/"* && "${runtime_root#"$runtime_store_root/"}" != */* ]] || fail "runtime payload must be one immutable Nix store path"
+path="$runtime_root"
+while [[ "$path" != / ]]; do
+  [[ ! -L "$path" && "$(/usr/bin/stat -c %u "$path")" == "$expected_owner" ]] || fail "unsafe runtime ancestor: $path"
+  mode="$(/usr/bin/stat -c %a "$path")"
+  if (( (8#$mode & 022) != 0 )); then
+    [[ "$path" == "$runtime_store_root" ]] && (( (8#$mode & 01000) != 0 )) || fail "writable runtime ancestor: $path"
+  fi
+  path="${path%/*}"
+  [[ -n "$path" ]] || path=/
+done
 [[ "$(stat -c %u "$runtime_root")" == "$expected_owner" ]] || fail "runtime payload must be root-owned"
 [[ -z "$(find "$runtime_root" -xdev -type l -print -quit)" ]] || fail "runtime payload must not contain symlinks"
 [[ -z "$(find "$runtime_root" -xdev \( -type f -o -type d \) -perm /022 -print -quit)" ]] || fail "runtime payload must not be group or world writable"
@@ -35,7 +49,7 @@ source "$os_release"
 [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || fail "only Ubuntu 24.04 with systemd is supported"
 [[ -d "$(root_path /run/systemd/system)" ]] || fail "systemd is required"
 
-for binary in docker dockerd containerd runc nft ssh; do
+for binary in docker dockerd containerd runc nft iptables ip6tables ssh; do
   [[ -x "$runtime_root/bin/$binary" && ! -L "$runtime_root/bin/$binary" ]] || fail "runtime payload misses safe bin/$binary"
 done
 
@@ -55,6 +69,14 @@ systemctl_bin="$(root_path /bin/systemctl)"
 generated_manifest="$runtime_root/share/sub2api-runtime/activation-manifest"
 [[ -f "$generated_manifest" && ! -L "$generated_manifest" ]] || fail "runtime payload misses generated activation manifest"
 [[ -d "$runtime_root/etc/sub2api-nix-host/files" && ! -L "$runtime_root/etc/sub2api-nix-host/files" ]] || fail "runtime payload misses generated activation files"
+host_wrapper="$runtime_root/bin/sub2api-host"
+host_payload="$runtime_root/libexec/sub2api-host"
+host_release="$runtime_root/share/sub2api-host/release"
+[[ -f "$host_wrapper" && ! -L "$host_wrapper" && -x "$host_wrapper" ]] || fail "runtime payload misses safe bin/sub2api-host wrapper"
+[[ -f "$host_payload" && ! -L "$host_payload" && -x "$host_payload" ]] || fail "runtime payload misses safe libexec/sub2api-host payload"
+[[ -z "$(find "$host_wrapper" "$host_payload" -maxdepth 0 -perm /0222 -print -quit)" ]] || fail "Host executable is writable"
+[[ -f "$host_release" && ! -L "$host_release" ]] || fail "runtime payload misses regular Host release metadata"
+[[ -z "$(find "$host_release" -maxdepth 0 -perm /0222 -print -quit)" ]] || fail "Host release metadata is writable"
 
 owned_hash() {
   local kind="$1" path="$2" hash
@@ -123,7 +145,7 @@ for name in docker.service docker.socket docker; do
   [[ -z "$loaded_fragment" || "$loaded_fragment" == n/a ]] || fail "refusing loaded foreign systemd unit: $name"
 done
 if [[ -e "$(dirname "$docker_config")" ]]; then
-  [[ ! -e "$docker_config" && -z "$(ls -A "$(dirname "$docker_config")")" ]] || owned_hash file "$docker_config" || pending_owned || fail "refusing to adopt existing Docker configuration: $(dirname "$docker_config")"
+  [[ ! -e "$docker_config" && -z "$(find "$(dirname "$docker_config")" -mindepth 1 -maxdepth 1 -print -quit)" ]] || owned_hash file "$docker_config" || pending_owned || fail "refusing to adopt existing Docker configuration: $(dirname "$docker_config")"
 fi
 if [[ -e "$data_root" ]] && ! owned_data_root; then
   fail "refusing to adopt existing Docker data root: $data_root"

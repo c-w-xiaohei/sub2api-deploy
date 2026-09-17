@@ -1,9 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Make the release's fixed Pulumi workspace layout available without changing cwd.
 set -euo pipefail
 
 [[ "$#" -eq 1 ]] || { printf 'usage: sub2api-workspace-init <workspace>\n' >&2; exit 2; }
-payload_root="$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+script_path="${BASH_SOURCE[0]}"
+[[ "$script_path" == /* && ! -L "$script_path" ]] || { printf 'sub2api-workspace-init: invoke by absolute non-symlink path\n' >&2; exit 1; }
+script_dir="${script_path%/*}"
+payload_root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
 workspace="$1"
 [[ -d "$workspace" ]] || { printf 'sub2api-workspace-init: workspace does not exist: %s\n' "$workspace" >&2; exit 1; }
 source_workspace="$payload_root/workspace"

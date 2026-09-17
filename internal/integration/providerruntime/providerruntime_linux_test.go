@@ -74,13 +74,6 @@ func TestProviderRuntimeCIHelper(t *testing.T) {
 		os.Exit(1)
 	}
 	serve := testonly.Serve
-	if os.Getenv(ciHelperMode) == "bootstrap" {
-		if err := testonly.ServeBootstrapWithRequestDigest(os.Stdout, os.Stdin, os.Getenv(ciHelperRoot), os.Getenv(ciHelperMID), os.Getenv("PROVIDER_RUNTIME_REQUEST_DIGEST")); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
 	if digestPath := os.Getenv("PROVIDER_RUNTIME_REQUEST_DIGEST"); digestPath != "" {
 		serve = func(out io.Writer, in io.Reader, root, machinePath string) error {
 			return testonly.ServeWithRequestDigest(out, in, root, machinePath, digestPath)
@@ -336,7 +329,7 @@ func TestProviderProcessReachesSharedTemporaryRuntimeServe(t *testing.T) {
 	release := runtimeRelease(t)
 	inputs := createInputsWithRelease(release)
 	writeTargetExpectation(t, h, inputs)
-	writeHostActionQueue(t, h, hostcontract.ActionInspect)
+	writeHostActionQueue(t, h, hostcontract.ActionReconcile, hostcontract.ActionInspect)
 	ctx, cancel := context.WithTimeout(t.Context(), prerequisiteCreateTimeout)
 	defer cancel()
 	response, err := h.client.Create(ctx, &pulumirpc.CreateRequest{
@@ -359,11 +352,9 @@ func TestProviderProcessReachesSharedTemporaryRuntimeServe(t *testing.T) {
 	checkpoint := unmarshalProperties(t, response.Properties)
 	assertCreateCheckpoint(t, checkpoint, inputs, release)
 	if got, want := string(mustRead(t, filepath.Join(h.trace, "request.sha256"))), "operationDigest="+expectedRequestDigest(t, release)+"\naction=reconcile\n"; got != want {
-		t.Fatalf("bootstrap request digest = %q, want %q", got, want)
+		t.Fatalf("Host request digest = %q, want %q", got, want)
 	}
 	assertSSHRecords(t, h.trace)
-	assertBootstrapMetadata(t, h.trace)
-	assertCandidateReleaseArtifact(t, h.trace, release)
 	assertDockerTrace(t, h)
 	assertRuntimePersistence(t, h, checkpoint, release)
 	for _, name := range []string{"machine", "ownership", "appliedRevision", "observation"} {
@@ -427,16 +418,6 @@ func providerBinaryForPrerequisite(t *testing.T) string {
 	if provider != filepath.Join(releaseRoot, "bin", "pulumi-resource-sub2api-host") {
 		t.Fatal("candidate Provider must be the exact release-root provider binary")
 	}
-	for _, path := range []string{
-		filepath.Join(releaseRoot, "artifacts", "sub2api-host", "manifest.json"),
-		filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64"),
-		filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-arm64"),
-	} {
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			t.Fatalf("candidate release artifact must be a regular file: %s: %v", path, err)
-		}
-	}
 	return provider
 }
 
@@ -492,7 +473,6 @@ func buildProvider(t *testing.T, directory string) string {
 	t.Helper()
 	workspace := repositoryRoot(t)
 	providerPath := filepath.Join(directory, "pulumi-resource-sub2api-host")
-	writeArtifactFixture(t, filepath.Dir(filepath.Dir(providerPath)))
 	buildCtx, cancelBuild := context.WithTimeout(t.Context(), providerBuildTimeout)
 	defer cancelBuild()
 	args := []string{"build", "-o", providerPath, "./cmd/pulumi-resource-sub2api-host"}
@@ -518,12 +498,6 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 			t.Fatal(err)
 		}
 	}
-	artifact := filepath.Join(caseDir, "artifacts", "sub2api-host", "host-amd64")
-	if releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT"); releaseRoot != "" {
-		artifact = filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64")
-	} else {
-		writeArtifactFixture(t, caseDir)
-	}
 	writeSSHFixture(t, filepath.Join(binDir, "ssh"))
 	writeDockerFixture(t, filepath.Join(binDir, "docker"))
 	writeNFTFixture(t, filepath.Join(binDir, "nft"))
@@ -547,13 +521,13 @@ func startProviderApproval(t *testing.T, providerBinary string, decision approva
 		"PROVIDER_RUNTIME_ROOT="+root,
 		"PROVIDER_RUNTIME_MACHINE_ID="+machinePath,
 		"PROVIDER_RUNTIME_TRACE="+trace,
-		"PROVIDER_RUNTIME_ARTIFACT="+artifact,
 		"PROVIDER_RUNTIME_REQUEST_DIGEST="+filepath.Join(trace, "request.sha256"),
 		"PROVIDER_RUNTIME_DOCKER_LOG="+filepath.Join(trace, "docker.args"),
 		"PROVIDER_RUNTIME_DOCKER_STATE="+filepath.Join(trace, "docker-state"),
 		"PROVIDER_RUNTIME_PROBE_COMMAND="+filepath.Join(trace, "probe.command"),
-		"PROVIDER_RUNTIME_BOOTSTRAP_COMMAND="+filepath.Join(trace, "bootstrap.command"),
 		"PROVIDER_RUNTIME_HOST_COMMAND="+filepath.Join(trace, "host.command"),
+		"PROVIDER_RUNTIME_PROFILE_DIGEST="+strings.Repeat("b", 64),
+		"PROVIDER_RUNTIME_RELEASE="+runtimeRelease(t),
 		"PROVIDER_RUNTIME_CLIENT_LOG_DIR="+clientLogDir,
 		"TMPDIR="+clientLogDir,
 		"PROVIDER_RUNTIME_LIFECYCLE_SCENARIO="+strconv.FormatBool(lifecycleScenario),
@@ -735,25 +709,6 @@ func runtimePaths(t *testing.T, root string) (string, string) {
 	return filepath.Join(root, "host-state"), machinePath
 }
 
-func writeArtifactFixture(t *testing.T, caseDir string) {
-	t.Helper()
-	root := filepath.Join(caseDir, "artifacts", "sub2api-host")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	binary := []byte("#!/bin/sh\nset -eu\ncase \"$1\" in\ninstall-attest) printf %s sub2api-bootstrap-attested-v1 >&3 ;;\nbootstrap-stdio) exec env SUB2API_PROVIDER_RUNTIME_CI_HELPER=1 SUB2API_PROVIDER_RUNTIME_MODE=bootstrap \"$PROVIDER_RUNTIME_TEST_BINARY\" -test.run '^TestProviderRuntimeCIHelper$' ;;\nstdio) exec env SUB2API_PROVIDER_RUNTIME_CI_HELPER=1 SUB2API_PROVIDER_RUNTIME_MODE=serve \"$PROVIDER_RUNTIME_TEST_BINARY\" -test.run '^TestProviderRuntimeCIHelper$' ;;\n*) exit 2 ;;\nesac\n")
-	sum := sha256.Sum256(binary)
-	for _, name := range []string{"host-amd64", "host-arm64"} {
-		if err := os.WriteFile(filepath.Join(root, name), binary, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	manifest := fmt.Sprintf(`{"schemaVersion":1,"release":%q,"linux-amd64":{"path":"host-amd64","size":%d,"sha256":%q},"linux-arm64":{"path":"host-arm64","size":%d,"sha256":%q}}`, ciRelease, len(binary), hex.EncodeToString(sum[:]), len(binary), hex.EncodeToString(sum[:]))
-	if err := os.WriteFile(filepath.Join(root, "manifest.json"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func writeSSHFixture(t *testing.T, destination string) {
 	t.Helper()
 	source := filepath.Join(repositoryRoot(t), "internal", "integration", "providerruntime", "testdata", "ssh-runtime.sh")
@@ -888,11 +843,11 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		return "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}", len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/s2h-") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}"
 	}
 	if len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && args[4] == "label=sub2api.host" && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host\"}}" {
-		s.Reads = append(s.Reads, "bootstrap-container-list")
+		s.Reads = append(s.Reads, "preflight-container-list")
 		return nil
 	}
 	if len(args) == 6 && args[0] == "network" && args[1] == "ls" && args[2] == "--filter" && args[3] == "label=sub2api.host" && args[4] == "--format" && args[5] == "{{.Name}}\t{{.Label \"sub2api.host\"}}" {
-		s.Reads = append(s.Reads, "bootstrap-network-list")
+		s.Reads = append(s.Reads, "preflight-network-list")
 		return nil
 	}
 	if _, ok := listNetwork(); ok {
@@ -1267,120 +1222,17 @@ func expectedStableID() string {
 	return "host-" + hex.EncodeToString(sum[:])
 }
 
-// These test-owned byte-exact remote-command goldens are from reviewed
-// production baseline acda72e. They must not be derived from current source.
-const goldenProbeCommand = `set -eu
-[ "$(uname -s)" = Linux ]
-case "$(uname -m)" in
-  x86_64|amd64) arch=amd64 ;;
-  aarch64|arm64) arch=arm64 ;;
-  *) exit 64 ;;
-esac
-[ -r '/etc/machine-id' ]
-bytes=$(wc -c < '/etc/machine-id')
-case "$bytes" in 32|33) ;; *) exit 64 ;; esac
-machine=$(cat '/etc/machine-id')
-case "$machine" in
-  00000000000000000000000000000000|*[!0123456789abcdef]*) exit 64 ;;
-esac
-[ ${#machine} -eq 32 ]
-command -v openssl >/dev/null 2>&1
-identity=$(printf %s "$machine" | openssl dgst -sha256 -mac HMAC -macopt key:sub2api-host-machine-identity-v1 | awk '{print $NF}')
-case "$identity" in *[!0123456789abcdef]*) exit 64 ;; esac
-[ ${#identity} -eq 64 ]
-digest=missing
-if [ -f '/usr/local/libexec/sub2api-host' ]; then
-  digest=$(sha256sum '/usr/local/libexec/sub2api-host' | awk '{print $1}')
-  case "$digest" in *[!0123456789abcdef]*) exit 64 ;; esac
-  [ ${#digest} -eq 64 ]
-fi
-printf 's2p1:Linux\n%s\n%s\n%s\n' "$arch" "$identity" "$digest"
-`
-
-const goldenBootstrapReceiverScript = `set -eu
-umask 077
-stage='%s'
-lock='%s'
-final='%s'
-ok="$stage.ok"
-command -v flock >/dev/null 2>&1
-command -v stat >/dev/null 2>&1
-if [ -L "$lock" ]; then exit 64; fi
-if [ -e "$lock" ] && [ ! -f "$lock" ]; then exit 64; fi
-exec 9>>"$lock"
-owner=$(id -u)
-[ -f /proc/self/fd/9 ]
-[ "$(stat -Lc '%%a:%%u:%%h' /proc/self/fd/9)" = "600:$owner:1" ]
-flock -n 9
-child=
-cancelled=
-interrupted=
-cleanup() {
-  rm -f "$stage" "$ok"
-}
-stop() {
-  cancelled=143
-  interrupted=1
-}
-trap cleanup EXIT
-trap stop HUP INT TERM
-IFS= read -r header
-case "$header" in s2a1:*:*) ;; *) exit 64 ;; esac
-body=${header#s2a1:}
-size=${body%%%%:*}
-digest=${body#*:}
-case "$size" in ''|*[!0-9]*) exit 64 ;; esac
-case "$digest" in *[!0123456789abcdef]*|?????????????????????????????????????????????????????????????????) exit 64 ;; esac
-[ ${#digest} -eq 64 ]
-[ "$size" -le 67108864 ]
-dd of="$stage" bs=1 count="$size" status=none
-[ "$(wc -c < "$stage")" -eq "$size" ]
-[ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
-exec 4<&0
-chmod 700 "$stage"
-if [ -L "$final" ]; then exit 64; fi
-if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
-set +e
-"$stage" install-attest </dev/null 3>"$ok" 4<&- 9>&- >/dev/null 2>/dev/null
-status=$?
-set -e
-[ "$status" -eq 0 ]
-[ -s "$ok" ]
-printf %%s 'sub2api-bootstrap-attested-v1' | cmp -s "$ok" -
-[ "$(wc -c < "$stage")" -eq "$size" ]
-[ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
-if [ -L "$final" ]; then exit 64; fi
-if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
-mv -T -- "$stage" "$final"
-"$final" bootstrap-stdio <&4 4<&- 9>&- &
-child=$!
-exec 4<&-
-set +e
-while :; do
-  interrupted=
-  wait "$child"
-  status=$?
-  [ -z "$interrupted" ] && break
-done
-set -e
-trap '' HUP INT TERM
-child=
-[ -z "$cancelled" ] || status=$cancelled
-exit "$status"
-`
+// These test-owned byte-exact remote-command goldens define the stable SSH
+// transport contract and must not be derived from current source.
+const goldenProbeCommand = "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host probe"
+const goldenHostCommand = "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host stdio"
 
 func writeExpectedSSHCommands(t *testing.T, trace string) {
 	t.Helper()
-	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-	bootstrap := "sudo -n /bin/sh -c " + quote(fmt.Sprintf(goldenBootstrapReceiverScript, "/usr/local/libexec/.sub2api-host.stage", "/usr/local/libexec/.sub2api-host.stage.lock", "/usr/local/libexec/sub2api-host")) + " fixed-argv0"
-	probe := goldenProbeCommand
-	if err := os.WriteFile(filepath.Join(trace, "probe.command"), []byte(probe), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(trace, "probe.command"), []byte(goldenProbeCommand), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(trace, "bootstrap.command"), []byte(bootstrap), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(trace, "host.command"), []byte("/usr/local/libexec/sub2api-host stdio"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(trace, "host.command"), []byte(goldenHostCommand), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1402,15 +1254,15 @@ func expectedRequestDigest(t *testing.T, release string) string {
 
 func assertSSHRecords(t *testing.T, trace string) {
 	t.Helper()
-	if got := string(mustRead(t, filepath.Join(trace, "ssh.ordinal"))); got != "4\n" {
-		t.Fatalf("SSH transition ordinal = %q, want %q", got, "4\\n")
+	if got := string(mustRead(t, filepath.Join(trace, "ssh.ordinal"))); got != "3\n" {
+		t.Fatalf("SSH transition ordinal = %q, want %q", got, "3\\n")
 	}
-	for _, name := range []string{"ssh.probe.1.args", "ssh.probe.2.args", "ssh.bootstrap.args", "ssh.host.args", "bootstrap.meta"} {
+	for _, name := range []string{"ssh.probe.1.args", "ssh.host.1.args", "ssh.host.2.args"} {
 		if len(mustRead(t, filepath.Join(trace, name))) == 0 {
 			t.Fatalf("missing scripted SSH record %s", name)
 		}
 	}
-	for _, name := range []string{"ssh.probe.1.args", "ssh.probe.2.args", "ssh.bootstrap.args", "ssh.host.args"} {
+	for _, name := range []string{"ssh.probe.1.args", "ssh.host.1.args", "ssh.host.2.args"} {
 		lines := strings.Split(strings.TrimSuffix(string(mustRead(t, filepath.Join(trace, name))), "\n"), "\n")
 		if len(lines) != 48 {
 			t.Fatalf("scripted SSH argv record %s is not the fixed transport shape", name)
@@ -1427,67 +1279,13 @@ func assertSSHRecords(t *testing.T, trace string) {
 	}
 }
 
-func assertBootstrapMetadata(t *testing.T, trace string) {
-	t.Helper()
-	artifactPath := filepath.Join(filepath.Dir(trace), "artifacts", "sub2api-host", "host-amd64")
-	if releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT"); releaseRoot != "" {
-		artifactPath = filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64")
-	}
-	artifact, err := os.ReadFile(artifactPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(artifact)
-	want := fmt.Sprintf("size=%d\ndigest=%s\n", len(artifact), hex.EncodeToString(sum[:]))
-	if got := string(mustRead(t, filepath.Join(trace, "bootstrap.meta"))); got != want {
-		t.Fatalf("bootstrap artifact metadata = %q, want %q", got, want)
-	}
-}
-
-func assertCandidateReleaseArtifact(t *testing.T, trace, release string) {
-	t.Helper()
-	releaseRoot := os.Getenv("SUB2API_TEST_RELEASE_ROOT")
-	if releaseRoot == "" {
-		return
-	}
-	artifact, err := os.ReadFile(filepath.Join(releaseRoot, "artifacts", "sub2api-host", "sub2api-host-linux-amd64"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var manifest struct {
-		Release    string `json:"release"`
-		LinuxAMD64 struct {
-			Path   string `json:"path"`
-			SHA256 string `json:"sha256"`
-			Size   int    `json:"size"`
-		} `json:"linux-amd64"`
-	}
-	if err := json.Unmarshal(mustRead(t, filepath.Join(releaseRoot, "artifacts", "sub2api-host", "manifest.json")), &manifest); err != nil {
-		t.Fatal(err)
-	}
-	if manifest.Release != release {
-		t.Fatalf("candidate manifest release = %q, want %q", manifest.Release, release)
-	}
-	sum := sha256.Sum256(artifact)
-	if manifest.LinuxAMD64.Path != "sub2api-host-linux-amd64" || manifest.LinuxAMD64.Size != len(artifact) || manifest.LinuxAMD64.SHA256 != hex.EncodeToString(sum[:]) {
-		t.Fatal("Provider Create bootstrap artifact did not come from the selected candidate manifest")
-	}
-	want := fmt.Sprintf("size=%d\ndigest=%s\n", len(artifact), hex.EncodeToString(sum[:]))
-	if got := string(mustRead(t, filepath.Join(trace, "bootstrap.meta"))); got != want {
-		t.Fatalf("Provider Create bootstrap artifact body/digest = %q, want selected candidate %q", got, want)
-	}
-}
-
 func sshArgumentDigest(t *testing.T, index int, record, trace string) string {
 	t.Helper()
 	fixed := []string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "-E", "", "--", "edge"}
 	if index == 47 {
-		name := "bootstrap.command"
+		name := "host.command"
 		if strings.HasPrefix(record, "ssh.probe.") {
 			name = "probe.command"
-		}
-		if record == "ssh.host.args" {
-			name = "host.command"
 		}
 		sum := sha256.Sum256(mustRead(t, filepath.Join(trace, name)))
 		return hex.EncodeToString(sum[:])
@@ -1801,7 +1599,7 @@ func startApprovalServer(t *testing.T, decision approvalDecision) (*approvalReco
 func createProviderResource(t *testing.T, h *providerProcess, inputs property.Map) *pulumirpc.CreateResponse {
 	t.Helper()
 	writeTargetExpectation(t, h, inputs)
-	writeHostActionQueue(t, h, hostcontract.ActionInspect)
+	writeHostActionQueue(t, h, hostcontract.ActionReconcile, hostcontract.ActionInspect)
 	timeout := prerequisiteCreateTimeout
 	if h.lifecycle {
 		timeout = matrixCreateUpdateTimeout

@@ -5,6 +5,12 @@
 CI-ready / exact-SHA evidence pending. No local Go, build, release, Docker,
 or privileged command was run for this wiring.
 
+Task E supersedes this report's candidate-promotion and Provider artifact
+bootstrap assumptions. The report records historical Task 4 wiring only; the
+current release contract is descriptor schema 2, fixed Nix Host profile
+invocation, exact-SHA x86/arm gates, formal `v0.2.25`, and a separate checked-in
+lock update. Nothing in this report claims that sequence has been executed.
+
 ## Delivered Wiring
 
 - The complete pre-existing 001 evidence contract is restored: Host Controller

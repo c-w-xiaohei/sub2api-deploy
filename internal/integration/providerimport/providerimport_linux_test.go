@@ -128,9 +128,9 @@ func TestEngineImportPreviewIsNoOpOrAcceptedDiff(t *testing.T) {
 }
 
 type harness struct {
-	stack   auto.Stack
-	root    string
-	key     string
+	stack          auto.Stack
+	root           string
+	key            string
 	providerBinary string
 
 	provider *providerProcess
@@ -195,8 +195,8 @@ func newHarness(t *testing.T) *harness {
 		auto.SecretsProvider("passphrase"),
 		auto.Project(workspace.Project{Name: "sub2api-environment", Runtime: workspace.NewProjectRuntimeInfo("go", nil)}),
 		auto.EnvVars(map[string]string{
-			"PATH":                         filepath.Dir(provider) + string(os.PathListSeparator) + os.Getenv("PATH"),
-			"PULUMI_BACKEND_URL":           "file://" + filepath.ToSlash(backendRoot),
+			"PATH":                          filepath.Dir(provider) + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"PULUMI_BACKEND_URL":            "file://" + filepath.ToSlash(backendRoot),
 			"PULUMI_CONFIG_PASSPHRASE_FILE": passphraseFile,
 			"PULUMI_SKIP_UPDATE_CHECK":      "true",
 		}),
@@ -211,7 +211,7 @@ func newHarness(t *testing.T) *harness {
 }
 
 // setupRuntime creates a static, read-only Runtime fixture before the provider
-// process exists. It intentionally never invokes Provider Create or bootstrap.
+// process exists. It intentionally never invokes Provider Create or reconcile.
 func (h *harness) setupRuntime(t *testing.T) {
 	t.Helper()
 	captureRoot, captureTrace := t.TempDir(), t.TempDir()
@@ -263,7 +263,11 @@ func (h *harness) run(t *testing.T, preview, importTarget bool) (apitype.Untyped
 		phase = "update"
 	}
 	h.mu.Lock()
-	if h.capturing { h.phase = "capture" } else { h.phase = phase }
+	if h.capturing {
+		h.phase = "capture"
+	} else {
+		h.phase = phase
+	}
 	h.mu.Unlock()
 	settings, err := h.stack.Workspace().StackSettings(t.Context(), h.stack.Name())
 	if err != nil {
@@ -319,20 +323,21 @@ func decodePropertyJSON(value resource.PropertyValue, into any) bool {
 	b, err := json.Marshal(unwrapFixtureValue(value).Mappable())
 	return err == nil && json.Unmarshal(b, into) == nil
 }
+
 type providerProcess struct {
-	cmd         *exec.Cmd
-	client      pulumirpc.ResourceProviderClient
-	conn        *grpc.ClientConn
-	stdout      io.ReadCloser
-	stderr      *lockedBuffer
-	done        <-chan error
-	identity    processIdentity
+	cmd               *exec.Cmd
+	client            pulumirpc.ResourceProviderClient
+	conn              *grpc.ClientConn
+	stdout            io.ReadCloser
+	stderr            *lockedBuffer
+	done              <-chan error
+	identity          processIdentity
 	root, trace, port string
-	recorder *providerRecorder
-	proxy    *grpc.Server
-	proxyListener net.Listener
-	stopOnce sync.Once
-	stopped  chan struct{}
+	recorder          *providerRecorder
+	proxy             *grpc.Server
+	proxyListener     net.Listener
+	stopOnce          sync.Once
+	stopped           chan struct{}
 }
 
 type providerRecorder struct {
@@ -468,6 +473,7 @@ func (p *providerRecorder) List(req *pulumirpc.ListRequest, stream grpc.ServerSt
 		}
 	}
 }
+
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -921,7 +927,9 @@ func startProvider(t *testing.T, binary, root, trace, dockerModel string) *provi
 	}
 	recorder := &providerRecorder{upstream: pulumirpc.NewResourceProviderClient(conn)}
 	proxyListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	proxy := grpc.NewServer()
 	pulumirpc.RegisterResourceProviderServer(proxy, recorder)
 	go func() { _ = proxy.Serve(proxyListener) }()

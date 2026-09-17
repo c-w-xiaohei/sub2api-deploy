@@ -33,6 +33,38 @@ func TestRunProcessCancellationReturnsContextError(t *testing.T) {
 	}
 }
 
+func TestReconcileInitializesAnAbsentRootThroughOrdinaryPath(t *testing.T) {
+	rt := testRuntime(t)
+	runner := &bootstrapLockRunner{lockPath: rt.lockPath(), discovery: map[string]bool{}}
+	rt.runner = runner
+	result, err := rt.Reconcile(context.Background(), bootstrapRequest())
+	if err != nil || result.Status != hostprotocol.ResultApplied {
+		t.Fatalf("ordinary fresh reconcile = %#v, %v", result, err)
+	}
+	state := mustState(t, rt)
+	if state.Journal == nil || state.Journal.Status != journalComplete || !runner.discovery["container"] || !runner.discovery["network"] {
+		t.Fatalf("ordinary fresh state = %#v, calls = %#v", state, runner.calls)
+	}
+}
+
+func TestServeInitializesAnAbsentRootForOrdinaryReconcileFrame(t *testing.T) {
+	rt := testRuntime(t)
+	runner := &bootstrapLockRunner{lockPath: rt.lockPath(), discovery: map[string]bool{}}
+	rt.runner = runner
+	frame, err := hostprotocol.EncodeRequest(bootstrapRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := rt.Serve(&out, bytes.NewReader(frame)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := hostprotocol.DecodeResponse(out.Bytes())
+	if err != nil || response.Error != nil || response.Result == nil || response.Result.Status != hostprotocol.ResultApplied {
+		t.Fatalf("ordinary stdio response = %#v, %v", response, err)
+	}
+}
+
 func TestReconcileBlueGreenOwnedOnlyAndTerminalReplay(t *testing.T) {
 	rt, state := initialized(t)
 	runner := &recordingRunner{}

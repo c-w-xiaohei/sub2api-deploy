@@ -11,224 +11,213 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("nix_release_descriptor", ROOT / "scripts/nix-release-descriptor.py")
-nix_release_descriptor = importlib.util.module_from_spec(SPEC)
+module = importlib.util.module_from_spec(SPEC)
 
 
-class ReleaseDescriptorTests(unittest.TestCase):
+class DescriptorTests(unittest.TestCase):
     def setUp(self):
-        SPEC.loader.exec_module(nix_release_descriptor)
+        SPEC.loader.exec_module(module)
 
-    def make_archive(self, directory, name, role="controller", system="x86_64-linux", inventory_mutation=None, omit=None, overrides=None):
-        archive = directory / name
-        required = nix_release_descriptor.required_paths_for(role)
-        executable = set(nix_release_descriptor.executable_paths_for(role))
-        directories = {path for path in required if path.endswith("/plugins")}
-        files = {path: (b"#!/bin/sh\nexit 0\n" if path.startswith(("bin/", "tools/bin/")) else b"fixture")
-                 for path in required if path not in directories and path != "share/sub2api-runtime/inventory.json"}
-        if role == "controller":
-            files["workspace/bin/pulumi-program"] = files["bin/pulumi-program"]
-            files["Pulumi.yaml"] = files["workspace/Pulumi.yaml"]
-            files["workspace/bin/plugins/cloudflare/pulumi-resource-cloudflare"] = b"#!/bin/sh\nexit 0\n"
-        files.update(overrides or {})
-        if omit:
-            files.pop(omit, None)
-        files["share/sub2api-runtime/inventory.json"] = b"pending"
-        inventory = {
-            "schemaVersion": 1,
-            "role": role,
-            "system": system,
-            "version": "v1.2.3",
-            "projectCommit": "a" * 40,
-            "requiredPaths": required,
-            "files": [{"path": path, "sha256": hashlib.sha256(value).hexdigest()} for path, value in files.items() if path != "share/sub2api-runtime/inventory.json"],
+    def fixture(self, directory):
+        sha = "a" * 40
+        archive = directory / ("sub2api-controller-%s.tar.gz" % sha)
+        amd64 = b"amd64"
+        arm64 = b"arm64"
+        files = {
+            "bin/sub2api-deploy": b"deploy", "bin/go": b"go", "bin/pulumi-resource-sub2api-host": b"provider",
+            "bin/pulumi-program": b"program", "Pulumi.yaml": b"name: fixture\n", "go.mod": b"module fixture\n",
+            "artifacts/sub2api-host/sub2api-host-linux-amd64": amd64,
+            "artifacts/sub2api-host/sub2api-host-linux-arm64": arm64,
+            "scripts/pulumi-plugins/cloudflare/pulumi-plugin.json": b"{}\n",
+            "scripts/pulumi-plugins/upstash/pulumi-plugin.json": b"{}\n",
         }
-        if inventory_mutation:
-            inventory_mutation(inventory)
-        files["share/sub2api-runtime/inventory.json"] = json.dumps(inventory, sort_keys=True).encode()
+        files["artifacts/sub2api-host/manifest.json"] = (json.dumps({
+            "schemaVersion": 1,
+            "release": "sub2api-host-controller@sha256:" + hashlib.sha256(sha.encode()).hexdigest(),
+            "linux-amd64": {
+                "path": "sub2api-host-linux-amd64",
+                "sha256": hashlib.sha256(amd64).hexdigest(),
+                "size": len(amd64),
+            },
+            "linux-arm64": {
+                "path": "sub2api-host-linux-arm64",
+                "sha256": hashlib.sha256(arm64).hexdigest(),
+                "size": len(arm64),
+            },
+        }, sort_keys=True) + "\n").encode()
         with tarfile.open(archive, "w:gz") as bundle:
             for path, value in files.items():
-                member = tarfile.TarInfo("payload/" + path)
+                member = tarfile.TarInfo("bundle/" + path)
                 member.size = len(value)
-                member.mode = 0o755 if path in executable or "/plugins/" in path else 0o644
+                member.mode = 0o755 if path.startswith("bin/") or path.endswith(("sub2api-host-linux-amd64", "sub2api-host-linux-arm64")) else 0o644
                 bundle.addfile(member, io.BytesIO(value))
-        return archive
+        metadata = directory / "metadata.json"
+        metadata.write_text(json.dumps({"sha": sha, "archive": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}))
+        nar = directory / "nar"
+        nar.write_text("#!/bin/sh\nprintf 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n'\n")
+        nar.chmod(0o755)
+        return sha, archive, metadata, nar
 
-    def manifest(self, archive, role="controller", system="x86_64-linux", candidate_archive=None):
-        candidate_archive = candidate_archive or archive
-        return {
-            "schemaVersion": 1,
-            "projectCommit": "a" * 40,
-            "knownCandidateSHA256": {archive.name: hashlib.sha256(archive.read_bytes()).hexdigest()},
-            "ciCandidate": {
-                "runId": "123",
-                "archive": candidate_archive.name,
-                "archiveSha256": hashlib.sha256(candidate_archive.read_bytes()).hexdigest(),
-                "projectCommit": "a" * 40,
-            },
-            "artifacts": [{
-                "role": role,
-                "system": system,
-                "version": "v1.2.3",
-                "projectCommit": "a" * 40,
-                "asset": archive.name,
-                "requiredPaths": nix_release_descriptor.required_paths_for(role),
-            }],
-        }
-
-    def nar_tool(self, directory):
-        # This deterministic stand-in validates the CLI boundary only; it is not a production NAR implementation.
-        tool = directory / "fake-nar"
-        tool.write_text("#!/bin/sh\n[ -d \"$1\" ] || exit 2\nprintf 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n'\n")
-        tool.chmod(0o755)
-        return tool
-
-    def run_generate(self, directory, manifest, nar=None, candidate=None, require_complete=False):
-        manifest_path = directory / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest))
-        output = directory / ("output-" + manifest["artifacts"][0]["asset"])
-        candidate = candidate or directory / manifest["ciCandidate"]["archive"]
-        args = ["generate", "--input-dir", str(directory), "--manifest", str(manifest_path), "--candidate-archive", str(candidate), "--tag", "v1.2.3", "--project-sha", "a" * 40, "--output-dir", str(output), "--nar-command", str(nar or self.nar_tool(directory))]
-        if require_complete:
-            args.append("--require-complete")
-        nix_release_descriptor.main(args)
+    def generate(self, directory):
+        sha, archive, metadata, nar = self.fixture(directory)
+        output = directory / "out"
+        module.main(["generate", "--candidate-archive", str(archive), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(output), "--nar-command", str(nar)])
         return output
 
-    def test_generates_lock_and_descriptor_from_audited_tarball(self):
+    def test_generates_small_descriptor_for_exact_candidate(self):
         with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            archive = self.make_archive(directory, "controller.tar.gz")
-            output = self.run_generate(directory, self.manifest(archive))
+            output = self.generate(Path(temporary))
             lock = json.loads((output / "runtime-release.json").read_text())
-            artifact = lock["artifacts"][0]
-            self.assertEqual(artifact["role"], "controller")
-            self.assertEqual(artifact["projectCommit"], "a" * 40)
-            self.assertEqual(artifact["archiveSha256"], nix_release_descriptor.sri(hashlib.sha256(archive.read_bytes()).hexdigest()))
-            self.assertEqual(artifact["narHash"], "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-            self.assertEqual(artifact["requiredPaths"], self.manifest(archive)["artifacts"][0]["requiredPaths"])
-            with tempfile.TemporaryDirectory() as extracted:
-                payload = nix_release_descriptor.extract_archive(archive, Path(extracted))
-                self.assertEqual((payload / "bin/sub2api-deploy").stat().st_mode & 0o777, 0o755)
-                self.assertEqual((payload / "workspace/Pulumi.yaml").stat().st_mode & 0o777, 0o644)
-            self.assertEqual((output / "descriptor/flake.nix").read_text(), (ROOT / "flake.nix").read_text())
-            self.assertTrue((output / "descriptor/nix/runtime-lib.nix").is_file())
-            self.assertTrue((output / "descriptor/flake.lock").is_file())
-            self.assertTrue((output / "descriptor/nix/controller-workspace-init.sh").is_file())
-            self.assertFalse((output / "descriptor/nix/tests").exists())
-            self.assertFalse((output / "descriptor/nix/runtime-release.json").read_text() == (ROOT / "nix/runtime-release.json").read_text())
-            descriptor_files = {path.relative_to(output / "descriptor").as_posix() for path in (output / "descriptor").rglob("*") if path.is_file()}
-            self.assertEqual(descriptor_files, {
-                "flake.nix", "flake.lock", "nix/environments.nix", "nix/runtime-lib.nix",
-                "nix/runtime-contract.json",
-                "nix/controller-workspace-init.sh", "nix/host-activate.sh", "nix/runtime-release.json",
+            self.assertEqual(lock["schemaVersion"], 2)
+            self.assertEqual(lock["controller"]["narHash"], "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+            self.assertEqual(lock["controller"]["url"], "https://github.com/example/project/releases/download/v1.2.3/sub2api-controller-%s.tar.gz" % ("a" * 40))
+            self.assertEqual(lock["controller"]["hostPayload"], {
+                "aarch64-linux": {
+                    "path": "artifacts/sub2api-host/sub2api-host-linux-arm64",
+                    "sha256": hashlib.sha256(b"arm64").hexdigest(),
+                },
+                "x86_64-linux": {
+                    "path": "artifacts/sub2api-host/sub2api-host-linux-amd64",
+                    "sha256": hashlib.sha256(b"amd64").hexdigest(),
+                },
             })
+            self.assertEqual(lock["controller"]["hostRelease"], "sub2api-host-controller@sha256:" + hashlib.sha256(("a" * 40).encode()).hexdigest())
+            files = {path.relative_to(output / "descriptor").as_posix() for path in (output / "descriptor").rglob("*") if path.is_file()}
+            self.assertEqual(files, set(module.DESCRIPTOR_FILES + ["nix/runtime-release.json"]))
+            archive = output / "nix-runtime-descriptor-v1.2.3.tar.gz"
+            self.assertEqual((output / (archive.name + ".sha256")).read_text(), "%s  %s\n" % (hashlib.sha256(archive.read_bytes()).hexdigest(), archive.name))
 
-    def test_rejects_missing_audited_asset_and_tampered_candidate_bytes(self):
+    def test_rejects_tampered_candidate(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            archive = self.make_archive(directory, "controller.tar.gz")
-            manifest = self.manifest(archive)
+            sha, archive, metadata, nar = self.fixture(directory)
             archive.write_bytes(archive.read_bytes() + b"tampered")
-            with self.assertRaises(SystemExit):
-                self.run_generate(directory, manifest)
-            manifest["artifacts"][0]["asset"] = "missing.tar.gz"
-            with self.assertRaises(SystemExit):
-                self.run_generate(directory, manifest)
+            with self.assertRaisesRegex(SystemExit, "metadata"):
+                module.main(["generate", "--candidate-archive", str(archive), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(directory / "out"), "--nar-command", str(nar)])
 
-    def test_rejects_self_referential_or_mismatched_inventory(self):
+    def test_rejects_candidate_symlink_before_reading_it(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            archive = self.make_archive(directory, "controller.tar.gz", inventory_mutation=lambda inventory: inventory.update({"archiveSha256": "b" * 64}))
-            with self.assertRaises(SystemExit):
-                self.run_generate(directory, self.manifest(archive))
-            archive = self.make_archive(directory, "mismatch.tar.gz", system="aarch64-linux")
-            with self.assertRaises(SystemExit):
-                self.run_generate(directory, self.manifest(archive))
+            sha, archive, metadata, nar = self.fixture(directory)
+            alias = directory / "candidate.tar.gz"
+            alias.symlink_to(archive)
+            with self.assertRaisesRegex(SystemExit, "symlink"):
+                module.main(["generate", "--candidate-archive", str(alias), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(directory / "out"), "--nar-command", str(nar)])
 
-    def test_rejects_unsafe_tar_members(self):
+    def test_rejects_host_manifest_release_not_bound_to_project_sha(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            archive = directory / "controller.tar.gz"
+            sha, archive, metadata, nar = self.fixture(directory)
+            with tarfile.open(archive, "r:gz") as source, tarfile.open(directory / "wrong-release.tar.gz", "w:gz") as target:
+                for member in source.getmembers():
+                    data = source.extractfile(member) if member.isfile() else None
+                    if member.name.endswith("manifest.json"):
+                        manifest = json.loads(data.read())
+                        manifest["release"] = "sub2api-host-controller@sha256:" + "b" * 64
+                        value = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+                        member.size = len(value)
+                        data = io.BytesIO(value)
+                    target.addfile(member, data)
+            archive.unlink()
+            (directory / "wrong-release.tar.gz").rename(archive)
+            metadata.write_text(json.dumps({"sha": sha, "archive": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}))
+            with self.assertRaisesRegex(SystemExit, "release identity"):
+                module.main(["generate", "--candidate-archive", str(archive), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(directory / "out"), "--nar-command", str(nar)])
+
+    def test_rejects_descriptor_source_symlink_or_symlink_ancestor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            real = Path(temporary) / "real"
+            for relative in module.DESCRIPTOR_FILES:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("fixture")
+            real.mkdir()
+            (real / "flake.nix").write_text("fixture")
+            (root / "flake.nix").unlink()
+            (root / "flake.nix").symlink_to(real / "flake.nix")
+            old_root = module.ROOT
+            module.ROOT = root
+            try:
+                sha, archive, metadata, nar = self.fixture(Path(temporary))
+                with self.assertRaisesRegex(SystemExit, "symlink"):
+                    module.main(["generate", "--candidate-archive", str(archive), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(Path(temporary) / "out"), "--nar-command", str(nar)])
+            finally:
+                module.ROOT = old_root
+
+            (root / "flake.nix").unlink()
+            (root / "nix").rename(root / "nix-real")
+            (root / "nix").symlink_to(real)
+            (root / "nix" / "runtime-lib.nix").parent.mkdir(parents=True, exist_ok=True)
+            (root / "nix" / "runtime-lib.nix").symlink_to(real / "flake.nix")
+            with self.assertRaisesRegex(SystemExit, "symlink"):
+                module.checked_descriptor_source(root, "nix/runtime-lib.nix")
+
+    def test_rejects_unsafe_archive_member(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sha, archive, metadata, nar = self.fixture(directory)
             with tarfile.open(archive, "w:gz") as bundle:
-                member = tarfile.TarInfo("payload/bin/link")
-                member.type = tarfile.SYMTYPE
-                member.linkname = "/etc/passwd"
-                bundle.addfile(member)
-            with self.assertRaises(SystemExit):
-                self.run_generate(directory, self.manifest(archive))
+                member = tarfile.TarInfo("bundle/../../escape")
+                member.size = 1
+                bundle.addfile(member, io.BytesIO(b"x"))
+            metadata.write_text(json.dumps({"sha": sha, "archive": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}))
+            with self.assertRaisesRegex(SystemExit, "unsafe archive"):
+                module.main(["generate", "--candidate-archive", str(archive), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(directory / "out"), "--nar-command", str(nar)])
 
-    def test_rejects_required_paths_that_disagree_between_manifest_and_inventory(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            archive = self.make_archive(directory, "controller.tar.gz")
-            manifest = self.manifest(archive)
-            manifest["artifacts"][0]["requiredPaths"] = ["bin/other"]
-            with self.assertRaises(SystemExit):
-                self.run_generate(directory, manifest)
-
-    def test_rejects_missing_or_nonexecutable_required_entrypoint(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            bad = self.make_archive(directory, "bad.tar.gz", omit="bin/pulumi")
-            with self.assertRaisesRegex(SystemExit, "required runtime file is missing"):
-                self.run_generate(directory, self.manifest(bad))
-
-            archive = self.make_archive(directory, "mode.tar.gz")
-            with tarfile.open(archive, "r:gz") as source, tarfile.open(directory / "bad-mode.tar.gz", "w:gz") as target:
-                for member in source.getmembers():
-                    if member.name == "payload/bin/pulumi":
-                        member.mode = 0o644
-                    data = source.extractfile(member) if member.isfile() else None
-                    target.addfile(member, data)
-            bad_mode = directory / "bad-mode.tar.gz"
-            with self.assertRaisesRegex(SystemExit, "not executable"):
-                self.run_generate(directory, self.manifest(bad_mode))
-
-            archive = self.make_archive(directory, "bad-workspace-mode.tar.gz")
-            with tarfile.open(archive, "r:gz") as source, tarfile.open(directory / "bad-workspace.tar.gz", "w:gz") as target:
-                for member in source.getmembers():
-                    if member.name == "payload/workspace/bin/pulumi-program":
-                        member.mode = 0o644
-                    data = source.extractfile(member) if member.isfile() else None
-                    target.addfile(member, data)
-            bad_workspace = directory / "bad-workspace.tar.gz"
-            with self.assertRaisesRegex(SystemExit, "not executable"):
-                self.run_generate(directory, self.manifest(bad_workspace))
-
-    def test_rejects_project_component_that_differs_from_ci_candidate(self):
-        compared = nix_release_descriptor.PROJECT_COMPONENTS + ["workspace/bin/pulumi-program", "workspace/Pulumi.yaml"]
-        for index, path in enumerate(compared):
-            with self.subTest(path=path), tempfile.TemporaryDirectory() as temporary:
+    def test_rejects_host_manifest_that_does_not_match_candidate_bytes(self):
+        mutations = [
+            (lambda record: record.update({"sha256": "0" * 64}), "checksum"),
+            (lambda record: record.update({"size": 999}), "size"),
+            (lambda record: record.update({"path": "other"}), "path"),
+        ]
+        for mutate, message in mutations:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
-                candidate = self.make_archive(directory, "candidate.tar.gz")
-                runtime = self.make_archive(directory, "runtime-%d.tar.gz" % index, overrides={path: b"tampered"})
-                manifest = self.manifest(runtime, candidate_archive=candidate)
-                with self.assertRaisesRegex(SystemExit, "differs from the tested CI candidate"):
-                    self.run_generate(directory, manifest, candidate=candidate)
+                sha, archive, metadata, nar = self.fixture(directory)
+                with tarfile.open(archive, "r:gz") as source, tarfile.open(directory / "mutated.tar.gz", "w:gz") as target:
+                    for member in source.getmembers():
+                        data = source.extractfile(member) if member.isfile() else None
+                        if member.name.endswith("manifest.json"):
+                            manifest = json.loads(data.read())
+                            mutate(manifest["linux-amd64"])
+                            value = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+                            member.size = len(value)
+                            data = io.BytesIO(value)
+                        target.addfile(member, data)
+                archive.unlink()
+                (directory / "mutated.tar.gz").rename(archive)
+                metadata.write_text(json.dumps({"sha": sha, "archive": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}))
+                with self.assertRaisesRegex(SystemExit, message):
+                    module.main(["generate", "--candidate-archive", str(archive), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(directory / "out"), "--nar-command", str(nar)])
 
-    def test_complete_descriptor_uses_the_supported_role_system_matrix(self):
+    def test_rejects_incomplete_host_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            controller = self.make_archive(directory, "controller.tar.gz")
-            host_amd64 = self.make_archive(directory, "host-amd64.tar.gz", role="host-environment")
-            host_arm64 = self.make_archive(directory, "host-arm64.tar.gz", role="host-environment", system="aarch64-linux")
-            manifest = self.manifest(controller)
-            for archive, system in ((host_amd64, "x86_64-linux"), (host_arm64, "aarch64-linux")):
-                manifest["knownCandidateSHA256"][archive.name] = hashlib.sha256(archive.read_bytes()).hexdigest()
-                manifest["artifacts"].append({
-                    "role": "host-environment",
-                    "system": system,
-                    "version": "v1.2.3",
-                    "projectCommit": "a" * 40,
-                    "asset": archive.name,
-                    "requiredPaths": nix_release_descriptor.required_paths_for("host-environment"),
-                })
-            output = self.run_generate(directory, manifest, candidate=controller, require_complete=True)
-            lock = json.loads((output / "runtime-release.json").read_text())
-            self.assertEqual({(entry["role"], entry["system"]) for entry in lock["artifacts"]}, {
-                ("controller", "x86_64-linux"),
-                ("host-environment", "x86_64-linux"),
-                ("host-environment", "aarch64-linux"),
-            })
+            sha, archive, metadata, nar = self.fixture(directory)
+            with tarfile.open(archive, "r:gz") as source, tarfile.open(directory / "incomplete.tar.gz", "w:gz") as target:
+                for member in source.getmembers():
+                    data = source.extractfile(member) if member.isfile() else None
+                    if member.name.endswith("manifest.json"):
+                        manifest = json.loads(data.read())
+                        del manifest["linux-arm64"]
+                        value = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+                        member.size = len(value)
+                        data = io.BytesIO(value)
+                    target.addfile(member, data)
+            archive.unlink()
+            (directory / "incomplete.tar.gz").rename(archive)
+            metadata.write_text(json.dumps({"sha": sha, "archive": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}))
+            with self.assertRaisesRegex(SystemExit, "schema"):
+                module.main(["generate", "--candidate-archive", str(archive), "--metadata", str(metadata), "--tag", "v1.2.3", "--project-sha", sha, "--repository", "example/project", "--output-dir", str(directory / "out"), "--nar-command", str(nar)])
+
+    def test_descriptor_archive_is_deterministic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = self.generate(Path(temporary))
+            first, second = output / "first.tar.gz", output / "second.tar.gz"
+            module.write_descriptor_archive(output / "descriptor", first)
+            module.write_descriptor_archive(output / "descriptor", second)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
 
 
 if __name__ == "__main__":

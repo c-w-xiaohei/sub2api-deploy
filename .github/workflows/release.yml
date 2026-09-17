@@ -1,28 +1,35 @@
 name: Promote Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: New immutable vX.Y.Z release version
+        required: true
+        type: string
+      target_sha:
+        description: Exact 40-character commit SHA with successful CI
+        required: true
+        type: string
 
 permissions:
   actions: read
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
   promote:
     name: Promote exact CI candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
-      TAG_SHA: ${{ github.sha }}
-      TAG_NAME: ${{ github.ref_name }}
+      TAG_SHA: ${{ inputs.target_sha }}
+      TAG_NAME: ${{ inputs.version }}
     steps:
-      - name: Check out exact tag SHA
+      - name: Check out exact release SHA
         uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG_SHA }}
@@ -35,14 +42,31 @@ jobs:
           [[ "$TAG_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TAG_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
           test "$(git rev-parse HEAD)" = "$TAG_SHA"
-          test "$(git rev-parse "refs/tags/${TAG_NAME}^{commit}")" = "$TAG_SHA"
           runs="$RUNNER_TEMP/ci-runs.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&status=completed&per_page=100" > "$runs"
-          run_id="$(python3 scripts/ci-evidence.py select-run "$runs" "$TAG_SHA")"
+          run_id="$(jq -r --arg sha "$TAG_SHA" '[.[].workflow_runs[] | select(.head_sha == $sha and .event == "push" and .status == "completed" and .conclusion == "success" and .path == ".github/workflows/ci.yml" and .name == "Pull-Request CI")] | sort_by(.run_attempt, .id) | last | .id // empty' "$runs")"
           [[ "$run_id" =~ ^[0-9]+$ ]]
           jobs="$RUNNER_TEMP/ci-jobs.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" > "$jobs"
           python3 scripts/ci-evidence.py validate-jobs "$jobs"
+          nix_runs="$RUNNER_TEMP/nix-runs.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/nix-runtime.yml/runs?status=completed&per_page=100" > "$nix_runs"
+          nix_run="$(jq -r --arg sha "$TAG_SHA" '[.[].workflow_runs[] | select(.head_sha == $sha and (.event == "push" or .event == "workflow_dispatch") and .status == "completed" and .conclusion == "success" and .path == ".github/workflows/nix-runtime.yml" and .name == "Nix Runtime Fixture")] | sort_by(.run_attempt, .id) | last | .id // empty' "$nix_runs")"
+          [[ "$nix_run" =~ ^[0-9]+$ ]] || { printf 'no successful exact-SHA Nix Runtime run\n' >&2; exit 1; }
+          nix_jobs="$RUNNER_TEMP/nix-jobs.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$nix_run/jobs?per_page=100" > "$nix_jobs"
+          jq -e '[.[].jobs[] | {name, status, conclusion}] | sort_by(.name) == (["Formal Release Lock", "Host Candidate (aarch64-linux)", "Host Candidate (x86_64-linux)", "runtime-fixtures"] | map({name: ., status: "completed", conclusion: "success"}) | sort_by(.name))' "$nix_jobs" >/dev/null
+          nix_artifacts="$RUNNER_TEMP/nix-artifacts.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$nix_run/artifacts?per_page=100" > "$nix_artifacts"
+          jq -e --arg sha "$TAG_SHA" '[.[].artifacts[] | {name, expired}] | sort_by(.name) == (["nix-runtime-evidence-" + $sha, "nix-host-candidate-" + $sha + "-x86_64-linux", "nix-host-candidate-" + $sha + "-aarch64-linux"] | map({name: ., expired: false}) | sort_by(.name))' "$nix_artifacts" >/dev/null
+          evidence_root="$RUNNER_TEMP/nix-host-evidence"
+          mkdir -m 0700 "$evidence_root"
+          for system in x86_64-linux aarch64-linux; do
+            artifact_name="nix-host-candidate-$TAG_SHA-$system"
+            artifact_id="$(jq -r --arg name "$artifact_name" '[.[].artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].id else empty end' "$nix_artifacts")"
+            [[ "$artifact_id" =~ ^[0-9]+$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$evidence_root/$system.zip"
+          done
           artifacts="$RUNNER_TEMP/ci-artifacts.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" > "$artifacts"
           artifact_id="$(python3 scripts/ci-evidence.py select-artifact "$artifacts" "$TAG_SHA")"
@@ -86,28 +110,261 @@ jobs:
             ! grep -qiE 'AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----|"authorization"\s*:|sub2api-host-v1 |CrossHost[A-Za-z0-9_]*(Password|Secret)' "$artifact_file"
           done
           for evidence_file in "$private/artifact/metadata.json" "$private/artifact/consumer-trace.json"; do
-             ! grep -qE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$evidence_file"
+            ! grep -qE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$evidence_file"
           done
-      - name: Publish validated candidate
+          python3 - "$evidence_root/x86_64-linux.zip" "$evidence_root/aarch64-linux.zip" "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-amd64" "$consumer/bundle/artifacts/sub2api-host/sub2api-host-linux-arm64" "$consumer/bundle/artifacts/sub2api-host/manifest.json" "$TAG_SHA" "$evidence_root/parsed" <<'PY'
+          import hashlib
+          import json
+          import re
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          x86_archive, arm_archive, x86_candidate, arm_candidate, manifest_path, target_sha, output_root = sys.argv[1:]
+          output_root = Path(output_root)
+          output_root.mkdir(mode=0o700)
+          sha256 = re.compile(r"^[0-9a-f]{64}$")
+          commit = re.compile(r"^[0-9a-f]{40}$")
+          expected_release = "sub2api-host-controller@sha256:" + hashlib.sha256(target_sha.encode()).hexdigest()
+          if not commit.fullmatch(target_sha):
+              raise SystemExit("invalid target SHA in Nix evidence validation")
+
+          def strict_json(path):
+              def pairs(items):
+                  result = {}
+                  for key, value in items:
+                      if key in result:
+                          raise ValueError("duplicate JSON key")
+                      result[key] = value
+                  return result
+
+              data = Path(path).read_bytes()
+              return json.loads(data.decode("utf-8"), object_pairs_hook=pairs)
+
+          def extract(archive, destination):
+              expected_name = "nix-host-candidate-evidence.json"
+              with zipfile.ZipFile(archive) as bundle:
+                  entries = bundle.infolist()
+                  names = [entry.filename for entry in entries]
+                  if names != [expected_name] or len(set(names)) != 1:
+                      raise SystemExit("invalid Nix evidence ZIP inventory")
+                  entry = entries[0]
+                  mode = entry.external_attr >> 16
+                  if entry.is_dir() or "/" in entry.filename or "\\" in entry.filename or entry.filename.startswith("/") or not stat.S_ISREG(mode):
+                      raise SystemExit("unsafe Nix evidence ZIP entry")
+                  destination.write_bytes(bundle.read(entry))
+
+          manifest = strict_json(manifest_path)
+          if not isinstance(manifest, dict) or set(manifest) != {"schemaVersion", "release", "linux-amd64", "linux-arm64"} or not isinstance(manifest.get("schemaVersion"), int) or isinstance(manifest.get("schemaVersion"), bool) or manifest.get("schemaVersion") != 1 or not isinstance(manifest.get("release"), str) or manifest.get("release") != expected_release:
+              raise SystemExit("candidate Host manifest has the wrong release identity")
+
+          def validate(archive, candidate, system, architecture):
+              evidence_path = output_root / (system + ".json")
+              extract(archive, evidence_path)
+              value = strict_json(evidence_path)
+              expected_keys = {"schemaVersion", "TARGET_SHA", "system", "architecture", "sourceHostSHA256", "composedHostSHA256", "releaseIdentity"}
+              if not isinstance(value, dict) or set(value) != expected_keys:
+                  raise SystemExit("invalid Nix Host evidence schema")
+              if not isinstance(value["schemaVersion"], int) or isinstance(value["schemaVersion"], bool) or value["schemaVersion"] != 1 or value["TARGET_SHA"] != target_sha or value["system"] != system or value["architecture"] != architecture:
+                  raise SystemExit("Nix Host evidence does not bind the exact target or platform")
+              if any(not isinstance(value[key], str) or not sha256.fullmatch(value[key]) for key in ("sourceHostSHA256", "composedHostSHA256")):
+                  raise SystemExit("invalid Nix Host evidence hash")
+              manifest_key = "linux-" + architecture
+              manifest_record = manifest.get(manifest_key)
+              if not isinstance(manifest_record, dict) or not isinstance(manifest_record.get("sha256"), str) or not sha256.fullmatch(manifest_record["sha256"]):
+                  raise SystemExit("candidate Host manifest has an invalid architecture hash")
+              if value["sourceHostSHA256"] != value["composedHostSHA256"] or value["composedHostSHA256"] != manifest_record["sha256"] or not isinstance(value["releaseIdentity"], str) or value["releaseIdentity"] != expected_release:
+                  raise SystemExit("Nix Host evidence has inconsistent release or composition identity")
+              actual = hashlib.sha256(Path(candidate).read_bytes()).hexdigest()
+              if value["composedHostSHA256"] != actual:
+                  raise SystemExit("Nix Host evidence does not match candidate Host bytes")
+
+          validate(x86_archive, x86_candidate, "x86_64-linux", "amd64")
+          validate(arm_archive, arm_candidate, "aarch64-linux", "arm64")
+          print("validated exact-SHA native Nix Host evidence")
+          PY
+      - name: Install Nix for descriptor hashing
+        uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6
+        with:
+          installer-version: "2.35.2"
+          add-channel: "false"
+          init: "yes"
+          enable-kvm: "false"
+      - name: Generate Nix descriptor for the same candidate
+        run: |
+          set -euo pipefail
+          private="$RUNNER_TEMP/target-release-$TAG_SHA/artifact"
+          nar_command="$RUNNER_TEMP/nix-nar-hash"
+          printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'nix hash path --sri --type sha256 "$1"' > "$nar_command"
+          chmod 0700 "$nar_command"
+          python3 scripts/nix-release-descriptor.py generate \
+            --candidate-archive "$private/sub2api-controller-$TAG_SHA.tar.gz" \
+            --metadata "$private/metadata.json" \
+            --tag "$TAG_NAME" \
+            --project-sha "$TAG_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output-dir "$RUNNER_TEMP/nix-descriptor" \
+            --nar-command "$nar_command"
+          (cd "$RUNNER_TEMP/nix-descriptor" && sha256sum -c "nix-runtime-descriptor-$TAG_NAME.tar.gz.sha256")
+      - name: Build the Controller from the exact candidate
+        run: |
+          set -euo pipefail
+          private="$RUNNER_TEMP/target-release-$TAG_SHA/artifact"
+          descriptor="$RUNNER_TEMP/nix-descriptor-check"
+          candidate_root="$RUNNER_TEMP/nix-controller-candidate"
+          mkdir "$descriptor" "$candidate_root"
+          tar -xzf "$RUNNER_TEMP/nix-descriptor/nix-runtime-descriptor-$TAG_NAME.tar.gz" -C "$descriptor" --strip-components=1
+          tar -xzf "$private/sub2api-controller-$TAG_SHA.tar.gz" -C "$candidate_root"
+          candidate_payload="$candidate_root/bundle"
+          candidate_store="$(nix --extra-experimental-features 'nix-command flakes fetch-tree' store add-path --name "sub2api-controller-$TAG_SHA" "$candidate_payload")"
+          test "$(nix hash path --sri --type sha256 "$candidate_payload")" = "$(jq -r '.controller.narHash' "$descriptor/nix/runtime-release.json")"
+          test -d "$candidate_store"
+          nix path-info "$candidate_store" >/dev/null
+          expression="let
+            descriptor = builtins.getFlake \"path:$descriptor\";
+            releaseLock = builtins.fromJSON (builtins.readFile $descriptor/nix/runtime-release.json);
+            runtime = import $descriptor/nix/runtime-lib.nix {
+              inherit releaseLock;
+              candidateOverride = builtins.storePath \"$candidate_store\";
+            };
+            pkgs = import descriptor.inputs.nixpkgs { system = \"x86_64-linux\"; };
+            compose = import $descriptor/nix/environments.nix;
+            common = {
+              inherit pkgs;
+              controllerWorkspaceInit = $descriptor/nix/controller-workspace-init.sh;
+              hostActivate = $descriptor/nix/host-activate.sh;
+            };
+          in {
+            controller = compose (common // {
+              role = \"controller\";
+              projectPayload = runtime.controllerPayload;
+            });
+            host = compose (common // {
+              role = \"host-environment\";
+              hostPayload = runtime.hostPayloadFor \"x86_64-linux\";
+            });
+          }"
+          controller="$(nix build --impure --no-link --print-out-paths --option max-jobs 1 --option cores 1 --expr "($expression).controller")"
+          host="$(nix build --impure --no-link --print-out-paths --option max-jobs 1 --option cores 1 --expr "($expression).host")"
+          "$controller/bin/pulumi" version | grep -Fx v3.256.0
+          "$controller/bin/pulumi-language-go" --version
+          "$controller/bin/sops" --version
+          "$controller/bin/ssh" -V
+          PULUMI_HOME="$RUNNER_TEMP/pulumi-home" "$controller/bin/pulumi" plugin ls
+          test -f "$host/bin/sub2api-host" && test ! -L "$host/bin/sub2api-host" && test -x "$host/bin/sub2api-host"
+          test -f "$host/libexec/sub2api-host" && test ! -L "$host/libexec/sub2api-host" && test -x "$host/libexec/sub2api-host"
+          cmp -- "$candidate_payload/artifacts/sub2api-host/sub2api-host-linux-amd64" "$host/libexec/sub2api-host"
+          host_sha="$(sha256sum "$host/libexec/sub2api-host" | cut -d ' ' -f1)"
+          test "$(<"$host/share/sub2api-host/release")" = "$(jq -r '.release' "$candidate_root/bundle/artifacts/sub2api-host/manifest.json")"
+          probe="$("$host/bin/sub2api-host" probe)"
+          test "$(printf '%s\n' "$probe" | sed -n '4p')" = "$host_sha"
+          test "$(printf '%s\n' "$probe" | sed -n '5p')" = "$(jq -r '.release' "$candidate_root/bundle/artifacts/sub2api-host/manifest.json")"
+          "$host/bin/docker" --version
+          "$host/bin/nft" --version
+      - name: Ensure exact remote tag and verify any existing release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           private="$RUNNER_TEMP/target-release-$TAG_SHA/artifact"
-          tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME")"
-          python3 scripts/ci-evidence.py validate-tag-ref "$tag_ref" "$TAG_NAME" > "$RUNNER_TEMP/tag-object.txt"
-          read -r tag_type tag_sha < "$RUNNER_TEMP/tag-object.txt"
-          seen=" $tag_sha "
-          for _ in 1 2 3 4 5; do
-            test "$tag_type" = commit && break
-            tag_object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha")"
-            read -r next_type next_sha < <(python3 -c 'import json,sys; x=json.load(sys.stdin); o=x.get("object",{}); print(o.get("type",""),o.get("sha",""))' <<< "$tag_object")
-            [[ "$next_type" =~ ^(commit|tag)$ && "$next_sha" =~ ^[0-9a-f]{40}$ ]]
-            case "$seen" in *" $next_sha "*) exit 1;; esac
-            seen+="$next_sha "
-            tag_type="$next_type"
-            tag_sha="$next_sha"
-          done
-          test "$tag_type" = commit
-          test "$tag_sha" = "$TAG_SHA"
-           gh release create "$TAG_NAME" "$private/sub2api-controller-$TAG_SHA.tar.gz" "$private/sub2api-controller-$TAG_SHA.tar.gz.sha256" "$private/metadata.json" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$TAG_NAME"
+          descriptor="$RUNNER_TEMP/nix-descriptor"
+          assets=(
+            "sub2api-controller-$TAG_SHA.tar.gz"
+            "sub2api-controller-$TAG_SHA.tar.gz.sha256"
+            metadata.json
+            runtime-release.json
+            "nix-runtime-descriptor-$TAG_NAME.tar.gz"
+            "nix-runtime-descriptor-$TAG_NAME.tar.gz.sha256"
+          )
+          release_json="$RUNNER_TEMP/release.json"
+          release_status=0
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" > "$release_json" 2>"$RUNNER_TEMP/release-error" || release_status=$?
+          if test "$release_status" -ne 0 && ! grep -q 'HTTP 404' "$RUNNER_TEMP/release-error"; then
+            cat "$RUNNER_TEMP/release-error" >&2
+            exit "$release_status"
+          fi
+          if test "$release_status" -eq 0; then
+            python3 - "$release_json" "$TAG_NAME" <<'PY'
+            import json, os, sys
+            value = json.load(open(sys.argv[1]))
+            if value.get("draft") or value.get("prerelease") or value.get("tag_name") != sys.argv[2]:
+                raise SystemExit("existing release has the wrong tag or publication state")
+            expected = {
+                "sub2api-controller-%s.tar.gz" % os.environ["TAG_SHA"],
+                "sub2api-controller-%s.tar.gz.sha256" % os.environ["TAG_SHA"],
+                "metadata.json", "runtime-release.json",
+                "nix-runtime-descriptor-%s.tar.gz" % os.environ["TAG_NAME"],
+                "nix-runtime-descriptor-%s.tar.gz.sha256" % os.environ["TAG_NAME"],
+            }
+            actual = {asset.get("name") for asset in value.get("assets", [])}
+            if actual != expected:
+                raise SystemExit("existing release asset inventory differs")
+          PY
+            existing="$RUNNER_TEMP/existing-release"
+            mkdir "$existing"
+            for asset in "${assets[@]}"; do
+              gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$existing"
+            done
+            for asset in "${assets[@]}"; do
+              case "$asset" in
+                runtime-release.json) expected_file="$descriptor/runtime-release.json" ;;
+                nix-runtime-descriptor-*.tar.gz) expected_file="$descriptor/$asset" ;;
+                nix-runtime-descriptor-*.tar.gz.sha256) expected_file="$descriptor/$asset" ;;
+                *) expected_file="$private/$asset" ;;
+              esac
+              cmp -- "$expected_file" "$existing/$asset"
+            done
+            printf '%s\n' true > "$RUNNER_TEMP/release-exists"
+          else
+            printf '%s\n' false > "$RUNNER_TEMP/release-exists"
+          fi
+
+          tag_ref="$RUNNER_TEMP/tag-ref.json"
+          tag_status=0
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" > "$tag_ref" 2>"$RUNNER_TEMP/tag-error" || tag_status=$?
+          if test "$tag_status" -ne 0 && ! grep -q 'HTTP 404' "$RUNNER_TEMP/tag-error"; then
+            cat "$RUNNER_TEMP/tag-error" >&2
+            exit "$tag_status"
+          fi
+          if test "$tag_status" -eq 0; then
+            python3 - "$tag_ref" "$TAG_NAME" "$TAG_SHA" <<'PY'
+            import json, sys
+            ref, tag, sha = sys.argv[1:]
+            value = json.load(open(ref))
+            obj = value.get("object", {})
+            if value.get("ref") != f"refs/tags/{tag}" or obj.get("type") != "commit" or obj.get("sha") != sha:
+                raise SystemExit("existing remote tag is not the requested exact lightweight commit ref")
+          PY
+          elif test "$(<"$RUNNER_TEMP/release-exists")" = false; then
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$TAG_NAME" -f "sha=$TAG_SHA" >/dev/null
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" > "$tag_ref"
+            python3 - "$tag_ref" "$TAG_NAME" "$TAG_SHA" <<'PY'
+            import json, sys
+            ref, tag, sha = sys.argv[1:]
+            value = json.load(open(ref))
+            if value.get("ref") != f"refs/tags/{tag}" or value.get("object", {}).get("type") != "commit" or value.get("object", {}).get("sha") != sha:
+                raise SystemExit("new remote tag did not bind the exact commit")
+          PY
+          elif test "$(<"$RUNNER_TEMP/release-exists")" = true; then
+            printf '%s\n' 'existing release has no remotely resolvable tag' >&2
+            exit 1
+          fi
+          printf 'RELEASE_EXISTS=%s\n' "$(<"$RUNNER_TEMP/release-exists")" >> "$GITHUB_ENV"
+
+      - name: Publish candidate and Nix descriptor
+        if: env.RELEASE_EXISTS == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          private="$RUNNER_TEMP/target-release-$TAG_SHA/artifact"
+          gh release create "$TAG_NAME" \
+            "$private/sub2api-controller-$TAG_SHA.tar.gz" \
+            "$private/sub2api-controller-$TAG_SHA.tar.gz.sha256" \
+            "$private/metadata.json" \
+            "$RUNNER_TEMP/nix-descriptor/runtime-release.json" \
+            "$RUNNER_TEMP/nix-descriptor/nix-runtime-descriptor-$TAG_NAME.tar.gz" \
+            "$RUNNER_TEMP/nix-descriptor/nix-runtime-descriptor-$TAG_NAME.tar.gz.sha256" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$TAG_NAME"

@@ -1,36 +1,73 @@
 {
   description = "Sub2API prebuilt Nix runtime environments";
 
-  outputs = { self }:
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+  outputs = { nixpkgs, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
-      forSystems = function:
-        builtins.listToAttrs (map (system: { name = system; value = function system; }) systems);
+      forSystems = function: nixpkgs.lib.genAttrs systems function;
+      pkgsFor = system: import nixpkgs { inherit system; };
       runtime = import ./nix/runtime-lib.nix { };
-      environments = import ./nix/environments.nix;
-      supports = role: system: builtins.elem system (runtime.supportedSystemsFor role);
-      environmentFor = role: system: environments {
-        inherit system role;
-        payload = runtime.payloadFor role system;
-        # These paths are declared by the released payload rather than borrowed
-        # from nixpkgs or an ambient builder environment.
-        toolPaths = runtime.toolPathsFor role system;
+      compose = import ./nix/environments.nix;
+      environmentScripts = {
         controllerWorkspaceInit = ./nix/controller-workspace-init.sh;
         hostActivate = ./nix/host-activate.sh;
       };
-      runtimeEnvironmentsFor = system:
-        (if supports "controller" system then { controller = environmentFor "controller" system; } else { }) //
-        (if supports "host-environment" system then { host-environment = environmentFor "host-environment" system; } else { });
+      environmentsFor = system:
+        let pkgs = pkgsFor system;
+        in {
+           host-environment = compose (environmentScripts // {
+             inherit pkgs;
+             role = "host-environment";
+             hostPayload = runtime.hostPayloadFor system;
+           });
+        } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          controller = compose (environmentScripts // {
+            inherit pkgs;
+            role = "controller";
+            projectPayload = runtime.controllerPayload;
+          });
+        };
+      runtimeInputsFor = system:
+        let
+          pkgs = pkgsFor system;
+          packages = import ./nix/runtime-packages.nix { inherit pkgs; };
+          strings = values: map builtins.toString values;
+        in {
+          host-environment = strings (packages.composition ++ packages.host);
+        } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          controller = strings (packages.composition ++ packages.controller);
+        };
+      runtimeSourcesFor = system:
+        let
+          candidate = builtins.toString runtime.controllerPayload;
+        in if system != "x86_64-linux" then {
+          host-environment = [ candidate ];
+        } else
+          let
+            pkgs = pkgsFor system;
+            prebuilt = import ./nix/prebuilt.nix { inherit pkgs; };
+          in {
+            host-environment = [ candidate ];
+            controller = map builtins.toString [
+              runtime.controllerPayload
+              prebuilt.pulumiTree
+              prebuilt.cloudflareProvider
+              prebuilt.upstashProvider
+            ];
+          };
     in {
-      runtimePaths = forSystems runtimeEnvironmentsFor;
-      packages = forSystems runtimeEnvironmentsFor;
+      packages = forSystems environmentsFor;
+      runtimeInputs = forSystems runtimeInputsFor;
+      runtimeSources = forSystems runtimeSourcesFor;
       apps = forSystems (system:
-        (if supports "controller" system then {
-          deploy = { type = "app"; program = "${environmentFor "controller" system}/bin/sub2api-deploy"; };
-          workspace-init = { type = "app"; program = "${environmentFor "controller" system}/bin/sub2api-workspace-init"; };
-        } else { }) //
-        (if supports "host-environment" system then {
-          host-activate = { type = "app"; program = "${environmentFor "host-environment" system}/bin/sub2api-host-activate"; };
-        } else { }));
+        let environments = environmentsFor system;
+        in {
+          host-activate = { type = "app"; program = "${environments.host-environment}/bin/sub2api-host-activate"; };
+        } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          deploy = { type = "app"; program = "${environments.controller}/bin/sub2api-deploy"; };
+          workspace-init = { type = "app"; program = "${environments.controller}/bin/sub2api-workspace-init"; };
+        });
     };
 }

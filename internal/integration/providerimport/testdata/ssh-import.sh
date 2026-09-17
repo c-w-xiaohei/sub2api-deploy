@@ -17,7 +17,7 @@ case "$client_log" in /tmp/sub2api-ssh-*|${TMPDIR:-/tmp}/sub2api-ssh-*) ;; *) ex
 i=$((i+1)); eval "separator=\${$i}"; [ "$separator" = -- ] || exit 64
 i=$((i+1)); eval "alias=\${$i}"; [ "$alias" = edge ] || exit 64
 i=$((i+1)); eval "remote=\${$i}"
-[ "$remote" = "/usr/local/libexec/sub2api-host stdio" ] || exit 64
+[ "$remote" = "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host stdio" ] || exit 64
 exec env SUB2API_PROVIDER_IMPORT_HELPER=1 \
   PROVIDER_IMPORT_ROOT="${PROVIDER_IMPORT_ROOT:?}" \
   PROVIDER_IMPORT_MACHINE_ID="${PROVIDER_IMPORT_MACHINE_ID:?}" \

@@ -2,137 +2,32 @@ package openssh
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	"github.com/c-w-xiaohei/sub2api-deploy/internal/artifact"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/sshcheck"
 )
 
 const maxStderr = 256
 const probeTimeout = 10 * time.Second
-const stagePath = "/usr/local/libexec/.sub2api-host.stage"
-const finalPath = "/usr/local/libexec/sub2api-host"
-const machineIdentityKey = "sub2api-host-machine-identity-v1"
+const hostExecutable = "/nix/var/nix/profiles/sub2api-host/bin/sub2api-host"
+const probeRecordVersion = "s2p2"
+const maxProbeRecordSize = 2048
+const maxReleaseIdentitySize = 256
+const machineIdentityDomain = "sub2api-host-machine-identity-v1"
 
-var probeCommand = probeScript("/etc/machine-id", finalPath)
-
-func probeScript(machinePath, installedPath string) string {
-	return fmt.Sprintf(`set -eu
-[ "$(uname -s)" = Linux ]
-case "$(uname -m)" in
-  x86_64|amd64) arch=amd64 ;;
-  aarch64|arm64) arch=arm64 ;;
-  *) exit 64 ;;
-esac
-[ -r %s ]
-bytes=$(wc -c < %s)
-case "$bytes" in 32|33) ;; *) exit 64 ;; esac
-machine=$(cat %s)
-case "$machine" in
-  00000000000000000000000000000000|*[!0123456789abcdef]*) exit 64 ;;
-esac
-[ ${#machine} -eq 32 ]
-command -v openssl >/dev/null 2>&1
-identity=$(printf %%s "$machine" | openssl dgst -sha256 -mac HMAC -macopt key:%s | awk '{print $NF}')
-case "$identity" in *[!0123456789abcdef]*) exit 64 ;; esac
-[ ${#identity} -eq 64 ]
-digest=missing
-if [ -f %s ]; then
-  digest=$(sha256sum %s | awk '{print $1}')
-  case "$digest" in *[!0123456789abcdef]*) exit 64 ;; esac
-  [ ${#digest} -eq 64 ]
-fi
-printf 's2p1:Linux\n%%s\n%%s\n%%s\n' "$arch" "$identity" "$digest"
-`, shellQuote(machinePath), shellQuote(machinePath), shellQuote(machinePath), machineIdentityKey, shellQuote(installedPath), shellQuote(installedPath))
-}
-
-func shellQuote(path string) string { return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'" }
-func runtimeArch() string {
-	if runtime.GOARCH == "arm64" {
-		return "arm64"
-	}
-	return "amd64"
-}
-
-func bootstrapReceiverScript(stage, final string) string {
-	return fmt.Sprintf(`set -eu
-umask 077
-stage=%s
-lock=%s
-final=%s
-ok="$stage.ok"
-command -v flock >/dev/null 2>&1
-command -v stat >/dev/null 2>&1
-if [ -L "$lock" ]; then exit 64; fi
-if [ -e "$lock" ] && [ ! -f "$lock" ]; then exit 64; fi
-exec 9>>"$lock"
-owner=$(id -u)
-[ -f /proc/self/fd/9 ]
-[ "$(stat -Lc '%%a:%%u:%%h' /proc/self/fd/9)" = "600:$owner:1" ]
-flock -n 9
-child=
-cancelled=
-interrupted=
-cleanup() {
-  rm -f "$stage" "$ok"
-}
-stop() {
-  cancelled=143
-  interrupted=1
-}
-trap cleanup EXIT
-trap stop HUP INT TERM
-IFS= read -r header
-case "$header" in s2a1:*:*) ;; *) exit 64 ;; esac
-body=${header#s2a1:}
-size=${body%%%%:*}
-digest=${body#*:}
-case "$size" in ''|*[!0-9]*) exit 64 ;; esac
-case "$digest" in *[!0123456789abcdef]*|?????????????????????????????????????????????????????????????????) exit 64 ;; esac
-[ ${#digest} -eq 64 ]
-[ "$size" -le 67108864 ]
-dd of="$stage" bs=1 count="$size" status=none
-[ "$(wc -c < "$stage")" -eq "$size" ]
-[ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
-exec 4<&0
-chmod 700 "$stage"
-if [ -L "$final" ]; then exit 64; fi
-if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
-set +e
-"$stage" install-attest </dev/null 3>"$ok" 4<&- 9>&- >/dev/null 2>/dev/null
-status=$?
-set -e
-[ "$status" -eq 0 ]
-[ -s "$ok" ]
-printf %%s 'sub2api-bootstrap-attested-v1' | cmp -s "$ok" -
-[ "$(wc -c < "$stage")" -eq "$size" ]
-[ "$(sha256sum "$stage" | awk '{print $1}')" = "$digest" ]
-if [ -L "$final" ]; then exit 64; fi
-if [ -e "$final" ] && [ ! -f "$final" ]; then exit 64; fi
-mv -T -- "$stage" "$final"
-"$final" bootstrap-stdio <&4 4<&- 9>&- &
-child=$!
-exec 4<&-
-set +e
-while :; do
-  interrupted=
-  wait "$child"
-  status=$?
-  [ -z "$interrupted" ] && break
-done
-set -e
-trap '' HUP INT TERM
-child=
-[ -z "$cancelled" ] || status=$cancelled
-exit "$status"
-`, shellQuote(stage), shellQuote(stage+".lock"), shellQuote(final))
-}
+var probeCommand = "sudo -n -- " + hostExecutable + " probe"
+var hostCommand = "sudo -n -- " + hostExecutable + " stdio"
 
 var (
 	ErrTransport = errors.New("openssh transport")
@@ -157,11 +52,18 @@ type RemoteError struct {
 
 func (e *RemoteError) Error() string { return string(e.Category) + "/" + string(e.Code) }
 
+type ProbeInfo struct {
+	OS              string
+	Arch            string
+	Machine         string
+	InstalledDigest string
+	Release         string
+}
+
 type Command uint8
 
 const (
 	Probe Command = iota + 1
-	BootstrapReceiver
 	Host
 )
 
@@ -202,9 +104,9 @@ func (t Transport) Run(ctx context.Context, alias string, command Command, stdin
 	return v, nil
 }
 
-func (t Transport) Probe(ctx context.Context, alias string) (artifact.ProbeInfo, error) {
+func (t Transport) Probe(ctx context.Context, alias string) (ProbeInfo, error) {
 	if err := sshcheck.ValidateAlias(alias); err != nil {
-		return artifact.ProbeInfo{}, fmt.Errorf("%w: %v", ErrTransport, err)
+		return ProbeInfo{}, fmt.Errorf("%w: %v", ErrTransport, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
@@ -213,47 +115,127 @@ func (t Transport) Probe(ctx context.Context, alias string) (artifact.ProbeInfo,
 	}
 	r := t.start(ctx, "ssh", sshArgs(alias, Probe, probeCommand), nil)
 	if r.err != nil {
-		return artifact.ProbeInfo{}, processFailure(r)
+		return ProbeInfo{}, processFailure(r)
 	}
-	parts := strings.Split(string(r.stdout), "\n")
-	if len(parts) != 5 {
-		return artifact.ProbeInfo{}, ErrProtocol
-	}
-	if parts[0] != "s2p1:Linux" {
-		return artifact.ProbeInfo{}, ErrProtocol
-	}
-	if parts[1] != "amd64" && parts[1] != "arm64" {
-		return artifact.ProbeInfo{}, ErrProtocol
-	}
-	if !hex64(parts[2]) {
-		return artifact.ProbeInfo{}, ErrProtocol
-	}
-	if parts[3] != "missing" && !hex64(parts[3]) {
-		return artifact.ProbeInfo{}, ErrProtocol
-	}
-	if parts[4] != "" {
-		return artifact.ProbeInfo{}, ErrProtocol
-	}
-	return artifact.ProbeInfo{OS: "Linux", Arch: parts[1], Machine: "mid1:" + parts[2], InstalledDigest: parts[3]}, nil
+	return ParseProbeRecord(r.stdout)
 }
-func hex64(v string) bool { return regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(v) }
-func (t Transport) Bootstrap(ctx context.Context, alias string, stdin []byte) (hostprotocol.Response, error) {
-	return t.Run(ctx, alias, BootstrapReceiver, stdin)
+
+func ParseProbeRecord(record []byte) (ProbeInfo, error) {
+	if len(record) == 0 || len(record) > maxProbeRecordSize || !utf8.Valid(record) {
+		return ProbeInfo{}, ErrProtocol
+	}
+	parts := strings.Split(string(record), "\n")
+	if len(parts) != 6 || parts[5] != "" || parts[0] != probeRecordVersion+":Linux" {
+		return ProbeInfo{}, ErrProtocol
+	}
+	if parts[1] != "amd64" && parts[1] != "arm64" || !strings.HasPrefix(parts[2], "mid1:") || !hex64(parts[2][5:]) || !hex64(parts[3]) || !validReleaseIdentity(parts[4]) {
+		return ProbeInfo{}, ErrProtocol
+	}
+	if len(parts[2]) != 69 {
+		return ProbeInfo{}, ErrProtocol
+	}
+	return ProbeInfo{OS: "Linux", Arch: parts[1], Machine: parts[2], InstalledDigest: parts[3], Release: parts[4]}, nil
 }
+
+func LocalProbeRecord(machinePath string) ([]byte, error) {
+	if runtime.GOOS != "linux" {
+		return nil, errors.New("unsupported host operating system")
+	}
+	if machinePath == "" {
+		machinePath = "/etc/machine-id"
+	}
+	arch := runtime.GOARCH
+	if arch != "amd64" && arch != "arm64" {
+		return nil, errors.New("unsupported host architecture")
+	}
+	executable, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		return nil, errors.New("running executable unavailable")
+	}
+	return localProbeRecord(machinePath, "/proc/self/exe", executable, arch)
+}
+
+func localProbeRecord(machinePath, executablePath, executableLocation, arch string) ([]byte, error) {
+	machineBytes, err := os.ReadFile(machinePath)
+	if err != nil {
+		return nil, errors.New("machine identity unavailable")
+	}
+	if len(machineBytes) > 0 && machineBytes[len(machineBytes)-1] == '\n' {
+		machineBytes = machineBytes[:len(machineBytes)-1]
+	}
+	machine := string(machineBytes)
+	if len(machine) != 32 || machine == strings.Repeat("0", 32) || !lowerHex(machine) {
+		return nil, errors.New("machine identity invalid")
+	}
+	mac := hmac.New(sha256.New, []byte(machineIdentityDomain))
+	_, _ = mac.Write(machineBytes)
+	identity := "mid1:" + hex.EncodeToString(mac.Sum(nil))
+	if arch != "amd64" && arch != "arm64" {
+		return nil, errors.New("unsupported host architecture")
+	}
+	binary, err := os.ReadFile(executablePath)
+	if err != nil {
+		return nil, errors.New("running executable unavailable")
+	}
+	digest := sha256.Sum256(binary)
+	releaseBytes, err := os.ReadFile(filepath.Join(filepath.Dir(executableLocation), "..", "share", "sub2api-host", "release"))
+	if err != nil || len(releaseBytes) == 0 || len(releaseBytes) > maxReleaseIdentitySize {
+		return nil, errors.New("release metadata unavailable")
+	}
+	if releaseBytes[len(releaseBytes)-1] == '\n' {
+		releaseBytes = releaseBytes[:len(releaseBytes)-1]
+	}
+	release := string(releaseBytes)
+	if !validReleaseIdentity(release) {
+		return nil, errors.New("release metadata invalid")
+	}
+	return []byte(fmt.Sprintf("%s:Linux\n%s\n%s\n%x\n%s\n", probeRecordVersion, arch, identity, digest, release)), nil
+}
+
+func hex64(v string) bool {
+	if len(v) != sha256.Size*2 || !lowerHex(v) {
+		return false
+	}
+	_, err := hex.DecodeString(v)
+	return err == nil
+}
+
+func lowerHex(v string) bool {
+	for _, r := range v {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validReleaseIdentity(value string) bool {
+	if value == "" || len(value) > maxReleaseIdentitySize || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func sshArgs(alias string, _ Command, remote string) []string {
 	return append([]string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "--", alias}, remote)
 }
+
 func remoteCommand(c Command) (string, bool) {
 	switch c {
 	case Probe:
 		return probeCommand, true
-	case BootstrapReceiver:
-		return "sudo -n /bin/sh -c " + shellQuote(bootstrapReceiverScript(stagePath, finalPath)) + " fixed-argv0", true
 	case Host:
-		return finalPath + " stdio", true
+		return hostCommand, true
+	default:
+		return "", false
 	}
-	return "", false
 }
+
 func processFailure(r processResult) error {
 	if errors.Is(r.err, context.Canceled) || errors.Is(r.err, context.DeadlineExceeded) {
 		return r.err

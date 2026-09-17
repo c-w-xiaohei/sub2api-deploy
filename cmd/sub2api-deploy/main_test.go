@@ -283,7 +283,7 @@ func TestPublicCLIDeniedDangerousUpdateLeavesRemoteAndStateUntouched(t *testing.
 			t.Fatalf("missing acceptance evidence %s: %v", name, err)
 		}
 	}
-	for _, name := range []string{"bootstrap", "reconcile", "retire", "unexpected-action"} {
+	for _, name := range []string{"reconcile", "retire", "unexpected-action"} {
 		if _, err := os.Stat(filepath.Join(evidence, name)); !os.IsNotExist(err) {
 			t.Fatalf("denied update produced forbidden %s: %v", name, err)
 		}
@@ -498,14 +498,9 @@ func task2SSHHelper() {
 		return
 	}
 	args = append(append([]string(nil), args[:separator-2]...), args[separator:]...)
-	want := []string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "--", "edge", "/usr/local/libexec/sub2api-host stdio"}
+	want := []string{"-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ClearAllForwardings=yes", "-o", "Tunnel=no", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "RemoteCommand=none", "-o", "SessionType=default", "-o", "StdinNull=no", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR", "--", "edge", "sudo -n -- /nix/var/nix/profiles/sub2api-host/bin/sub2api-host stdio"}
 	if !reflect.DeepEqual(args, want) {
 		_ = os.WriteFile(filepath.Join(evidence, "unexpected-action"), []byte("invalid ssh invocation"), 0o600)
-		return
-	}
-	command := want[len(want)-1]
-	if strings.Contains(command, "sub2api-host.stage") {
-		_ = os.WriteFile(filepath.Join(evidence, "bootstrap"), []byte("1"), 0o600)
 		return
 	}
 	request, err := hostprotocol.DecodeRequestFrom(os.Stdin)

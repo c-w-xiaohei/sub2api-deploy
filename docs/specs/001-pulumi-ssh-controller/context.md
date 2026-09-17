@@ -3,6 +3,26 @@
 日期：2026-08-10
 状态：Source requirement for spec drafting
 
+## Current Contract Amendment (2026-09-17)
+
+This amendment supersedes earlier Provider bootstrap and artifact-transfer
+wording in this document and in downstream specs. The Nix descriptor is the
+installation boundary: schema 2 binds one exact project candidate and records
+the manifest-verified `hostPayload` for both `x86_64-linux` and
+`aarch64-linux`. A production Host environment contains
+`bin/sub2api-host` and its release metadata in the root Nix profile. The Host
+Provider only probes and invokes that fixed profile; it never uploads,
+installs, upgrades, or writes `/usr/local/libexec/sub2api-host`.
+
+Every Host must install and activate the new descriptor before Provider
+`preview`, `up`, or any other operation that depends on Host readiness. This
+changes the installation boundary only. Host state, reconcile, Read/Import
+semantics, recovery, ordering, and preserve-data removal semantics remain
+normative. The release sequence is commit/push, exact-SHA CI and Nix
+x86/arm64 gates, formal `v0.2.25` promotion, then a separate maintainer commit
+that downloads the generated `runtime-release.json`, verifies it byte-for-byte,
+and pushes the checked-in lock update.
+
 ## 1. 目标
 
 为 Sub2API Deploy 起草一般性的技术规格和测试规格，指导后续完整实施：
@@ -170,7 +190,7 @@ sub2api-host
 
 - `Check`：纯输入校验和canonicalization；不得SSH。
 - `Diff`：比较Pulumi输入/状态，普通变化in-place；不得SSH；危险链接变化可显示diff但Update必须要求批准。
-- `Create`：Host资源拥有完整生命周期，包括通过系统OpenSSH安装/升级`sub2api-host`、校验machine identity并reconcile；不得要求用户先运行另一个日常bootstrap生命周期。
+- `Create`：Host资源拥有完整生命周期，包括通过系统OpenSSH probe固定Nix profile、校验machine identity并reconcile；不得执行artifact upload/bootstrap receiver，也不得要求用户先运行另一个日常bootstrap生命周期。新descriptor的安装和activation必须在Provider操作前完成。
 - `Read`：SSH执行inspect；更新稳定observation和drift；unreachable/corrupt/missing-agent保留resource ID并报错。
 - `Update`：reconcile完整Host目标；使用稳定resource identity和desired revision恢复SSH未知结果。
 - `Delete`：仅移除deploy-owned运行外壳，preserve data；不得通过普通delete隐式销毁业务数据。
@@ -250,7 +270,7 @@ Go 构建或测试，并先拒绝 Pulumi Engine 与全量 Cloudflare SDK 依赖�
 - Control ledger、environment lease和saved-plan successor engine。
 - 独立Ed25519 approval PKI与Host clock体系。
 - Host master key/HKDF作为一般spec前提。
-- Agent必须预bootstrap后Host Create才能运行。
+- Provider bootstrap receiver、上传/升级`/usr/local/libexec`以及“先bootstrap再Create”的旧生命周期已废弃；Host profile的安装/activation是运维前置条件，Host state/reconcile仍由Host resource拥有。
 - Docker group加root helper所宣称的伪隔离。
 - 固定12/7 phase、90天/128/512等任意策略。
 - Side-effect registry、legacy caller graph manifest、pairwise generator和test selector framework。

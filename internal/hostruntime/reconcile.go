@@ -280,6 +280,9 @@ func (r *Runtime) Reconcile(ctx context.Context, q hostprotocol.Request) (hostpr
 	if validateReconcileRequest(q) != nil {
 		return hostprotocol.Result{}, operationFailed()
 	}
+	if r.rootIsAbsent() {
+		return r.Bootstrap(ctx, q)
+	}
 	if result, ok := r.reconcileTerminalResult(requestKey(q), q); ok {
 		return result, nil
 	}
@@ -290,6 +293,15 @@ func (r *Runtime) Reconcile(ctx context.Context, q hostprotocol.Request) (hostpr
 	return r.RunOperation(key, q.Approval, func(op *Operation) (hostprotocol.Result, hostcontract.StableObservation, error) {
 		return r.reconcile(ctx, op.state, r.persistedApproval(q))
 	})
+}
+
+func (r *Runtime) rootIsAbsent() bool {
+	fd, err := r.rootFD(false)
+	if err == nil {
+		_ = syscall.Close(fd)
+		return false
+	}
+	return errors.Is(err, os.ErrNotExist)
 }
 func (r *Runtime) persistedApproval(q hostprotocol.Request) hostprotocol.Request {
 	if q.Approval != nil {

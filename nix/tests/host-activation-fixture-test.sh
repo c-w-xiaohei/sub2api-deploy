@@ -7,9 +7,15 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 expect_failure() { local expected="$1"; shift; local output; if output="$("$@" 2>&1)"; then fail "expected failure"; fi; [[ "$output" == *"$expected"* ]] || fail "$output"; }
 
 # Test copy has fixed paths. Production code has no test-environment escape hatch.
-mkdir -p "$root/payload/bin" "$root"/{etc/docker,etc/systemd/system,run/systemd/system,run,nix/var/nix/profiles/default/bin,bin}
+mkdir -p "$root/payload/bin" "$root/payload/libexec" "$root/tools/bin" "$root"/{etc/docker,etc/systemd/system,run/systemd/system,run,nix/var/nix/profiles/default/bin,bin}
 cp "$repo_root/nix/host-activate.sh" "$root/payload/bin/sub2api-host-activate"
 mkdir -p "$root/payload/etc/sub2api-nix-host/files" "$root/payload/share/sub2api-runtime"
+mkdir -p "$root/payload/share/sub2api-host"
+printf '#!/bin/sh\nexec "$(dirname "$0")/../libexec/sub2api-host" "$@"\n' >"$root/payload/bin/sub2api-host"
+printf '#!/bin/sh\nexit 0\n' >"$root/payload/libexec/sub2api-host"
+chmod 0555 "$root/payload/bin/sub2api-host" "$root/payload/libexec/sub2api-host"
+printf 'fixture-release\n' >"$root/payload/share/sub2api-host/release"
+chmod 0444 "$root/payload/share/sub2api-host/release"
 for file in sub2api-nix-docker.service sub2api-nix-docker.socket daemon.json; do
   cp "$repo_root/nix/tests/fixtures/$file" "$root/payload/etc/sub2api-nix-host/files/$file"
 done
@@ -26,19 +32,21 @@ script_contents="$(<"$root/payload/bin/sub2api-host-activate")"
 script_contents="${script_contents/activation_root=\"\"/activation_root=\"$root\"}"
 script_contents="${script_contents/'[[ "${EUID}" -eq 0 ]] || fail "must be run as root"'/':'}"
 script_contents="${script_contents/expected_owner=0/expected_owner=$(id -u)}"
-script_contents="${script_contents/'while [[ "$path" != / ]]; do'/'while [[ "$path" != "'$root'" ]]; do'}"
+script_contents="${script_contents/runtime_store_root=\"\/nix\/store\"/runtime_store_root=\"$root\"}"
+script_contents="${script_contents//'while [[ "$path" != / ]]; do'/'while [[ "$path" != "'$root'" ]]; do'}"
 printf '%s' "$script_contents" >"$root/payload/bin/sub2api-host-activate"
 chmod 0755 "$root/payload/bin/sub2api-host-activate"
+for tool in awk basename chmod cmp cp cut dirname find grep mkdir mktemp mv readlink rm sed sha256sum stat; do cp "$(command -v "$tool")" "$root/tools/bin/$tool"; done
 printf 'ID=ubuntu\nVERSION_ID="24.04"\n' >"$root/etc/os-release"
-for binary in docker dockerd containerd runc nft ssh; do printf '#!/usr/bin/env bash\nexit 0\n' >"$root/payload/bin/$binary"; chmod 0755 "$root/payload/bin/$binary"; done
+for binary in docker dockerd containerd runc nft iptables ip6tables ssh; do printf '#!/usr/bin/env bash\nexit 0\n' >"$root/payload/bin/$binary"; chmod 0755 "$root/payload/bin/$binary"; done
 cat >"$root/nix/var/nix/profiles/default/bin/nix-env" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'nix-env %s\n' "$*" >>"ROOT/commands.log"
 if [[ "${FAIL_NIX_ENV:-}" == 1 ]]; then exit 1; fi
-ln -sfn "${@: -1}" "${@: -3:1}"
+/usr/bin/ln -sfn "${@: -1}" "${@: -3:1}"
 SH
 cat >"$root/bin/systemctl" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'systemctl %s\n' "$*" >>"ROOT/commands.log"
 case "$*" in
   'is-active --quiet sub2api-nix-docker.socket') exit "${SOCKET_ACTIVE:-3}" ;;
@@ -52,7 +60,41 @@ for path in "$root/nix/var/nix/profiles/default/bin/nix-env" "$root/bin/systemct
   printf '%s' "${contents//ROOT/$root}" >"$path"
 done
 chmod 0755 "$root/nix/var/nix/profiles/default/bin/nix-env" "$root/bin/systemctl"
-activate() { "$root/payload/bin/sub2api-host-activate" "$@"; }
+activate() { PATH="$root/tools/bin:/usr/bin:/bin" "$root/payload/bin/sub2api-host-activate" "$@"; }
+ln -s "$root/payload" "$root/nix/var/nix/profiles/sub2api-host"
+activate_via_profile() { PATH="$root/tools/bin:/usr/bin:/bin" "$root/nix/var/nix/profiles/sub2api-host/bin/sub2api-host-activate" "$@"; }
+
+rm "$root/payload/bin/sub2api-host"
+expect_failure 'runtime payload misses safe bin/sub2api-host wrapper' activate
+[[ ! -e "$root/etc/sub2api-nix-host/activation.pending" ]] || fail 'Host preflight mutated state after missing binary'
+[[ ! -s "$log" ]] || fail 'Host preflight invoked a mutating command after missing binary'
+printf '#!/bin/sh\nexec "$(dirname "$0")/../libexec/sub2api-host" "$@"\n' >"$root/payload/bin/sub2api-host"
+chmod 0555 "$root/payload/bin/sub2api-host"
+rm "$root/payload/libexec/sub2api-host"
+expect_failure 'runtime payload misses safe libexec/sub2api-host payload' activate
+[[ ! -e "$root/etc/sub2api-nix-host/activation.pending" ]] || fail 'Host preflight mutated state after missing payload'
+[[ ! -s "$log" ]] || fail 'Host preflight invoked a mutating command after missing payload'
+printf '#!/bin/sh\nexit 0\n' >"$root/payload/libexec/sub2api-host"
+chmod 0555 "$root/payload/libexec/sub2api-host"
+rm "$root/payload/share/sub2api-host/release"
+expect_failure 'runtime payload misses regular Host release metadata' activate
+[[ ! -e "$root/etc/sub2api-nix-host/activation.pending" ]] || fail 'Host preflight mutated state after missing release metadata'
+[[ ! -s "$log" ]] || fail 'Host preflight invoked a mutating command after missing release metadata'
+printf 'fixture-release\n' >"$root/payload/share/sub2api-host/release"
+chmod 0700 "$root/payload/bin/sub2api-host"
+expect_failure 'Host executable is writable' activate
+chmod 0555 "$root/payload/bin/sub2api-host"
+chmod 0755 "$root/payload/libexec/sub2api-host"
+expect_failure 'Host executable is writable' activate
+chmod 0555 "$root/payload/libexec/sub2api-host"
+chmod 0600 "$root/payload/share/sub2api-host/release"
+expect_failure 'Host release metadata is writable' activate
+chmod 0444 "$root/payload/share/sub2api-host/release"
+activate_via_profile
+[[ "$(readlink -f "$root/nix/var/nix/profiles/sub2api-host")" == "$root/payload" ]] || fail 'activation through the Host profile symlink was not supported'
+rm "$root/nix/var/nix/profiles/sub2api-host"
+rm -rf "$root/etc/sub2api-nix-host" "$root/etc/systemd/system" "$root/etc/docker"
+mkdir -p "$root/etc/systemd/system" "$root/etc/docker"
 
 printf '{}' >"$root/etc/docker/foreign.json"
 expect_failure 'refusing to adopt existing Docker configuration' activate

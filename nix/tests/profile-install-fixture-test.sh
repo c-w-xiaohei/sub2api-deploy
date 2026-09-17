@@ -1,142 +1,115 @@
 #!/usr/bin/env bash
-# CI-only: execute the production compositor with imported prebuilt fixture inputs.
 set -euo pipefail
 
 root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-nix_bin="$(command -v nix)"
-nix_offline() {
-  "$nix_bin" --extra-experimental-features 'nix-command flakes fetch-tree' \
-    --offline --option max-jobs 1 --option builders '' --option substituters '' "$@"
-}
-nix_prefetch() {
-  "$nix_bin" --extra-experimental-features 'nix-command flakes fetch-tree' \
-    --option max-jobs 0 --option builders '' "$@"
+host_release="sub2api-host-controller@sha256:$(printf '%s' fixture-project | sha256sum | cut -d ' ' -f 1)"
+if ! nix_bin="$(command -v nix)"; then
+  printf 'profile install fixture tests skipped: nix is unavailable\n'
+  exit 0
+fi
+nix_command() {
+  HOME="$home" "$nix_bin" --extra-experimental-features 'nix-command flakes fetch-tree' "$@"
 }
 
-fixture_home="$root/home"
-fixture_payload="$root/payload"
-fixture_host_payload="$root/host-payload"
-fixture_flake="$root/fixture-flake"
-profile="$root/profile"
-mkdir -p "$fixture_home" "$fixture_payload/bin" "$fixture_payload/libexec" "$fixture_payload/workspace/bin" \
-  "$fixture_payload/artifacts/sub2api-host" \
-  "$fixture_host_payload/bin" "$fixture_host_payload/etc/sub2api-nix-host" "$fixture_host_payload/libexec" \
-  "$fixture_host_payload/share/sub2api-runtime" "$fixture_flake"
+payload="$root/payload"
+home="$root/home"
+mkdir -p "$payload/bin" "$payload/artifacts/sub2api-host" "$payload/scripts/pulumi-plugins/cloudflare" \
+  "$payload/scripts/pulumi-plugins/upstash" "$home"
 
-cat >"$fixture_payload/bin/sub2api-deploy" <<'SH'
+for binary in sub2api-deploy go pulumi-program pulumi-resource-sub2api-host; do
+  printf '#!/bin/sh\nprintf "fixture-%s\\n"\n' "$binary" > "$payload/bin/$binary"
+  chmod 0755 "$payload/bin/$binary"
+done
+printf 'name: sub2api-environment\nruntime:\n  name: go\n  options:\n    binary: ./bin/pulumi-program\n' > "$payload/Pulumi.yaml"
+printf 'module github.com/c-w-xiaohei/sub2api-deploy\n' > "$payload/go.mod"
+printf '{}\n' > "$payload/scripts/pulumi-plugins/cloudflare/pulumi-plugin.json"
+printf '{}\n' > "$payload/scripts/pulumi-plugins/upstash/pulumi-plugin.json"
+cat > "$payload/artifacts/sub2api-host/sub2api-host-linux-amd64" <<'SH'
 #!/bin/sh
 set -eu
-printf 'profile-install-fixture-ran:%s:%s\n' "$(sops)" "$(ssh)"
+case "$1" in
+  probe)
+    digest="$(sha256sum "$0" | cut -d ' ' -f 1)"
+    release="$(cat "$(dirname "$0")/../share/sub2api-host/release")"
+    printf 's2p2:Linux\namd64\nmid1:%064d\n%s\n%s\n' 0 "$digest" "$release"
+    ;;
+  stdio)
+    docker --version >/dev/null
+    nft --version >/dev/null
+    printf 'fixture-stdio\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
 SH
-chmod 0755 "$fixture_payload/bin/sub2api-deploy"
-for binary in go pulumi pulumi-resource-sub2api-host sops ssh; do
-  printf '#!/bin/sh\nprintf "%%s\\n" "payload-%s"\n' "$binary" >"$fixture_payload/bin/$binary"
-  chmod 0755 "$fixture_payload/bin/$binary"
-done
-printf 'name: sub2api-environment\n' >"$fixture_payload/workspace/Pulumi.yaml"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture_payload/workspace/bin/pulumi-program"
-chmod 0755 "$fixture_payload/workspace/bin/pulumi-program"
-printf '%s\n' fixture-manifest >"$fixture_payload/artifacts/sub2api-host/manifest.json"
-for architecture in amd64 arm64; do
-  printf '%s\n' "fixture-host-$architecture" >"$fixture_payload/artifacts/sub2api-host/sub2api-host-linux-$architecture"
-  chmod 0755 "$fixture_payload/artifacts/sub2api-host/sub2api-host-linux-$architecture"
-done
-for binary in docker dockerd containerd runc nft ssh; do
-  printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture_host_payload/bin/$binary"
-  chmod 0755 "$fixture_host_payload/bin/$binary"
-done
+chmod 0555 "$payload/artifacts/sub2api-host/sub2api-host-linux-amd64"
+cp "$payload/artifacts/sub2api-host/sub2api-host-linux-amd64" "$payload/artifacts/sub2api-host/sub2api-host-linux-arm64"
+chmod 0555 "$payload/artifacts/sub2api-host/sub2api-host-linux-arm64"
+source_digest="$(sha256sum "$payload/artifacts/sub2api-host/sub2api-host-linux-amd64" | cut -d ' ' -f 1)"
+payload_store="$(nix_command --offline --option max-jobs 1 --option builders '' store add-path --name fixture-project-payload "$payload")"
+host_payload_store="$(nix_command --offline --option max-jobs 1 --option builders '' store add-path --name fixture-host-payload "$payload/artifacts/sub2api-host/sub2api-host-linux-amd64")"
 
-# Fetch complete prebuilt composition-tool closures. max-jobs=0 forbids a
-# source build when cache.nixos.org does not have them.
-fixture_shell="$(nix_prefetch build --no-link --print-out-paths nixpkgs#bash | grep -E -- '-bash-interactive-[^/]+$' | grep -Ev -- '-man$' | head -n1)"
-fixture_coreutils="$(nix_prefetch build --no-link --print-out-paths nixpkgs#coreutils | head -n1)"
-[[ -x "$fixture_shell/bin/bash" && -x "$fixture_coreutils/bin/cp" ]] || fail 'prebuilt Nix composition tools are unavailable'
-fixture_store_path="$(HOME="$fixture_home" nix_offline store add-path --name fixture-controller-payload "$fixture_payload")"
-fixture_host_store_path="$(HOME="$fixture_home" nix_offline store add-path --name fixture-host-payload "$fixture_host_payload")"
+expression="let
+  flake = builtins.getFlake \"path:$repo_root\";
+  pkgs = import flake.inputs.nixpkgs { system = \"x86_64-linux\"; };
+  compose = import $repo_root/nix/environments.nix;
+  common = { inherit pkgs; controllerWorkspaceInit = $repo_root/nix/controller-workspace-init.sh; hostActivate = $repo_root/nix/host-activate.sh; };
+in {
+  controller = compose (common // { role = \"controller\"; projectPayload = builtins.storePath \"$payload_store\"; });
+  host = compose (common // { role = \"host-environment\"; hostPayload = { path = builtins.storePath \"$host_payload_store\"; release = \"$host_release\"; }; });
+}"
+controller="$(nix_command build --impure --no-link --print-out-paths --expr "$expression.controller")"
+host="$(nix_command build --impure --no-link --print-out-paths --expr "$expression.host")"
 
-cat >"$fixture_flake/flake.nix" <<EOF
-{
-  outputs = { self }:
-    let
-      compositor = import ${repo_root}/nix/environments.nix;
-      payload = builtins.storePath "${fixture_store_path}";
-      hostPayload = builtins.storePath "${fixture_host_store_path}";
-      environment = compositor {
-        system = "x86_64-linux";
-        role = "controller";
-        inherit payload;
-        toolPaths = { shell = builtins.storePath "${fixture_shell}/bin/bash"; coreutils = builtins.storePath "${fixture_coreutils}/bin"; };
-        controllerWorkspaceInit = ${repo_root}/nix/controller-workspace-init.sh;
-        hostActivate = ${repo_root}/nix/host-activate.sh;
-      };
-      hostEnvironment = compositor {
-        system = "x86_64-linux";
-        role = "host-environment";
-        payload = hostPayload;
-        toolPaths = { shell = builtins.storePath "${fixture_shell}/bin/bash"; coreutils = builtins.storePath "${fixture_coreutils}/bin"; };
-        controllerWorkspaceInit = ${repo_root}/nix/controller-workspace-init.sh;
-        hostActivate = ${repo_root}/nix/host-activate.sh;
-      };
-    in {
-      runtimePaths.x86_64-linux.controller = environment;
-      runtimePaths.x86_64-linux.host-environment = hostEnvironment;
-      apps.x86_64-linux.fixture = { type = "app"; program = "\${environment}/bin/sub2api-deploy"; };
-    };
-}
-EOF
+[[ -x "$controller/bin/sub2api-deploy" && -x "$controller/bin/pulumi" && -x "$controller/bin/sops" && -x "$controller/bin/ssh" ]] || fail 'controller environment is incomplete'
+[[ -x "$controller/libexec/pulumi" && -x "$controller/libexec/pulumi-resource-sub2api-host" ]] || fail 'Controller executable misses attached Pulumi siblings'
+[[ "$("$controller/bin/go")" == fixture-go ]] || fail 'Controller Go shim cannot find its declared shell'
+[[ "$("$controller/bin/pulumi" version)" == v3.256.0 ]] || fail 'Controller does not expose Pulumi 3.256.0'
+[[ -x "$controller/workspace/bin/plugins/resource-cloudflare-v6.18.0/pulumi-resource-cloudflare" ]] || fail 'Cloudflare provider is missing'
+[[ -x "$controller/workspace/bin/plugins/resource-upstash-v0.5.0/pulumi-resource-upstash" ]] || fail 'Upstash provider is missing'
+workspace="$root/workspace"; mkdir "$workspace"
+"$controller/bin/sub2api-workspace-init" "$workspace"
+[[ "$(readlink -f "$workspace/Pulumi.yaml")" == "$controller/workspace/Pulumi.yaml" ]] || fail 'workspace initializer did not link Pulumi.yaml'
 
-installable="path:$fixture_flake#runtimePaths.x86_64-linux.controller"
-generated_path="$(HOME="$fixture_home" nix_offline build --impure --no-link --print-out-paths "$installable")"
-test -x "$generated_path/bin/sub2api-workspace-init" || fail 'controller workspace initializer was not generated'
-for binary in pulumi pulumi-resource-sub2api-host; do
-  [[ -x "$generated_path/libexec/$binary" ]] || fail "controller sibling $binary was not preserved"
-  cmp -s "$fixture_payload/bin/$binary" "$generated_path/libexec/$binary" || fail "controller sibling $binary bytes changed"
+for binary in docker dockerd containerd runc nft iptables ip6tables ssh sub2api-host sub2api-host-activate; do
+  [[ -x "$host/bin/$binary" ]] || fail "Host environment misses $binary"
 done
-for artifact in manifest.json sub2api-host-linux-amd64 sub2api-host-linux-arm64; do
-  workspace_artifact="$generated_path/workspace/artifacts/sub2api-host/$artifact"
-  root_artifact="$generated_path/artifacts/sub2api-host/$artifact"
-  [[ -f "$workspace_artifact" && ! -L "$workspace_artifact" ]] || fail "workspace artifact $artifact is not a real file"
-  cmp -s "$workspace_artifact" "$root_artifact" || fail "workspace artifact $artifact does not preserve the root artifact bytes"
-done
-[[ -x "$generated_path/workspace/artifacts/sub2api-host/sub2api-host-linux-amd64" && -x "$generated_path/workspace/artifacts/sub2api-host/sub2api-host-linux-arm64" ]] || fail 'workspace Host artifacts lost executable mode'
-[[ "$(head -n1 "$generated_path/bin/sub2api-workspace-init")" == "#!$fixture_shell/bin/bash" ]] || fail 'launcher does not use declared prebuilt shell'
-workspace="$root/workspace"
-mkdir "$workspace"
-mkdir "$root/untrusted"
-for binary in sops ssh; do
-  printf '#!/bin/sh\nprintf "untrusted-%s\\n"\n' "$binary" >"$root/untrusted/$binary"
-  chmod 0755 "$root/untrusted/$binary"
-done
-PATH="$root/untrusted" "$generated_path/bin/sub2api-workspace-init" "$workspace"
-[[ "$(readlink -f "$workspace/Pulumi.yaml")" == "$generated_path/workspace/Pulumi.yaml" ]] || fail 'fixed-path workspace initializer did not create Pulumi.yaml'
-[[ "$(readlink -f "$workspace/bin")" == "$generated_path/workspace/bin" ]] || fail 'fixed-path workspace initializer did not create bin'
-
-host_path="$(HOME="$fixture_home" nix_offline build --impure --no-link --print-out-paths "path:$fixture_flake#runtimePaths.x86_64-linux.host-environment")"
-unit="$host_path/etc/sub2api-nix-host/files/sub2api-nix-docker.service"
-manifest="$host_path/share/sub2api-runtime/activation-manifest"
-grep -Fq "ExecStart=$fixture_host_store_path/bin/dockerd" "$unit" || fail 'generated unit did not bind selected Docker payload'
-grep -Fq 'etc/sub2api-nix-host/files/sub2api-nix-docker.service /etc/systemd/system/sub2api-nix-docker.service' "$manifest" || fail 'generated manifest omitted Docker unit'
-read -r unit_mode unit_hash unit_source unit_destination < <(awk '$4 == "/etc/systemd/system/sub2api-nix-docker.service"' "$manifest")
-[[ "$unit_mode" == 0644 ]] || fail 'manifest unit mode is not explicit'
-[[ "$unit_hash" == "$(sha256sum "$unit" | cut -d ' ' -f1)" ]] || fail 'manifest unit hash does not match generated file'
-[[ "$unit_source" == etc/sub2api-nix-host/files/sub2api-nix-docker.service ]] || fail 'manifest unit source is wrong'
-[[ "$unit_destination" == /etc/systemd/system/sub2api-nix-docker.service ]] || fail 'manifest unit destination is wrong'
-
-HOME="$fixture_home" nix_offline profile install --impure --profile "$profile" "$installable"
-profile_executable="$profile/bin/sub2api-deploy"
-test -x "$profile_executable" || fail 'profile install did not expose generated launcher'
-expected_output='profile-install-fixture-ran:payload-sops:payload-ssh'
-[[ "$(HOME="$fixture_home" PATH="$root/untrusted" "$profile_executable")" == "$expected_output" ]] || fail 'installed launcher did not bind payload tools'
-[[ "$(HOME="$fixture_home" PATH="$root/untrusted" nix_offline run --impure "path:$fixture_flake#fixture")" == "$expected_output" ]] || fail 'flake app did not bind payload tools'
-
-deriver="$(HOME="$fixture_home" nix-store --query --deriver "$fixture_store_path")"
-[[ -z "$deriver" || "$deriver" == unknown-deriver ]] || fail 'fixture payload has a derivation'
-if HOME="$fixture_home" nix-store --query --references "$generated_path" | grep -q '\.drv$'; then
-  fail 'generated environment references a derivation'
+[[ -f "$host/libexec/sub2api-host" && ! -L "$host/libexec/sub2api-host" ]] || fail 'Host payload is not a regular libexec file'
+cmp -s "$payload/artifacts/sub2api-host/sub2api-host-linux-amd64" "$host/libexec/sub2api-host" || fail 'Host payload bytes changed during composition'
+[[ -f "$host/bin/sub2api-host" && ! -L "$host/bin/sub2api-host" ]] || fail 'Host command is not a regular wrapper file'
+[[ -x "$host/bin/sub2api-host" ]] || fail 'Host wrapper is not executable'
+if cmp -s "$host/bin/sub2api-host" "$host/libexec/sub2api-host"; then
+  fail 'Host command is not a distinct wrapper'
 fi
-[[ "$(readlink -f "$profile_executable")" == "$generated_path/bin/sub2api-deploy" ]] || fail 'profile executable does not resolve to generated environment'
+mkdir -p "$root/decoy"
+printf '#!/bin/sh\nexit 1\n' > "$root/decoy/docker"
+printf '#!/bin/sh\nexit 1\n' > "$root/decoy/nft"
+chmod 0755 "$root/decoy/docker" "$root/decoy/nft"
+probe="$(cd "$root" && PATH="$root/decoy:$root:/usr/bin:/bin" "$host/bin/sub2api-host" probe)"
+[[ "$(printf '%s\n' "$probe" | sed -n '4p')" == "$source_digest" ]] || fail 'Host wrapper probe did not report the source payload digest'
+[[ "$(printf '%s\n' "$probe" | sed -n '5p')" == "$host_release" ]] || fail 'Host wrapper probe did not report the release identity'
+[[ "$(cd "$root" && PATH="$root/decoy:$root:/usr/bin:/bin" "$host/bin/sub2api-host" stdio)" == fixture-stdio ]] || fail 'Host stdio could not locate controlled-PATH runtime tools'
+[[ "$(<"$host/share/sub2api-host/release")" == "$host_release" ]] || fail 'Host environment lost the exact release identity'
+[[ ! -e "$host/bin/pulumi-resource-sub2api-host" ]] || fail 'Host environment unexpectedly contains a Pulumi Provider'
+unit="$host/etc/sub2api-nix-host/files/sub2api-nix-docker.service"
+grep -Fq "ExecStart=$host/bin/dockerd" "$unit" || fail 'Docker unit is not bound to the final Host environment'
+grep -Fq 'etc/sub2api-nix-host/files/sub2api-nix-docker.service /etc/systemd/system/sub2api-nix-docker.service' "$host/share/sub2api-runtime/activation-manifest" || fail 'activation manifest omits Docker unit'
+
+profile="$root/profile"
+nix_command profile add --profile "$profile" "$controller"
+[[ -x "$profile/bin/sub2api-deploy" ]] || fail 'profile install did not expose Controller'
+[[ "$("$profile/bin/sub2api-deploy")" == fixture-sub2api-deploy ]] || fail 'profile-installed Controller did not run'
+
+host_profile="$root/host-profile"
+nix_command profile add --profile "$host_profile" "$host"
+[[ -x "$host_profile/bin/sub2api-host" ]] || fail 'profile install did not expose Host wrapper'
+profile_probe="$(cd "$root" && PATH="$root/decoy:$root:/usr/bin:/bin" "$host_profile/bin/sub2api-host" probe)"
+[[ "$(printf '%s\n' "$profile_probe" | sed -n '4p')" == "$source_digest" ]] || fail 'profile-installed Host probe did not report the source payload digest'
+[[ "$(printf '%s\n' "$profile_probe" | sed -n '5p')" == "$host_release" ]] || fail 'profile-installed Host probe did not report the release identity'
+[[ "$(cd "$root" && PATH="$root/decoy:$root:/usr/bin:/bin" "$host_profile/bin/sub2api-host" stdio)" == fixture-stdio ]] || fail 'profile-installed Host stdio could not locate controlled-PATH runtime tools'
 
 printf 'profile install fixture tests passed\n'

@@ -11,22 +11,6 @@ func (r *Runtime) Serve(out io.Writer, in io.Reader) error {
 	return r.serveRequest(out, in, r.Handle)
 }
 
-func (r *Runtime) ServeBootstrap(out io.Writer, in io.Reader) error {
-	request, err := hostprotocol.DecodeRequestFrom(in)
-	if err != nil {
-		return writeResponse(out, hostprotocol.Response{Error: &hostprotocol.RemoteError{Category: hostprotocol.ErrorProtocol, Code: hostprotocol.CodeMalformedFrame}}, err)
-	}
-	result, operationErr := r.Bootstrap(context.Background(), request)
-	if operationErr != nil {
-		return writeResponse(out, responseForOperation(operationErr), nil)
-	}
-	frame, err := hostprotocol.EncodeResponse(hostprotocol.Response{Result: &result})
-	if err != nil {
-		return err
-	}
-	return writeFull(out, frame)
-}
-
 func (r *Runtime) serveRequest(out io.Writer, in io.Reader, handle func(context.Context, hostprotocol.Request) (hostprotocol.Result, error)) error {
 	request, err := hostprotocol.DecodeRequestFrom(in)
 	if err != nil {

@@ -37,19 +37,17 @@ record_args() {
   done
 }
 
-# A flock-protected ordinal record rejects concurrent, retried, skipped, and
-# reordered fixed remote commands without retaining their contents.
+# A flock-protected ordinal record rejects concurrent, skipped, and reordered
+# fixed remote commands without retaining their contents.
 publish() {
-  want=$1
-  record=$2
-  shift 2
+  record=$1
+  shift
   exec 8>"$trace/ssh.ordinal.lock"
   flock -x 8
   ordinal_file="$trace/ssh.ordinal"
   ordinal=0
   [ -f "$ordinal_file" ] && ordinal=$(cat "$ordinal_file")
-  [ "$want" = "$((ordinal + 1))" ] || { printf 'fixture SSH transition mismatch\n' >&2; exit 64; }
-  [ "$want" != 4 ] || [ -f "$trace/bootstrap.complete" ] || { printf 'fixture Host before bootstrap\n' >&2; exit 64; }
+  want=$((ordinal + 1))
   tmp="$ordinal_file.$$"
   printf '%s\n' "$want" > "$tmp"
   mv -f "$tmp" "$ordinal_file"
@@ -58,57 +56,32 @@ publish() {
   exec 8>&-
 }
 
-publish_probe() {
-  exec 8>"$trace/ssh.ordinal.lock"
-  flock -x 8
-  ordinal_file="$trace/ssh.ordinal"
-  ordinal=0
-  [ -f "$ordinal_file" ] && ordinal=$(cat "$ordinal_file")
-  case "$ordinal" in
-    0) next=1; count=1 ;;
-    2) [ -f "$trace/bootstrap.complete" ] || { printf 'fixture probe transition mismatch\n' >&2; exit 64; }; next=3; count=2 ;;
-    *) printf 'fixture probe transition mismatch\n' >&2; exit 64 ;;
-  esac
-  tmp="$ordinal_file.$$"
-  printf '%s\n' "$next" > "$tmp"
-  mv -f "$tmp" "$ordinal_file"
-  record_args "$@" > "$trace/ssh.probe.$count.args"
-  flock -u 8
-  exec 8>&-
-  printf '%s\n' "$count"
-}
-
 if printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_PROBE_COMMAND" -; then
-    count=$(publish_probe "$@")
-    digest=missing
-    if [ -f "$trace/bootstrap.complete" ]; then
-      digest=$(sha256sum "$PROVIDER_RUNTIME_ARTIFACT" | awk '{print $1}')
-    fi
-    printf 's2p1:Linux\namd64\n0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54\n%s\n' "$digest"
-    exit 0
+  probe_count=1
+  if [ -f "$trace/ssh.probe.count" ]; then
+    [ -f "$trace/ssh.ordinal" ] && [ "$(cat "$trace/ssh.ordinal")" -gt 0 ] || { printf 'fixture repeated probe before first transition\n' >&2; exit 64; }
+    probe_count=$(( $(cat "$trace/ssh.probe.count") + 1 ))
+  else
+    [ ! -f "$trace/ssh.ordinal" ] || [ "$(cat "$trace/ssh.ordinal")" -eq 0 ] || { printf 'fixture probe must be first\n' >&2; exit 64; }
+  fi
+  printf '%s\n' "$probe_count" > "$trace/ssh.probe.count"
+  publish "ssh.probe.$probe_count.args" "$@"
+  arch=${PROVIDER_RUNTIME_ARCH:-amd64}
+  case "$arch" in amd64|arm64) ;; *) printf 'fixture unsupported probe architecture\n' >&2; exit 64 ;; esac
+  profile_digest=${PROVIDER_RUNTIME_PROFILE_DIGEST:?}
+  [ ${#profile_digest} -eq 64 ] || { printf 'fixture invalid profile digest\n' >&2; exit 64; }
+  case "$profile_digest" in *[!0123456789abcdef]*) printf 'fixture invalid profile digest\n' >&2; exit 64 ;; esac
+  release=${PROVIDER_RUNTIME_RELEASE:?}
+  [ -n "$release" ] || { printf 'fixture invalid release identity\n' >&2; exit 64; }
+  printf 's2p2:Linux\n%s\nmid1:0911601b3b0a5f6fdc51f3661518ee20e26ea0cbadfb4f7283e5b1f288941f54\n%s\n%s\n' "$arch" "$profile_digest" "$release"
+  exit 0
 fi
 if printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_HOST_COMMAND" -; then
-  if [ "${PROVIDER_RUNTIME_LIFECYCLE_SCENARIO:-false}" = true ]; then
-    exec 8>"$trace/ssh.ordinal.lock"
-    flock -x 8
-    ordinal_file="$trace/ssh.ordinal"
-    ordinal=0
-    [ -f "$ordinal_file" ] && ordinal=$(cat "$ordinal_file")
-    [ "$ordinal" -ge 3 ] || { printf 'fixture Host before bootstrap\n' >&2; exit 64; }
-    ordinal=$((ordinal + 1))
-    tmp="$ordinal_file.$$"
-    printf '%s\n' "$ordinal" > "$tmp"
-    mv -f "$tmp" "$ordinal_file"
-    host_count=0
-    [ -f "$trace/ssh.host.count" ] && host_count=$(cat "$trace/ssh.host.count")
-    host_count=$((host_count + 1))
-    printf '%s\n' "$host_count" > "$trace/ssh.host.count"
-    record_args "$@" > "$trace/ssh.host.$host_count.args"
-    flock -u 8
-    exec 8>&-
-  else
-    publish 4 ssh.host.args "$@"
-  fi
+  [ -f "$trace/ssh.ordinal" ] && [ "$(cat "$trace/ssh.ordinal")" -ge 1 ] || { printf 'fixture Host before probe\n' >&2; exit 64; }
+  host_count=1
+  [ -f "$trace/ssh.host.count" ] && host_count=$(( $(cat "$trace/ssh.host.count") + 1 ))
+  printf '%s\n' "$host_count" > "$trace/ssh.host.count"
+  publish "ssh.host.$host_count.args" "$@"
   response="$trace/ssh.host.response.$$"
   if env \
     SUB2API_PROVIDER_RUNTIME_CI_HELPER=1 \
@@ -156,39 +129,5 @@ if printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_HOST_COMMAND" -; then
   rm -f "$response"
   exit 0
 fi
-if ! printf %s "$remote" | cmp -s "$PROVIDER_RUNTIME_BOOTSTRAP_COMMAND" -; then
-  printf 'fixture remote command mismatch\n' >&2
-  exit 64
-fi
-publish 2 ssh.bootstrap.args "$@"
-
-IFS= read -r header
-case "$header" in s2a1:*:*) ;; *) printf 'fixture artifact magic mismatch\n' >&2; exit 64 ;; esac
-body=${header#s2a1:}
-size=${body%%:*}
-digest=${body#*:}
-case "$size" in ''|*[!0-9]*) printf 'fixture artifact size mismatch\n' >&2; exit 64 ;; esac
-[ ${#digest} -eq 64 ] || { printf 'fixture artifact digest mismatch\n' >&2; exit 64; }
-case "$digest" in *[!0123456789abcdef]*) printf 'fixture artifact digest mismatch\n' >&2; exit 64 ;; esac
-artifact=${PROVIDER_RUNTIME_ARTIFACT:?}
-[ "$(wc -c < "$artifact")" = "$size" ] || { printf 'fixture artifact length mismatch\n' >&2; exit 64; }
-[ "$(sha256sum "$artifact" | awk '{print $1}')" = "$digest" ] || { printf 'fixture artifact hash mismatch\n' >&2; exit 64; }
-dd bs=1 count="$size" status=none | cmp -s - "$artifact" || { printf 'fixture artifact body mismatch\n' >&2; exit 64; }
-exec 8>"$trace/ssh.ordinal.lock"
-flock -x 8
-bootstrap_tmp="$trace/bootstrap.meta.$$"
-printf 'size=%s\ndigest=%s\n' "$size" "$digest" > "$bootstrap_tmp"
-mv -f "$bootstrap_tmp" "$trace/bootstrap.meta"
-flock -u 8
-exec 8>&-
-touch "$trace/bootstrap.complete"
-
-exec env \
-SUB2API_PROVIDER_RUNTIME_CI_HELPER=1 \
-SUB2API_PROVIDER_RUNTIME_ROOT="$PROVIDER_RUNTIME_ROOT" \
-SUB2API_PROVIDER_RUNTIME_MACHINE_ID="$PROVIDER_RUNTIME_MACHINE_ID" \
-SUB2API_PROVIDER_RUNTIME_MODE=bootstrap \
-PROVIDER_RUNTIME_REQUEST_DIGEST="$PROVIDER_RUNTIME_REQUEST_DIGEST" \
-PROVIDER_RUNTIME_TRACE="$PROVIDER_RUNTIME_TRACE" \
-PATH="$PATH" \
-"$PROVIDER_RUNTIME_TEST_BINARY" -test.run '^TestProviderRuntimeCIHelper$'
+printf 'fixture remote command mismatch\n' >&2
+exit 64

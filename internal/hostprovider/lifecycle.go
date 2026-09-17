@@ -5,12 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 
-	"github.com/c-w-xiaohei/sub2api-deploy/internal/artifact"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostimport"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostprotocol"
@@ -22,22 +20,13 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
-var errArtifactUnavailable = errors.New("host artifact unavailable")
-
 type lifecycleTransport interface {
-	Probe(context.Context, string) (artifact.ProbeInfo, error)
-	Bootstrap(context.Context, string, []byte) (hostprotocol.Response, error)
+	Probe(context.Context, string) (openssh.ProbeInfo, error)
 	Run(context.Context, string, openssh.Command, []byte) (hostprotocol.Response, error)
-}
-
-type artifactBundle struct {
-	Root     string
-	Manifest artifact.Manifest
 }
 
 type lifecycleDependencies struct {
 	transport lifecycleTransport
-	artifact  func() (artifactBundle, error)
 	approve   func(context.Context, hostcontract.ApprovalSubject) (*hostcontract.ApprovalSubject, error)
 }
 
@@ -133,21 +122,9 @@ func (h *host) lifecycleCreate(ctx context.Context, req p.CreateRequest) (p.Crea
 	if err != nil {
 		return p.CreateResponse{}, err
 	}
-	if h.deps.artifact == nil {
-		return p.CreateResponse{}, errArtifactUnavailable
+	if h.deps.transport == nil {
+		return p.CreateResponse{}, fmt.Errorf("transport unavailable")
 	}
-
-	bundle, err := h.deps.artifact()
-	if err != nil {
-		if errors.Is(err, errArtifactUnavailable) {
-			return p.CreateResponse{}, errArtifactUnavailable
-		}
-		return p.CreateResponse{}, fmt.Errorf("host artifact unavailable")
-	}
-	if bundle.Manifest.Release != in.target.ReleaseArtifact {
-		return p.CreateResponse{}, fmt.Errorf("host artifact does not match target release")
-	}
-
 	prior, err := hostcontract.TargetRevision(
 		h.key,
 		in.resource,
@@ -162,10 +139,6 @@ func (h *host) lifecycleCreate(ctx context.Context, req p.CreateRequest) (p.Crea
 	if err != nil {
 		return p.CreateResponse{}, fmt.Errorf("invalid lifecycle request")
 	}
-	if h.deps.transport == nil {
-		return p.CreateResponse{}, fmt.Errorf("transport unavailable")
-	}
-
 	probe, err := h.deps.transport.Probe(ctx, in.server.SSHAlias)
 	if err != nil {
 		return p.CreateResponse{}, fmt.Errorf("transport failed")
@@ -173,25 +146,21 @@ func (h *host) lifecycleCreate(ctx context.Context, req p.CreateRequest) (p.Crea
 	if probe.OS != "Linux" || probe.Machine == "" {
 		return p.CreateResponse{}, fmt.Errorf("unsupported host")
 	}
-
-	pinned, err := artifact.LoadPinned(bundle.Root, bundle.Manifest, probe.Arch)
-	if err != nil {
-		return p.CreateResponse{}, fmt.Errorf("host artifact unavailable")
+	if probe.Arch != "amd64" && probe.Arch != "arm64" {
+		return p.CreateResponse{}, fmt.Errorf("unsupported host")
 	}
-	stdin, err := artifact.BootstrapInput(pinned, frame)
-	if err != nil {
-		return p.CreateResponse{}, fmt.Errorf("host artifact unavailable")
+	if probe.InstalledDigest == "" || probe.Release != in.target.ReleaseArtifact {
+		return p.CreateResponse{}, fmt.Errorf("host profile does not match target release")
 	}
-	result, err := h.deps.transport.Bootstrap(ctx, in.server.SSHAlias, stdin)
-	if err := expectedBootstrapResponse(result, err); err != nil {
+	result, err := h.deps.transport.Run(ctx, in.server.SSHAlias, openssh.Host, frame)
+	if err != nil {
+		return p.CreateResponse{}, fmt.Errorf("transport failed")
+	}
+	if err := expectedResponse(result, hostprotocol.ResultApplied, "reconcile"); err != nil {
 		return p.CreateResponse{}, err
 	}
 	if result.Result.AppliedRevision != in.revision {
-		return p.CreateResponse{}, fmt.Errorf("invalid bootstrap response")
-	}
-	installed, err := h.deps.transport.Probe(ctx, in.server.SSHAlias)
-	if err != nil || !matchesPinnedProbe(installed, probe, pinned.SHA256) {
-		return p.CreateResponse{}, fmt.Errorf("host artifact unavailable")
+		return p.CreateResponse{}, fmt.Errorf("invalid reconcile response")
 	}
 
 	observation, err := h.inspectObservation(ctx, in)
@@ -292,7 +261,6 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 	if !terminal && (initial.HostRelease != old.target.ReleaseArtifact || initial.AppliedRevision != applied) {
 		return p.UpdateResponse{}, fmt.Errorf("unsafe remote observation")
 	}
-
 	var approval *hostcontract.ApprovalSubject
 	if expected != nil {
 		if !persisted {
@@ -302,64 +270,27 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 			}
 		}
 	}
-	reconcile := hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: next.server, Resource: next.resource, TargetRevision: next.revision, PriorAppliedRevision: applied, Target: &next.target, Secrets: &next.secrets, Approval: approval}
-	frame, err := hostprotocol.EncodeRequest(reconcile)
-	if err != nil {
-		return p.UpdateResponse{}, fmt.Errorf("invalid lifecycle request")
-	}
 	if h.deps.transport == nil {
 		return p.UpdateResponse{}, fmt.Errorf("transport unavailable")
 	}
-	if next.target.ReleaseArtifact != old.target.ReleaseArtifact {
-		if h.deps.artifact == nil {
-			return p.UpdateResponse{}, errArtifactUnavailable
-		}
-		bundle, err := h.deps.artifact()
-		if err != nil || bundle.Manifest.Release != next.target.ReleaseArtifact {
-			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
-		}
-		probe, err := h.deps.transport.Probe(ctx, next.server.SSHAlias)
-		if err != nil || probe.OS != "Linux" || probe.Machine != machine.Value {
-			return p.UpdateResponse{}, fmt.Errorf("unsupported host")
-		}
-		pinned, err := artifact.LoadPinned(bundle.Root, bundle.Manifest, probe.Arch)
-		if err != nil {
-			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
-		}
-		if terminal && probe.InstalledDigest == pinned.SHA256 {
-			state, err := checkpointState(next.original, initial, next.revision)
-			if err != nil {
-				return p.UpdateResponse{}, err
-			}
-			return p.UpdateResponse{Properties: state}, nil
-		}
-		stdin, err := artifact.BootstrapInput(pinned, frame)
-		if err != nil {
-			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
-		}
-		result, err := h.deps.transport.Bootstrap(ctx, next.server.SSHAlias, stdin)
-		if err := expectedBootstrapResponse(result, err); err != nil {
-			return p.UpdateResponse{}, err
-		}
-		if result.Result.AppliedRevision != next.revision {
-			return p.UpdateResponse{}, fmt.Errorf("invalid bootstrap response")
-		}
-		installed, err := h.deps.transport.Probe(ctx, next.server.SSHAlias)
-		if err != nil || !matchesPinnedProbe(installed, probe, pinned.SHA256) {
-			return p.UpdateResponse{}, fmt.Errorf("host artifact unavailable")
-		}
-		final, err := h.inspectObservation(ctx, next)
-		if err != nil {
-			return p.UpdateResponse{}, err
-		}
-		if err := validateObservation(final, machine.Value, owner.Value, next.target, next.revision); err != nil {
-			return p.UpdateResponse{}, err
-		}
-		state, err := checkpointState(next.original, final, next.revision)
+	probe, err := h.deps.transport.Probe(ctx, next.server.SSHAlias)
+	if err != nil {
+		return p.UpdateResponse{}, fmt.Errorf("transport failed")
+	}
+	if err := validateProfile(probe, machine.Value, next.target.ReleaseArtifact); err != nil {
+		return p.UpdateResponse{}, err
+	}
+	if terminal {
+		state, err := checkpointState(next.original, initial, next.revision)
 		if err != nil {
 			return p.UpdateResponse{}, err
 		}
 		return p.UpdateResponse{Properties: state}, nil
+	}
+	reconcile := hostprotocol.Request{Action: hostcontract.ActionReconcile, Server: next.server, Resource: next.resource, TargetRevision: next.revision, PriorAppliedRevision: applied, Target: &next.target, Secrets: &next.secrets, Approval: approval}
+	frame, err := hostprotocol.EncodeRequest(reconcile)
+	if err != nil {
+		return p.UpdateResponse{}, fmt.Errorf("invalid lifecycle request")
 	}
 	result, err := h.deps.transport.Run(ctx, next.server.SSHAlias, openssh.Host, frame)
 	if err != nil {
@@ -387,23 +318,41 @@ func (h *host) lifecycleUpdate(ctx context.Context, req p.UpdateRequest) (p.Upda
 }
 
 func (h *host) lifecycleRead(ctx context.Context, req p.ReadRequest) (p.ReadResponse, error) {
-	if req.ID == "" { return p.ReadResponse{}, fmt.Errorf("invalid resource ID") }
+	if req.ID == "" {
+		return p.ReadResponse{}, fmt.Errorf("invalid resource ID")
+	}
 	if req.Inputs.Len() == 0 && req.Properties.Len() == 0 {
 		decoded, err := hostimport.Decode(h.key, req.ID)
-		if err != nil { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
-		if !matchesImportURN(req.Urn, decoded.Resource) { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
+		if err != nil {
+			return p.ReadResponse{}, fmt.Errorf("invalid import token")
+		}
+		if !matchesImportURN(req.Urn, decoded.Resource) {
+			return p.ReadResponse{}, fmt.Errorf("invalid import token")
+		}
 		inputs, err := importInputs(decoded)
-		if err != nil { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
+		if err != nil {
+			return p.ReadResponse{}, fmt.Errorf("invalid import token")
+		}
 		in, err := h.parseInputs(inputs)
-		if err != nil { return p.ReadResponse{}, fmt.Errorf("invalid import token") }
+		if err != nil {
+			return p.ReadResponse{}, fmt.Errorf("invalid import token")
+		}
 		result, err := h.inspect(ctx, in)
-		if err != nil { return p.ReadResponse{}, err }
-		if result.Status != hostprotocol.ResultInspected || result.Observation == nil || validateImportedObservation(*result.Observation, in.target, in.revision) != nil { return p.ReadResponse{}, fmt.Errorf("invalid import observation") }
+		if err != nil {
+			return p.ReadResponse{}, err
+		}
+		if result.Status != hostprotocol.ResultInspected || result.Observation == nil || validateImportedObservation(*result.Observation, in.target, in.revision) != nil {
+			return p.ReadResponse{}, fmt.Errorf("invalid import observation")
+		}
 		state, err := checkpointState(inputs, *result.Observation, in.revision)
-		if err != nil { return p.ReadResponse{}, err }
+		if err != nil {
+			return p.ReadResponse{}, err
+		}
 		return p.ReadResponse{ID: stableID(in.resource), Inputs: inputs, Properties: state}, nil
 	}
-	if req.Inputs.Len() == 0 || req.Properties.Len() == 0 { return p.ReadResponse{}, fmt.Errorf("read requires registered input and checkpoint context") }
+	if req.Inputs.Len() == 0 || req.Properties.Len() == 0 {
+		return p.ReadResponse{}, fmt.Errorf("read requires registered input and checkpoint context")
+	}
 	in, err := h.parseInputs(req.Inputs)
 	if err != nil {
 		return p.ReadResponse{}, err
@@ -488,10 +437,22 @@ func isImportRead(req p.ReadRequest) bool {
 }
 
 func importInputs(decoded hostimport.Inputs) (property.Map, error) {
-	resource, err := propertyValue(decoded.Resource); if err != nil { return property.Map{}, err }
-	server, err := propertyValue(decoded.Server); if err != nil { return property.Map{}, err }
-	target, err := propertyValue(decoded.Target); if err != nil { return property.Map{}, err }
-	secrets, err := propertyValue(decoded.Secrets); if err != nil { return property.Map{}, err }
+	resource, err := propertyValue(decoded.Resource)
+	if err != nil {
+		return property.Map{}, err
+	}
+	server, err := propertyValue(decoded.Server)
+	if err != nil {
+		return property.Map{}, err
+	}
+	target, err := propertyValue(decoded.Target)
+	if err != nil {
+		return property.Map{}, err
+	}
+	secrets, err := propertyValue(decoded.Secrets)
+	if err != nil {
+		return property.Map{}, err
+	}
 	return property.NewMap(map[string]property.Value{"resource": resource, "server": server, "target": target, "secrets": secrets.WithSecret(true)}), nil
 }
 
@@ -607,8 +568,11 @@ func (h *host) inspectObservationEvidence(ctx context.Context, in lifecycleInput
 	}
 	return *result.Observation, result.OperationEvidence, nil
 }
-func matchesPinnedProbe(got, initial artifact.ProbeInfo, digest string) bool {
-	return got.OS == "Linux" && got.Machine == initial.Machine && got.Arch == initial.Arch && got.InstalledDigest == digest
+func validateProfile(probe openssh.ProbeInfo, machine, release string) error {
+	if probe.OS != "Linux" || (probe.Arch != "amd64" && probe.Arch != "arm64") || probe.Machine == "" || probe.Machine != machine || probe.Release != release {
+		return fmt.Errorf("unsupported or inactive host profile")
+	}
+	return nil
 }
 func matchesEvidence(evidence *hostprotocol.OperationEvidence, resource hostcontract.ResourceIdentity, revision, prior string, status hostprotocol.OperationStatus, approval *hostcontract.ApprovalSubject) bool {
 	return evidence != nil && evidence.Status == status && evidence.Key == (hostcontract.OperationKey{Resource: resource, Action: hostcontract.ActionReconcile, TargetRevision: revision, PriorAppliedRevision: prior}) && ((approval == nil && evidence.Approval == nil) || (approval != nil && evidence.Approval != nil && reflect.DeepEqual(*approval, *evidence.Approval)))
@@ -625,13 +589,6 @@ func expectedResponse(response hostprotocol.Response, status hostprotocol.Result
 		return fmt.Errorf("invalid %s response", stage)
 	}
 	return nil
-}
-
-func expectedBootstrapResponse(response hostprotocol.Response, transportErr error) error {
-	if transportErr != nil && (!errors.Is(transportErr, openssh.ErrRemote) || response.Error == nil) {
-		return fmt.Errorf("transport failed")
-	}
-	return expectedResponse(response, hostprotocol.ResultApplied, "bootstrap")
 }
 
 func parseCheckpoint(state property.Map) (hostcontract.MachineIdentity, hostcontract.OwnershipIdentity, string, hostcontract.StableObservation, error) {

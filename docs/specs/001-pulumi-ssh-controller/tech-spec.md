@@ -4,6 +4,22 @@
 日期：2026-08-30
 范围：001 产品本体及其 release/CLI/Program 主链；旧资源与现有生产实例迁移保留为附录，当前不纳入实施
 
+## Current Contract Amendment (2026-09-17)
+
+The Nix runtime decision is normative for the release and Host boundary. The
+schema 2 descriptor binds one exact candidate archive and its manifest-derived
+`hostPayload` records for `x86_64-linux` and `aarch64-linux`. The production
+Host profile contains `bin/sub2api-host` and release metadata. The Provider
+must only probe and invoke that fixed profile through system OpenSSH; it must
+not upload, install, upgrade, or write `/usr/local/libexec/sub2api-host`.
+
+The descriptor must be installed and activated before Host Provider preview or
+up. This supersedes the older artifact-bootstrap receiver lifecycle while
+retaining Host state, reconcile, removal, recovery, and Read/Import semantics.
+The release order is exact-SHA CI and Nix x86/arm64 gates, formal `v0.2.25`
+promotion, then a maintainer download/cmp/copy lock update followed by Nix
+evaluation/build and a separate commit/push.
+
 ## 1. 需求结论
 
 本规格将 Sub2API Deploy 的产品本体定义为一个由控制机运行的 Environment Pulumi Stack：它直接管理官方 Cloudflare、Neon、Upstash resources，并为每台配置服务器注册唯一的深资源 `Host`。`Host` Provider 使用系统 OpenSSH 调用按需退出的 `sub2api-host`，由后者安全收敛该机器的 Compose/Traefik/App、本地 PostgreSQL/Redis、MicroSocks 和 tunnel connector 运行外壳。
@@ -24,7 +40,7 @@
 | 目标源码链 | 已有 `cmd/sub2api-deploy`、`cmd/sub2api-environment`、`cmd/pulumi-resource-sub2api-host`、`cmd/sub2api-host` 及对应 `internal/*` 模块。 | 已完成基础骨架，部分功能实现。 | 继续补齐并收敛为产品本体。 |
 | 已发布 release 链 | `README.md`、`infra/`、Compose/Traefik/scripts 仍描述并发布“一 VPS 一 Stack、VPS 本地运行 Pulumi、`command.local.Command` 调用脚本”的 legacy 模型。 | 仍是当前 release 行为。 | 这是待补齐的产品 release gap，不阻止新主链代码、CLI、Program 与 release 的当前实施；旧实例切 writer 另属附录迁移。 |
 
-已完成的目标源码事实包括：严格 YAML/SOPS 配置解析与 SSH alias 校验；Host contract/revision、单帧严格协议、系统 OpenSSH 固定 argv 与 artifact bootstrap；唯一 `Host` Provider schema 及主要 lifecycle（包括成功、program-first、只读 Import）；远端每 Host 状态、writer lock、journal、read-only inspect、blue/green、本地 data/proxy、preserve-data retire；以及 Environment Program 对 Host、Cloudflare、Upstash 的初步注册。当前 dirty checkout 还包含 Engine Graph、Provider Runtime、Provider Import 与 target release 的 harness/workflow；尚无当前跨 Host candidate 的 exact-SHA evidence。部分完成的事实包括：CLI 已公开受限 Pulumi 参数解析、staged stack 和 fd 3 approval 路径；Program 支持 DNS Cloudflare 与跨 Host Docker data，仍拒绝 Neon、SingBox 和 outbound proxy；runtime 明确拒绝 MicroSocks/Connectors。主要缺口是 CI-only/live nft、PostgreSQL/Redis 证据，补齐官方 Neon 模型、冻结 proxy/connector 合同，并制作/发布新的日常 release。
+已完成的目标源码事实包括：严格 YAML/SOPS 配置解析与 SSH alias 校验；Host contract/revision、单帧严格协议、系统 OpenSSH 固定 argv 与固定 Nix profile invocation；唯一 `Host` Provider schema 及主要 lifecycle（包括成功、program-first、只读 Import）；远端每 Host 状态、writer lock、journal、read-only inspect、blue/green、本地 data/proxy、preserve-data retire；以及 Environment Program 对 Host、Cloudflare、Upstash 的初步注册。当前 dirty checkout 还包含 Engine Graph、Provider Runtime、Provider Import 与 target release 的 harness/workflow；尚无当前跨 Host candidate 的 exact-SHA evidence。部分完成的事实包括：CLI 已公开受限 Pulumi 参数解析、staged stack 和 fd 3 approval 路径；Program 支持 DNS Cloudflare 与跨 Host Docker data，仍拒绝 Neon、SingBox 和 outbound proxy；runtime 明确拒绝 MicroSocks/Connectors。主要缺口是 CI-only/live nft、PostgreSQL/Redis 证据，补齐官方 Neon 模型、冻结 proxy/connector 合同，并制作/发布新的日常 release。
 
 主修改路径按现有实施拆解收敛为：
 
@@ -46,7 +62,7 @@
 | 薄 CLI | `cmd/sub2api-deploy/**` | 已有 `validate`、SOPS decrypt、SSH 预检、受限 Pulumi operation parse、staged stack、TTY approval 和公开日常 `pulumi` 路径。 |
 | Program | `cmd/sub2api-environment/main.go`、`internal/program/program.go` | 已从 bundle 获取 release、读取 staged config/secrets，注册每 server 一个 `Host`，并初步注册 Cloudflare/Upstash。Neon 被明确拒绝。 |
 | Host 接口 | `internal/hostcontract/**`、`internal/hostprotocol/**` | 资源身份、目标 revision、data identity、approval subject、严格有界 request/response。 |
-| Provider 与 transport | `internal/hostprovider/**`、`internal/openssh/**` | 一个资源 token、Create/Read/Update/Delete、artifact bootstrap、系统 `ssh` 固定 argv、host-key fail closed。 |
+| Provider 与 transport | `internal/hostprovider/**`、`internal/openssh/**` | 一个资源 token、Create/Read/Update/Delete、固定 Nix profile probe/invocation、系统 `ssh` 固定 argv、host-key fail closed。 |
 | 远端运行时 | `cmd/sub2api-host/**`、`internal/hostruntime/**` | 非常驻 stdin/stdout process、remote state/journal/lock、owned Docker objects、blue/green、local data/proxy、retire。当前拒绝 MicroSocks/Connectors。 |
 
 `infra/`、`scripts/`、`compose/`、`traefik/` 和 legacy README 不得被新 Program 当作长期执行模型直接拼装调用。它们可提供行为、ownership、blue/green 和 data-preserve 的证据；目标 Host 模块必须拥有本机派生布局与执行步骤。
@@ -113,7 +129,7 @@ Host Provider 只暴露一个深资源。它的输入面为 `resource`（Environ
 | --- | --- | --- |
 | Check | schema、canonicalization、unknown/secret 保真；不 SSH。 | Provider shape/validation。 |
 | Diff | 比较 inputs/state；普通变更 in-place；危险 data link 可见但不得写远端；不 SSH。 | Provider lifecycle logic。 |
-| Create | probe machine，校验 pinned artifact，atomic install/upgrade，绑定 identity，完整 reconcile，再 inspect checkpoint。 | `lifecycleCreate` + artifact/OpenSSH bootstrap。 |
+| Create | probe fixed Nix profile，绑定 machine identity，完整 reconcile，再 inspect checkpoint；descriptor installation/activation 在 Provider 操作前完成。 | `lifecycleCreate` + OpenSSH profile invocation。 |
 | Read | 仅 inspect，更新可信 observation/drift；unreachable、host-key、missing binary、state corrupt、identity mismatch 都保留 ID 并报错。 | `lifecycleRead` + `inspect`。 |
 | Update | 先 inspect/checkpoint/approval，再以完整目标 reconcile；同 key resume 或返还原 terminal result。 | `lifecycleUpdate` + runtime journal。 |
 | Delete | 仅已 drained target 可执行 approved `retire --preserve-data`。 | `lifecycleDelete`。 |
@@ -125,7 +141,7 @@ TR-LC-* 的规范性完整定义见第 10 节 Requirement Index；成功、progr
 
 系统 OpenSSH 是 transport，不是可替代的 SSH client abstraction。Provider 必须直接启动 `ssh`、不启动本地 shell、不解析或复制 OpenSSH config；因此现有 `Include`、`Match`、`ProxyJump`、`ProxyCommand`、agent、certificate 和 known_hosts 语义仍由 OpenSSH 自己解释。alias 必须通过 `sshcheck.ValidateAlias` 的单 token grammar，固定 argv 使用 non-interactive、`StrictHostKeyChecking=yes`、`UpdateHostKeys=no` 等安全项，并使用经测试支持的 `--` 分隔 alias。Provider 不修改 SSH config、known_hosts 或 private keys。
 
-远端命令面必须固定为 probe、受控 bootstrap receiver 和 `sub2api-host stdio`，禁止调用方提供 arbitrary remote command。artifact bootstrap 必须传输已验证的 pinned bytes，远端 receiver attestation 后原子替换二进制，再把原请求交给已安装 binary；禁止 `curl | sh` 或远端下载未知代码。
+远端命令面必须固定为 probe 和 `sub2api-host stdio`，禁止调用方提供 arbitrary remote command。两者都调用 Host root Nix profile 中已安装、带 release metadata 的 `bin/sub2api-host`。Provider 不上传、安装或升级 binary，也不写 `/usr/local/libexec`；descriptor installation/activation 是 Provider 之外的运维边界。禁止 `curl | sh` 或远端下载未知代码。
 
 `hostprotocol` 当前已冻结 `s2h1:<length>\n<strict JSON>` 单帧格式、1 MiB 上限、版本、strict unknown-field/duplicate-key rejection，以及 validation/approval/transport/host-key/protocol/remote-operation/conflict/recovery-required 错误分类。stdout 只允许一个 response frame；stderr 仅作脱敏诊断且不得参与 decode；EOF、timeout、cancel、exit failure、malformed frame 与 remote error 必须被分类。编码、timeout 数值和内部 helper 数量以实现为准，除 protocol 已持久化兼容性外不额外冻结。
 
@@ -167,7 +183,7 @@ Provider 在 `host-a` 先 inspect checkpoint，生成 revision，发送一条 `r
 | `internal/hostcontract` | target/revision/identity/approval values | normalization、HMAC commitment、validation | pure functions | contract tests | 唯一跨 Program/Provider/runtime 的语义 carrier。 |
 | `internal/hostprotocol` | one framed request/response | framing、strict JSON、error pairing | codec boundary | codec/fuzz tests | 不暴露 transport or runtime internals。 |
 | `internal/openssh` | fixed `Probe`/`Bootstrap`/`Run` | argv、process lifecycle、host-key classification | processStart test seam | recording process + loopback | 不建 generic SSH adapter；系统 OpenSSH 是唯一 production transport。 |
-| `internal/hostprovider` | Pulumi `Host` lifecycle | checkpoint, artifact install, approval admission | lifecycle transport/artifact/approval dependencies | provider harness | 将 Pulumi lifecycle 复杂度集中在一个 deep module。 |
+| `internal/hostprovider` | Pulumi `Host` lifecycle | checkpoint, profile probe/invocation, approval admission | lifecycle transport/approval dependencies | provider harness | 将 Pulumi lifecycle 复杂度集中在一个 deep module。 |
 | `cmd/sub2api-host` + `internal/hostruntime` | stdio request -> result | remote state, journal, Docker/route artifacts | command runner | temp runtime/recording command tests | 单机副作用只在此处拥有；不泄漏 layout。 |
 
 没有真实变化轴时不得为测试新增空 interface 或通用 manager。现有 process runner、lifecycle dependency 和 runtime command runner 已是针对 transport/artifact/approval/runtime 的真实 seam；测试应通过这些 interface 证明行为，不要求调用方了解内部 state 文件。
@@ -220,7 +236,7 @@ Provider 在 `host-a` 先 inspect checkpoint，生成 revision，发送一条 `r
 | 验收 ID | 当前含义 | 当前状态 |
 | --- | --- | --- |
 | AC-01 | Program graph、官方 Provider、Host count、dependency/protect/secret/unknown。 | 部分：Cloudflare/Upstash/Host 有源码，Neon 与完整依赖未完成。 |
-| AC-02 | 完整 Host lifecycle，Create install+reconcile，Read/Import read-only。 | implementation-present/evidence-pending：成功 Import、tests 和 CI job 已在当前 dirty checkout；无 exact-SHA evidence。 |
+| AC-02 | 完整 Host lifecycle，Create probe/reconcile，Read/Import read-only。 | implementation-present/evidence-pending：成功 Import、tests 和 CI job 已在当前 dirty checkout；无 exact-SHA evidence。 |
 | AC-03 | OpenSSH 与 protocol 安全。 | 部分：源码/测试存在，未声称 CI/release evidence。 |
 | AC-04 | unknown-result 单副作用恢复。 | 部分：journal/runtime 代码存在。 |
 | AC-05 | blue/green 与跨 Host failure stop。 | 部分：本机 blue/green、cross-Host ordering/admission implementation 存在；Engine/runtime CI evidence 未闭合。 |
@@ -277,9 +293,9 @@ Provider 在 `host-a` 先 inspect checkpoint，生成 revision，发送一条 `r
 | TR-LC-DIFF-03 | PostgreSQL/Redis connection identity、server identity、persistent data identity 与 local data removal 必须显著显示。 | §3.8、§6 |
 | TR-LC-DIFF-04 | danger link 可显示 Update diff，但无匹配 approval 的 Update 必须在任一 remote write 前失败。 | §3.8、§6 |
 | TR-LC-DIFF-05 | stable server-key 改变不接受为 ordinary Update/automatic replacement；同机 rename 用 alias/state move，物理替换用 staged new/old Hosts。 | §6 |
-| TR-LC-CREATE-01 | Create 从安全 OpenSSH 与所需 OS privilege 开始，完整拥有 install+reconcile，不要求日常 pre-bootstrap lifecycle。 | §6 |
-| TR-LC-CREATE-02 | Provider 只传输 bundle-pinned、verified artifact；禁止 `curl | sh` 或 remote unknown download。 | §6 |
-| TR-LC-CREATE-03 | 同 artifact install 幂等；install 后同次 Create 继续完整 reconcile。 | §6 |
+| TR-LC-CREATE-01 | Create 从安全 OpenSSH 与所需 OS privilege 开始，probe 已安装的固定 Nix profile 并完整 reconcile；descriptor installation/activation 不属于 Provider lifecycle。 | §6 |
+| TR-LC-CREATE-02 | Provider 只调用 descriptor 已安装且 manifest-verified 的 Host binary；禁止 upload、bootstrap receiver、`/usr/local/libexec` mutation、`curl | sh` 或 remote unknown download。 | §6 |
+| TR-LC-CREATE-03 | Descriptor installation/activation 是显式、可验证的运维步骤；同一 profile 的 Provider probe/invocation 可重复，Create 继续完整 reconcile。 | §6 |
 | TR-LC-CREATE-04 | existing runtime 的 ownership/identity 不可证明时停止，要求 explicit migration/adoption，不猜测接管。 | §6、§9 |
 | TR-LC-READ-01 | Read 只 `inspect` stable observation/readiness/drift，不 install/recover/reconcile/start Docker。 | §6 |
 | TR-LC-READ-02 | healthy、drifted、pending operation 都保留 resource ID。 | §6 |
@@ -329,7 +345,7 @@ Provider 在 `host-a` 先 inspect checkpoint，生成 revision，发送一条 `r
 | TR-ORDER-01 | cross-Host dependency 从 Environment relation/stable key 派生，并在 registration 前检测环。 | §8 |
 | TR-ORDER-02 | 新 compute 访问 local data：allow-source、App readiness、public publication 的顺序。 | §8 |
 | TR-ORDER-03 | 移除 compute：detach publication、stop App/connector、remove data-host source 的顺序。 | §8 |
-| TR-ORDER-04 | first bootstrap 由 stable first Host 单副本完成，ready 后其余启动；leader 非持久角色/resource。 | §8 |
+| TR-ORDER-04 | first Host 的初始化 reconcile 由 stable first Host 单副本完成，ready 后其余启动；leader 非持久角色/resource。 | §8 |
 | TR-ORDER-05 | 同 App image multi-Host 按 stable order serial update；失败后续不执行。 | §8 |
 | TR-ORDER-06 | Host-local blue/green：start inactive、local readiness、atomic route switch、confirm、drain/stop old。 | §3.7、§8 |
 | TR-ORDER-07 | new runtime/route probe failure 恢复旧 route/active runtime、清理失败 owned runtime；不 rollback data。 | §3.4、§3.7 |
@@ -358,7 +374,7 @@ Provider 在 `host-a` 先 inspect checkpoint，生成 revision，发送一条 `r
 | AC ID | 完整验收语义 | Context 锚点 |
 | --- | --- | --- |
 | AC-01 | Program graph 满足 TR-PROG-01..08，并覆盖 `TS-P0-PROG-*`。 | §8、§10 |
-| AC-02 | Host lifecycle 满足 TR-LC-*；Create install+reconcile，Read/Import read-only。 | §6 |
+| AC-02 | Host lifecycle 满足 TR-LC-*；Create probe/reconcile，Read/Import read-only。 | §6 |
 | AC-03 | OpenSSH/protocol 满足 TR-SSH-*、TR-PROTO-*，有 loopback 与 recording transport evidence。 | §3.6、§10 |
 | AC-04 | same-operation unknown-result retry 不重复副作用，满足 TR-REC-*。 | §3.7 |
 | AC-05 | blue/green failure 保留旧 route/runtime，cross-Host failure 停止后续 update。 | §8 |
@@ -381,7 +397,7 @@ Provider 在 `host-a` 先 inspect checkpoint，生成 revision，发送一条 `r
 | 新 release 主链尚未交付 | release owner | 产品本体 release 实施时 | 当前 legacy release 是现状与待补齐 gap，不阻止新主链实现；不得因此声称新 release 已发布。 |
 | 现有生产实例的 legacy writer 与新链 writer 的切换 | migration owner | 后续迁移授权后 | 单独证明 single-writer；不作为当前产品 release/CLI/Program 主链实施的前置条件。 |
 | Host machine identity 的宿主证据适用于实际 SSH 用户/替换场景 | infra owner | production readiness 前 | 当前使用 HMAC machine-id evidence；生产适用性仍需确认。 |
-| artifact install 所需最小权限 | infra owner | Create release 前 | 当前 bootstrap 固定 `sudo -n` receiver；允许的生产权限集合需验证。 |
+| Host profile invocation 所需最小权限 | infra owner | Create release 前 | 当前固定 `sudo -n` probe/stdio；允许的生产权限集合需验证。 |
 
 ## 附录 A：迁移约束（保留，当前不实施）
 

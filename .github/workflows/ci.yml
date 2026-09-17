@@ -3,7 +3,7 @@ name: Pull-Request CI
 on:
   pull_request:
   push:
-    branches: ["agent/**"]
+    branches: ["main", "agent/**"]
   workflow_dispatch:
     inputs:
       target_sha:
@@ -171,10 +171,10 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist/host-controller
-          go build -o "dist/host-controller/sub2api-deploy-linux-${GOARCH}" ./cmd/sub2api-deploy
-          go build -o "dist/host-controller/sub2api-environment-linux-${GOARCH}" ./cmd/sub2api-environment
-          go build -o "dist/host-controller/sub2api-host-linux-${GOARCH}" ./cmd/sub2api-host
-          go build -o "dist/host-controller/pulumi-resource-sub2api-host-linux-${GOARCH}" ./cmd/pulumi-resource-sub2api-host
+          CGO_ENABLED=0 go build -o "dist/host-controller/sub2api-deploy-linux-${GOARCH}" ./cmd/sub2api-deploy
+          CGO_ENABLED=0 go build -o "dist/host-controller/sub2api-environment-linux-${GOARCH}" ./cmd/sub2api-environment
+          CGO_ENABLED=0 go build -o "dist/host-controller/sub2api-host-linux-${GOARCH}" ./cmd/sub2api-host
+          CGO_ENABLED=0 go build -o "dist/host-controller/pulumi-resource-sub2api-host-linux-${GOARCH}" ./cmd/pulumi-resource-sub2api-host
       - uses: actions/upload-artifact@v4
         with:
           name: host-controller-${{ matrix.arch }}
@@ -328,7 +328,7 @@ jobs:
            if ! sudo docker info >/dev/null 2>&1; then sudo dockerd >"$daemon_log" 2>&1 & echo "$!" > "$daemon_pid_file"; fi
            ready=false; for _ in $(seq 1 45); do if sudo docker info >/dev/null 2>&1; then ready=true; break; fi; sleep 1; done; test "$ready" = true
           candidate="$RUNNER_TEMP/provider-runtime-candidate-$TARGET_SHA"; components="$candidate/components"; mkdir -p "$components"
-          go build -trimpath -o "$components/sub2api-deploy" ./cmd/sub2api-deploy; scripts/build-pulumi-release.sh "$components/pulumi-program"; go build -trimpath -o "$components/pulumi-resource-sub2api-host" ./cmd/pulumi-resource-sub2api-host; CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$components/sub2api-host-linux-amd64" ./cmd/sub2api-host; CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o "$components/sub2api-host-linux-arm64" ./cmd/sub2api-host
+           CGO_ENABLED=0 go build -trimpath -o "$components/sub2api-deploy" ./cmd/sub2api-deploy; scripts/build-pulumi-release.sh "$components/pulumi-program"; CGO_ENABLED=0 go build -trimpath -o "$components/pulumi-resource-sub2api-host" ./cmd/pulumi-resource-sub2api-host; CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$components/sub2api-host-linux-amd64" ./cmd/sub2api-host; CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o "$components/sub2api-host-linux-arm64" ./cmd/sub2api-host
            release_sha="$(printf '%s' "$TARGET_SHA" | sha256sum | cut -d ' ' -f1)"; bash scripts/release-bundle.sh assemble "$candidate/bundle" "$components" "sub2api-host-controller@sha256:$release_sha"; tar -C "$candidate" -czf "$candidate/sub2api-controller-$TARGET_SHA.tar.gz" bundle; bash scripts/release-bundle.sh verify "$candidate/sub2api-controller-$TARGET_SHA.tar.gz"; (cd "$candidate" && sha256sum "sub2api-controller-$TARGET_SHA.tar.gz" > "sub2api-controller-$TARGET_SHA.tar.gz.sha256")
           sudo docker pull postgres:18-alpine; sudo docker pull redis:8-alpine; sudo docker build --tag sub2api-live-app:mx-allowlist --file internal/integration/providerruntime/testdata/live-app.Dockerfile internal/integration/providerruntime/testdata; sudo docker save postgres:18-alpine redis:8-alpine sub2api-live-app:mx-allowlist -o "$RUNNER_TEMP/provider-runtime-images-$TARGET_SHA.tar"
       - name: Run isolated live MX-ALLOWLIST-01 gate and write candidate trace

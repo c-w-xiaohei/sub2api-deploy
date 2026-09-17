@@ -4,6 +4,17 @@
 
 **Goal:** 完整实现一个Environment Pulumi Stack、官方Cloudflare/Neon/Upstash Providers、每服务器唯一Host resource、系统OpenSSH和按需退出的`sub2api-host`，并保留现有运行资源和数据。
 
+## Superseded Historical Plan
+
+This plan is retained as historical sequencing, not as the current release or
+Provider lifecycle authority. Task E supersedes its artifact bootstrap/upload
+and automatic Host binary upgrade assumptions: schema 2 descriptors install
+and activate the exact Nix Host profile before Provider operations; the
+Provider only probes and invokes that profile. Host state, reconcile, recovery,
+and preserve-data removal semantics remain in force. Its release sequence is
+also superseded by the exact-SHA CI/Nix gates, formal `v0.2.25`, and separate
+post-release lock update documented in the current runbook.
+
 ## Current State And Gaps
 
 - 当前生产实现仍是每VPS一个本地Pulumi Stack，通过`command.local.Command`调用Shell helper；运行时状态和模板操作已收敛到Go CLI。

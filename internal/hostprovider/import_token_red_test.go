@@ -20,7 +20,7 @@ func TestImportStepTokenBuildsReadOnlyStateFromVerifiedObservation(t *testing.T)
 	inputs := lifecycleInputs("edge")
 	payload := frozenImportPayload(t, inputs)
 	r := &recordingLifecycleTransport{}
-	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, artifact: fatalArtifact(t), approve: fatalApproval(t)})
+	h := configuredLifecycleHost(t, lifecycleDependencies{transport: r, approve: fatalApproval(t)})
 	revision := revision(t, h, inputs)
 	r.outcomes = []lifecycleOutcome{response(inspected(observationFor(payload.Target, revision)))}
 
