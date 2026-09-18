@@ -118,6 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest scripts/tests/ci_evidence_test.py
+          python3 -m unittest scripts/tests/gmpay_image_contract_test.py
           bash scripts/tests/release-fixture-test.sh
           bash scripts/tests/legacy-runtime-callers-test.sh
           python3 -B scripts/tests/legacy-adoption-fixture-test.py
@@ -313,10 +314,10 @@ jobs:
       - name: Run normal and race Provider Runtime gates
         run: |
           set -euo pipefail
-          tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime)$'
+          tests='^(TestProviderProcessReachesSharedTemporaryRuntimeServe|TestProviderLifecycleWithHostProcessTempRuntime|TestProviderLifecycleWithPaymentGatewayFixture|TestGatewayFixtureRejectsForeignDestructiveIdentity)$'
           record_required() { MODE="$1" REQUIRED_TESTS="$tests" python3 scripts/ci-evidence.py required "$2" "$RUNNER_TEMP/provider-runtime-safe-$TARGET_SHA" "${1}.jsonl"; }
           trap 'rm -f "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal.jsonl" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-normal.stderr" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race.jsonl" "$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-race.stderr"' EXIT
-          for mode in normal race; do raw="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.stderr"; set +e; if test "$mode" = race; then go test -race -json -count=1 -timeout=15m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; else go test -json -count=1 -timeout=8m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; fi; status=$?; set -e; record_required "$mode" "$raw"; test ! -s "$stderr"; test "$status" -eq 0; rm -f "$raw" "$stderr"; done
+          for mode in normal race; do raw="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.jsonl"; stderr="$RUNNER_TEMP/provider-runtime-${TARGET_SHA}-${mode}.stderr"; set +e; if test "$mode" = race; then go test -race -json -count=1 -timeout=20m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; else go test -json -count=1 -timeout=12m -run "$tests" ./internal/integration/providerruntime > "$raw" 2> "$stderr"; fi; status=$?; set -e; record_required "$mode" "$raw"; test ! -s "$stderr"; test "$status" -eq 0; rm -f "$raw" "$stderr"; done
       - name: Vet Provider Runtime
         run: go vet ./internal/integration/providerruntime
       - name: Prepare exact candidate and offline live prerequisites
@@ -387,9 +388,59 @@ jobs:
           path: ${{ runner.temp }}/provider-import-safe-${{ env.TARGET_SHA }}/provider-import.jsonl
           if-no-files-found: error
 
+  gmpay-image-contract:
+    name: GM Pay Image Contract (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - name: Verify exact target SHA
+        run: '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] && test "$(git rev-parse HEAD)" = "$TARGET_SHA"'
+      - name: Run bounded official GM Pay image contract
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/gmpay-image-contract-${{ matrix.arch }}.json"
+          EXPECTED_ARCH='${{ matrix.arch }}' EVIDENCE_FILE="$evidence" bash scripts/tests/gmpay-image-contract-test.sh
+          python3 - "$evidence" <<'PY'
+          import json
+          import re
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              evidence = json.load(stream)
+          assert evidence["selector"] == "gmpay-image-contract-v1"
+          assert evidence["declaredImage"] == "gmwallet/epusdt:v2.0.0"
+          assert evidence["immutableImage"].startswith("gmwallet/epusdt@sha256:")
+          assert evidence["expectedArchitecture"] == evidence["dockerArchitecture"] == evidence["imagePlatform"].split("/", 1)[1]
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", evidence["platformDigest"])
+          assert evidence["immutableImage"] == "gmwallet/epusdt@" + evidence["platformDigest"]
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", evidence["configDigest"])
+          assert evidence["imageId"] == evidence["configDigest"]
+          assert evidence["readiness"] == "passed"
+          assert evidence["sentinelPersistence"] == "passed"
+          assert evidence["imageId"].startswith("sha256:")
+          assert "@sha256:" in evidence["repoDigest"]
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gmpay-image-contract-${{ env.TARGET_SHA }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/gmpay-image-contract-${{ matrix.arch }}.json*
+          if-no-files-found: error
+
   target-release:
     name: Target Release
-    needs: [verify, host-controller, engine-graph, provider-ssh, provider-runtime, provider-import]
+    needs: [verify, host-controller, engine-graph, provider-ssh, provider-runtime, provider-import, gmpay-image-contract]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

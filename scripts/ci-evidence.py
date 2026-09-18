@@ -52,6 +52,8 @@ GATE_SYMBOLS = {
     "provider-runtime": [
         "TestProviderProcessReachesSharedTemporaryRuntimeServe",
         "TestProviderLifecycleWithHostProcessTempRuntime",
+        "TestProviderLifecycleWithPaymentGatewayFixture",
+        "TestGatewayFixtureRejectsForeignDestructiveIdentity",
         "TestProviderRuntimeCrossHostDataAdmissionLive",
     ],
     "provider-import": ["TestEngineImportPreviewIsNoOpOrAcceptedDiff"],

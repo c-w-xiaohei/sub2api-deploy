@@ -88,6 +88,15 @@ apps:
       type: cloudflare
       servers: [api-one, api-two]
       cloudflare: {mode: dns, connectBy: publicAddress}
+paymentGateways:
+  gmpay-primary:
+    type: gmpay
+    server: api-one
+    hostname: pay.example.com
+    image: gmwallet/epusdt:v2.0.0
+    publicAccess:
+      type: cloudflare
+      cloudflare: {mode: dns, connectBy: publicAddress}
 cloudflare:
   zoneId: replace-with-zone-id
 ```
@@ -118,6 +127,16 @@ cloudflare: {apiToken: replace-before-encrypting}
 Encrypt that file with the repository's approved SOPS recipient policy, then
 run `sub2api-deploy validate production`. The CLI decrypts it only for the
 short-lived staged Pulumi stack; do not commit plaintext secrets.
+
+The optional `paymentGateways` map above declares one YAML-driven GM Pay
+instance. This feature deploys the gateway container and its Cloudflare DNS
+publication only. It does not configure a Sub2API payment provider, GM Pay
+wallet or RPC settings, administrator credentials, merchant/API keys, or any
+other application secret.
+
+For the complete lifecycle, including first-run browser setup, image-reference
+rules, persistent data, upgrades, server moves, and retirement, see
+[`docs/runbooks/gmpay-yaml-deployment.md`](docs/runbooks/gmpay-yaml-deployment.md).
 
 ## Addition And Removal
 

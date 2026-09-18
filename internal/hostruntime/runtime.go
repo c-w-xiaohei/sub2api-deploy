@@ -144,6 +144,11 @@ func allObservedReady(observation hostcontract.StableObservation) bool {
 			return false
 		}
 	}
+	for _, gateway := range observation.PaymentGateways {
+		if !gateway.Ready {
+			return false
+		}
+	}
 	for _, data := range observation.Data {
 		if !data.Ready {
 			return false

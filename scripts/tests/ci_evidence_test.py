@@ -54,6 +54,14 @@ class EvidenceTests(unittest.TestCase):
         host = [value.split("|") for value in selectors if "TestRegisterFoundationGraph" in value]
         self.assertEqual(host, [ci_evidence.GATE_SYMBOLS["host-controller"]])
 
+    def test_provider_runtime_metadata_matches_workflow_selector(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        selectors = re.findall(r"tests='\^\(([^']+)\)\$'", workflow)
+        runtime = [value.split("|") for value in selectors if "TestProviderLifecycleWithPaymentGatewayFixture" in value]
+        self.assertEqual(len(runtime), 1)
+        live = re.findall(r"-run '\^(TestProviderRuntimeCrossHostDataAdmissionLive)\$'", workflow)
+        self.assertEqual(runtime[0] + live, ci_evidence.GATE_SYMBOLS["provider-runtime"])
+
     def test_required_rejects_fail_skip_and_duplicate_terminals(self):
         for events in (
             [{"Test": "Alpha", "Action": "fail"}],

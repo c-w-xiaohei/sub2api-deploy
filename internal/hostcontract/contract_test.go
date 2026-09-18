@@ -3,10 +3,108 @@ package hostcontract
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestPaymentGatewayTargetIsValidatedCanonicalizedAndRoundTrips(t *testing.T) {
+	target, secrets := validTarget()
+	var withGateways Target
+	if err := json.Unmarshal([]byte(`{"releaseArtifact":"release","paymentGateways":[{"id":"zeta","type":"gmpay","image":"gmwallet/epusdt:v2.0.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","hostname":"zeta.example"},{"id":"alpha","type":"gmpay","image":"gmwallet/epusdt@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","hostname":"alpha.example"}]}`), &withGateways); err != nil {
+		t.Fatal(err)
+	}
+	target.PaymentGateways = withGateways.PaymentGateways
+	if err := ValidateTarget(target, secrets); err != nil {
+		t.Fatalf("valid payment gateways rejected: %v", err)
+	}
+	normalized, _ := NormalizeTargetSecrets(target, secrets)
+	if len(normalized.PaymentGateways) != 2 || normalized.PaymentGateways[0].ID != "alpha" || normalized.PaymentGateways[1].ID != "zeta" {
+		t.Fatalf("payment gateways were not sorted canonically: %#v", normalized.PaymentGateways)
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil || !strings.Contains(string(encoded), `"paymentGateways":[{"id":"alpha"`) {
+		t.Fatalf("payment gateway target did not round-trip canonically: %s, %v", encoded, err)
+	}
+	var roundTrip Target
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil || len(roundTrip.PaymentGateways) != 2 || roundTrip.PaymentGateways[0] != normalized.PaymentGateways[0] {
+		t.Fatalf("payment gateway target round-trip = %#v, %v", roundTrip.PaymentGateways, err)
+	}
+
+	key := RevisionKey([]byte("01234567890123456789012345678901"))
+	resource := ResourceIdentity{Environment: "production", ServerKey: "edge-a"}
+	baseline := mustRevision(t, key, resource, target, secrets)
+	reordered := cloneTarget(target)
+	reordered.PaymentGateways[0], reordered.PaymentGateways[1] = reordered.PaymentGateways[1], reordered.PaymentGateways[0]
+	if got := mustRevision(t, key, resource, reordered, secrets); got != baseline {
+		t.Fatal("payment gateway order changed the target revision")
+	}
+	changedImage := cloneTarget(target)
+	changedImage.PaymentGateways[0].Image = "gmwallet/epusdt:v2.0.1"
+	if got := mustRevision(t, key, resource, changedImage, secrets); got == baseline {
+		t.Fatal("payment gateway image change did not change the target revision")
+	}
+}
+
+func TestPaymentGatewayContractRejectsMalformedTargetsAndObservations(t *testing.T) {
+	for name, gateway := range map[string]string{
+		"empty id":         `{"id":"","type":"gmpay","image":"gmwallet/epusdt:v2.0.0","hostname":"pay.example"}`,
+		"unsafe id":        `{"id":"Pay_primary","type":"gmpay","image":"gmwallet/epusdt:v2.0.0","hostname":"pay.example"}`,
+		"control string":   `{"id":"pay\nprimary","type":"gmpay","image":"gmwallet/epusdt:v2.0.0","hostname":"pay.example"}`,
+		"wrong type":       `{"id":"pay-primary","type":"stripe","image":"gmwallet/epusdt:v2.0.0","hostname":"pay.example"}`,
+		"uppercase host":   `{"id":"pay-primary","type":"gmpay","image":"gmwallet/epusdt:v2.0.0","hostname":"Pay.example"}`,
+		"bad host":         `{"id":"pay-primary","type":"gmpay","image":"gmwallet/epusdt:v2.0.0","hostname":"pay example"}`,
+		"untagged image":   `{"id":"pay-primary","type":"gmpay","image":"gmwallet/epusdt","hostname":"pay.example"}`,
+		"latest image":     `{"id":"pay-primary","type":"gmpay","image":"gmwallet/epusdt:latest","hostname":"pay.example"}`,
+		"malformed digest": `{"id":"pay-primary","type":"gmpay","image":"gmwallet/epusdt:v2.0.0@sha256:bad","hostname":"pay.example"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			target, secrets := validTarget()
+			var parsed Target
+			if err := json.Unmarshal([]byte(`{"releaseArtifact":"release","paymentGateways":[`+gateway+`]}`), &parsed); err != nil {
+				t.Fatal(err)
+			}
+			target.PaymentGateways = parsed.PaymentGateways
+			if err := ValidateTarget(target, secrets); err == nil {
+				t.Fatal("malformed payment gateway accepted")
+			}
+		})
+	}
+
+	target, secrets := validTarget()
+	var parsed Target
+	if err := json.Unmarshal([]byte(`{"releaseArtifact":"release","paymentGateways":[{"id":"pay-a","type":"gmpay","image":"gmwallet/epusdt:v2.0.0","hostname":"pay.example"},{"id":"pay-a","type":"gmpay","image":"gmwallet/epusdt:v2.0.0","hostname":"other.example"}]}`), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	target.PaymentGateways = parsed.PaymentGateways
+	if err := ValidateTarget(target, secrets); err == nil {
+		t.Fatal("duplicate payment gateway ID accepted")
+	}
+	target.PaymentGateways = parsed.PaymentGateways[:1]
+
+	revision := mustRevision(t, RevisionKey([]byte("01234567890123456789012345678901")), ResourceIdentity{Environment: "production", ServerKey: "edge-a"}, target, secrets)
+	observationJSON := `{"machine":{"value":"machine"},"ownership":{"value":"owner"},"hostRelease":"release","appliedRevision":"` + revision + `","ready":true,"paymentGateways":[{"id":"pay-a","activeImage":"gmwallet/epusdt:v2.0.0","ready":true}]}`
+	var observation StableObservation
+	if err := json.Unmarshal([]byte(observationJSON), &observation); err != nil || len(observation.PaymentGateways) != 1 {
+		t.Fatalf("payment gateway observation did not round-trip: %#v, %v", observation.PaymentGateways, err)
+	}
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("valid payment gateway observation rejected: %v", err)
+	}
+	observation.PaymentGateways = append(observation.PaymentGateways, PaymentGatewayObservation{ID: "pay-b", ActiveImage: "gmwallet/epusdt:v2.0.0", Ready: true})
+	if err := observation.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	observation.PaymentGateways[0], observation.PaymentGateways[1] = observation.PaymentGateways[1], observation.PaymentGateways[0]
+	if err := observation.Validate(); err == nil {
+		t.Fatal("noncanonical payment gateway observation order accepted")
+	}
+	observation.PaymentGateways[0].ActiveImage = "gmwallet/epusdt:latest"
+	if err := observation.Validate(); err == nil {
+		t.Fatal("invalid payment gateway observation accepted")
+	}
+}
 
 func TestTargetRevisionNormalizesAndCommitsHostSemantics(t *testing.T) {
 	key := RevisionKey([]byte("01234567890123456789012345678901"))

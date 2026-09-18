@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -3851,9 +3852,27 @@ type recordingRunner struct {
 	postgresFinalized     map[string]bool
 	postgresCreateSeen    bool
 	postgresFinalizeSeen  bool
+	running               map[string]bool
+	gatewayInspect        map[string]gatewayInspectState
 	fail                  func([]string) error
 	failAfter             bool
 	event                 func([]string)
+}
+
+type gatewayInspectState struct {
+	Image           string
+	RestartPolicy   string
+	Binds           []string
+	Env             []string
+	PortBindings    map[string][]gatewayPortBinding
+	PublishAllPorts bool
+	Networks        map[string][]string
+	Running         bool
+}
+
+type gatewayPortBinding struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
 }
 
 type stdoutRunner struct{ output []byte }
@@ -4272,6 +4291,40 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 	if r.event != nil {
 		r.event(argv)
 	}
+	if len(argv) == 5 && argv[0] == "container" && argv[1] == "inspect" && argv[2] == "--format" && argv[3] == "{{.State.Running}}" {
+		if r.running == nil {
+			running := r.inspect[argv[4]] != ""
+			return []byte(strconv.FormatBool(running)), nil
+		}
+		return []byte(strconv.FormatBool(r.running[argv[4]])), nil
+	}
+	if len(argv) == 5 && argv[0] == "container" && argv[1] == "inspect" && argv[2] == "--format" && argv[3] == `{{json .}}` {
+		state, ok := r.gatewayInspect[argv[4]]
+		if !ok {
+			return nil, errors.New("inspect absent gateway")
+		}
+		networks := map[string]any{}
+		for name, aliases := range state.Networks {
+			networks[name] = map[string]any{"Aliases": aliases}
+		}
+		portBindings := map[string]any{}
+		for name, bindings := range state.PortBindings {
+			portBindings[name] = bindings
+		}
+		var encodedPortBindings any
+		if len(portBindings) != 0 {
+			encodedPortBindings = portBindings
+		}
+		return json.Marshal(map[string]any{
+			"Config": map[string]any{"Image": state.Image, "Env": state.Env},
+			"HostConfig": map[string]any{
+				"RestartPolicy": map[string]any{"Name": state.RestartPolicy},
+				"Binds":         state.Binds, "PortBindings": encodedPortBindings, "PublishAllPorts": state.PublishAllPorts,
+			},
+			"NetworkSettings": map[string]any{"Networks": networks},
+			"State":           map[string]any{"Running": state.Running},
+		})
+	}
 	if len(argv) == 9 && argv[0] == "exec" && argv[2] == "redis-cli" && argv[3] == "--raw" && argv[4] == "-h" && argv[5] == "127.0.0.1" && argv[6] == "-p" && argv[8] == "ping" {
 		return []byte("PONG\n"), nil
 	}
@@ -4369,6 +4422,9 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 		if !ok {
 			return nil, nil
 		}
+		if format := argv[len(argv)-1]; strings.Contains(format, `{{.Label "sub2api.host.target"}}`) && !strings.Contains(format, `{{.Label "sub2api.host"}}`) {
+			return []byte(name + "\t" + r.targets[name] + "\n"), nil
+		}
 		return []byte(name + "\t" + value + "\t" + r.targets[name] + "\n"), nil
 	}
 	if len(argv) == 5 && argv[0] == "container" && argv[1] == "inspect" {
@@ -4452,6 +4508,30 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 		}
 		r.inspect[name] = label
 		r.targets[name] = target
+		if r.running == nil {
+			r.running = map[string]bool{}
+		}
+		r.running[name] = true
+		if len(argv) > 1 && argv[1] == "--pull" && argv[2] == "never" {
+			if r.gatewayInspect == nil {
+				r.gatewayInspect = map[string]gatewayInspectState{}
+			}
+			image := argv[len(argv)-1]
+			network, alias, env, bind := "", "", "", ""
+			for i := range argv {
+				switch argv[i] {
+				case "--network":
+					network = argv[i+1]
+				case "--network-alias":
+					alias = argv[i+1]
+				case "-e":
+					env = argv[i+1]
+				case "-v":
+					bind = argv[i+1]
+				}
+			}
+			r.gatewayInspect[name] = gatewayInspectState{Image: image, RestartPolicy: "unless-stopped", Binds: []string{bind}, Env: []string{env}, PortBindings: map[string][]gatewayPortBinding{}, Networks: map[string][]string{network: {name, alias}}, Running: true}
+		}
 		if r.publications == nil {
 			r.publications = map[string]map[string][]map[string]string{}
 		}
@@ -4518,6 +4598,46 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 		delete(r.inspect, argv[len(argv)-1])
 		delete(r.targets, argv[len(argv)-1])
 		delete(r.publications, argv[len(argv)-1])
+		delete(r.gatewayInspect, argv[len(argv)-1])
+		delete(r.running, argv[len(argv)-1])
+	}
+	if len(argv) > 1 && argv[0] == "stop" {
+		if r.running == nil {
+			r.running = map[string]bool{}
+		}
+		r.running[argv[len(argv)-1]] = false
+		if state, ok := r.gatewayInspect[argv[len(argv)-1]]; ok {
+			state.Running = false
+			r.gatewayInspect[argv[len(argv)-1]] = state
+		}
+	}
+	if len(argv) > 1 && argv[0] == "start" {
+		if r.running == nil {
+			r.running = map[string]bool{}
+		}
+		r.running[argv[len(argv)-1]] = true
+		if state, ok := r.gatewayInspect[argv[len(argv)-1]]; ok {
+			state.Running = true
+			r.gatewayInspect[argv[len(argv)-1]] = state
+		}
+	}
+	if len(argv) == 3 && argv[0] == "rename" {
+		if r.inspect != nil {
+			r.inspect[argv[2]] = r.inspect[argv[1]]
+			delete(r.inspect, argv[1])
+		}
+		if r.targets != nil {
+			r.targets[argv[2]] = r.targets[argv[1]]
+			delete(r.targets, argv[1])
+		}
+		if r.running != nil {
+			r.running[argv[2]] = r.running[argv[1]]
+			delete(r.running, argv[1])
+		}
+		if r.gatewayInspect != nil {
+			r.gatewayInspect[argv[2]] = r.gatewayInspect[argv[1]]
+			delete(r.gatewayInspect, argv[1])
+		}
 	}
 	return nil, failure
 }

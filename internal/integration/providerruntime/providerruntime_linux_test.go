@@ -375,9 +375,11 @@ type providerProcess struct {
 }
 
 type targetExpectation struct {
-	Revision    string              `json:"revision"`
-	Apps        []expectedTargetApp `json:"apps"`
-	CurrentApps []expectedTargetApp `json:"currentApps,omitempty"`
+	Revision               string                  `json:"revision"`
+	Apps                   []expectedTargetApp     `json:"apps"`
+	CurrentApps            []expectedTargetApp     `json:"currentApps,omitempty"`
+	PaymentGateways        []expectedTargetGateway `json:"paymentGateways,omitempty"`
+	CurrentPaymentGateways []expectedTargetGateway `json:"currentPaymentGateways,omitempty"`
 }
 type expectedTargetApp struct {
 	ID            string                  `json:"id"`
@@ -386,6 +388,12 @@ type expectedTargetApp struct {
 	ReadinessPath string                  `json:"readinessPath"`
 	DrainSeconds  int                     `json:"drainSeconds"`
 	DataLinks     []hostcontract.DataLink `json:"dataLinks,omitempty"`
+}
+type expectedTargetGateway struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Image    string `json:"image"`
+	Hostname string `json:"hostname"`
 }
 
 func startProvider(t *testing.T) *providerProcess {
@@ -766,13 +774,14 @@ func nftFixture(argv []string) error {
 }
 
 type dockerTrace struct {
-	Ownership      string                     `json:"ownership"`
-	OwnershipLabel string                     `json:"ownershipLabel"`
-	Network        string                     `json:"network"`
-	Networks       map[string]dockerNetwork   `json:"networks"`
-	Containers     map[string]dockerContainer `json:"containers"`
-	Effects        []dockerEffect             `json:"effects"`
-	Reads          []string                   `json:"reads"`
+	Ownership              string                     `json:"ownership"`
+	OwnershipLabel         string                     `json:"ownershipLabel"`
+	Network                string                     `json:"network"`
+	Networks               map[string]dockerNetwork   `json:"networks"`
+	Containers             map[string]dockerContainer `json:"containers"`
+	Effects                []dockerEffect             `json:"effects"`
+	Reads                  []string                   `json:"reads"`
+	GatewayRunPullPolicies []string                   `json:"gatewayRunPullPolicies,omitempty"`
 }
 
 type dockerNetwork struct{ Owner, Label string }
@@ -780,7 +789,17 @@ type dockerEffect struct {
 	Action, Name, AppToken, Slot, OwnerDigest, TargetDigest string
 }
 type dockerContainer struct {
-	Owner, Target, Image, Slot, AppToken string
+	Owner, Target, Image, Slot, AppToken, Role string
+	Running                                    bool
+	RestartPolicy                              string
+	Binds                                      []string
+	Env                                        []string
+	PortBindings                               map[string][]dockerPortBinding
+	Networks                                   map[string][]string
+}
+type dockerPortBinding struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
 }
 
 // dockerFixture is a stateful, strict Docker oracle. It accepts only command
@@ -842,6 +861,9 @@ func (s *dockerTrace) apply(root string, args []string) error {
 	listContainer := func() (string, bool) {
 		return "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}", len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/s2h-") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host\"}}\t{{.Label \"sub2api.host.target\"}}"
 	}
+	listTargetContainer := func() bool {
+		return len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && strings.HasPrefix(args[4], "name=^/s2h-") && strings.HasSuffix(args[4], "$") && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host.target\"}}"
+	}
 	if len(args) == 7 && args[0] == "container" && args[1] == "ls" && args[2] == "--all" && args[3] == "--filter" && args[4] == "label=sub2api.host" && args[5] == "--format" && args[6] == "{{.Names}}\t{{.Label \"sub2api.host\"}}" {
 		s.Reads = append(s.Reads, "preflight-container-list")
 		return nil
@@ -879,6 +901,26 @@ func (s *dockerTrace) apply(root string, args []string) error {
 					}
 				}
 			}
+			for _, gateway := range append(append([]expectedTargetGateway(nil), expectation.PaymentGateways...), expectation.CurrentPaymentGateways...) {
+				token := fixtureToken("payment-gateway", gateway.ID)
+				for _, role := range []string{"payment-gateway", "payment-gateway-rollback"} {
+					if name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, role, token, "live") || name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, role, token, "") {
+						valid = true
+					}
+				}
+				var inventory struct {
+					Objects []struct {
+						Role, AppToken, Revision string
+					} `json:"objects"`
+				}
+				if json.Unmarshal(mustReadFixture(filepath.Join(root, "runtime", "managed", "inventory.json")), &inventory) == nil {
+					for _, object := range inventory.Objects {
+						if object.Role == "payment-gateway" && object.AppToken == token && object.Revision != "" && name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, "payment-gateway-rollback", token, object.Revision) {
+							valid = true
+						}
+					}
+				}
+			}
 			if !valid {
 				return errors.New("invalid container list")
 			}
@@ -887,6 +929,58 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		if c, exists := s.Containers[name]; exists {
 			_, _ = io.WriteString(os.Stdout, name+"\t"+c.Owner+"\t"+c.Target+"\n")
 		}
+		return nil
+	}
+	if listTargetContainer() {
+		name := strings.TrimSuffix(strings.TrimPrefix(args[4], "name=^/"), "$")
+		container, ok := s.Containers[name]
+		if !ok {
+			return errors.New("unsupported container target inspection")
+		}
+		s.Reads = append(s.Reads, "container-target")
+		_, _ = io.WriteString(os.Stdout, name+"\t"+container.Target+"\n")
+		return nil
+	}
+	if len(args) == 5 && args[0] == "container" && args[1] == "inspect" && args[2] == "--format" && args[3] == "{{.State.Running}}" {
+		container, ok := s.Containers[args[4]]
+		if !ok {
+			return errors.New("inspect absent container")
+		}
+		if container.Running {
+			_, _ = io.WriteString(os.Stdout, "true\n")
+		} else {
+			_, _ = io.WriteString(os.Stdout, "false\n")
+		}
+		s.Reads = append(s.Reads, "container-running")
+		return nil
+	}
+	if len(args) == 5 && args[0] == "container" && args[1] == "inspect" && args[2] == "--format" && args[3] == `{{json .}}` {
+		container, ok := s.Containers[args[4]]
+		if !ok {
+			return errors.New("inspect absent container")
+		}
+		networks := map[string]any{}
+		for name, aliases := range container.Networks {
+			networks[name] = map[string]any{"Aliases": aliases}
+		}
+		var portBindings any
+		if len(container.PortBindings) != 0 {
+			portBindings = container.PortBindings
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"Id": "sha256:fixture", "Name": "/" + args[4], "Created": "2026-09-18T00:00:00Z",
+			"Config":          map[string]any{"Image": container.Image, "Env": container.Env, "Cmd": []string{"/bin/epusdt"}},
+			"HostConfig":      map[string]any{"RestartPolicy": map[string]string{"Name": container.RestartPolicy}, "Binds": container.Binds, "PortBindings": portBindings, "PublishAllPorts": false},
+			"NetworkSettings": map[string]any{"Networks": networks, "Ports": map[string]any{"8000/tcp": nil}},
+			"State":           map[string]any{"Running": container.Running, "Status": "running"},
+		})
+	}
+	if len(args) == 2 && args[0] == "pull" {
+		if !strings.HasPrefix(args[1], "sub2api-gmpay-fixture:v2.0.") {
+			return errors.New("unexpected image pull")
+		}
+		s.Reads = append(s.Reads, "image-pull")
+		s.effect("image-pull", args[1], "", "", "", "")
 		return nil
 	}
 	if len(args) == 7 && args[0] == "network" && args[1] == "create" && args[2] == "--label" && strings.HasPrefix(args[3], "sub2api.host=") && args[4] == "--label" && strings.HasPrefix(args[5], "sub2api.host.network=") {
@@ -939,8 +1033,36 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		if s.Ownership == "" || name != wantName || owner != wantOwner || target != wantTarget || image != app.Image || args[13] != app.ID || args[15] != wantEnv || args[17] != wantData || s.Containers[name].Owner != "" {
 			return errors.New("invalid container run")
 		}
-		s.Containers[name] = dockerContainer{Owner: owner, Target: target, Image: image, Slot: slot, AppToken: appToken}
+		s.Containers[name] = dockerContainer{Owner: owner, Target: target, Image: image, Slot: slot, AppToken: appToken, Role: "app", Running: true}
 		s.effect("container-run", name, appToken, slot, owner, target)
+		return nil
+	}
+	if len(args) == 21 && args[0] == "run" && args[1] == "--pull" && args[2] == "never" && args[3] == "-d" && args[4] == "--restart" && args[5] == "unless-stopped" && args[6] == "--label" && strings.HasPrefix(args[7], "sub2api.host=") && args[8] == "--label" && strings.HasPrefix(args[9], "sub2api.host.target=") && args[10] == "--name" && args[12] == "--network" && args[13] == s.Network && args[14] == "--network-alias" && args[16] == "-e" && args[17] == "EPUSDT_CONFIG=/data/.env" && args[18] == "-v" {
+		name, owner, target, data, image := args[11], strings.TrimPrefix(args[7], "sub2api.host="), strings.TrimPrefix(args[9], "sub2api.host.target="), args[19], args[20]
+		var runtimeState hostruntime.State
+		var expectation targetExpectation
+		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || runtimeState.Journal == nil || json.Unmarshal(mustReadFixture(filepath.Join(os.Getenv("PROVIDER_RUNTIME_TRACE"), "target.expectation.json")), &expectation) != nil || expectation.Revision != runtimeState.Journal.Key.TargetRevision {
+			return errors.New("invalid gateway run")
+		}
+		var gateway expectedTargetGateway
+		var gatewayToken string
+		for _, candidate := range expectation.PaymentGateways {
+			token := fixtureToken("payment-gateway", candidate.ID)
+			if name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, "payment-gateway", token, "live") {
+				gateway, gatewayToken = candidate, token
+			}
+		}
+		if gatewayToken == "" || image != gateway.Image || data != filepath.Join(root, "runtime", "data", fixtureToken("payment-gateway-data", gatewayToken))+":/data" || args[15] != "gmpay-"+gatewayToken || s.Containers[name].Owner != "" {
+			return errors.New("invalid gateway run")
+		}
+		ownerExpected := "s2h1:" + fixtureToken("test", "edge", runtimeState.Ownership.Value, "payment-gateway", gatewayToken, "live")
+		wantTarget := "s2ht1:" + fixtureToken("payment-gateway", gatewayToken, "live", expectation.Revision, gateway.Image, "gmpay", "0", "false")
+		if owner != ownerExpected || target != wantTarget {
+			return errors.New("invalid gateway ownership")
+		}
+		s.GatewayRunPullPolicies = append(s.GatewayRunPullPolicies, args[1]+" "+args[2])
+		s.Containers[name] = dockerContainer{Owner: owner, Target: target, Image: image, Slot: "live", AppToken: gatewayToken, Role: "payment-gateway", Running: true, RestartPolicy: "unless-stopped", Binds: []string{data}, Env: []string{"EPUSDT_CONFIG=/data/.env"}, PortBindings: map[string][]dockerPortBinding{}, Networks: map[string][]string{s.Network: {name, args[15]}}}
+		s.effect("container-run", name, gatewayToken, "live", owner, target)
 		return nil
 	}
 	if len(args) == 7 && args[0] == "exec" && args[2] == "wget" && args[3] == "-q" && args[4] == "-O" && args[5] == "/dev/null" {
@@ -958,6 +1080,14 @@ func (s *dockerTrace) apply(root string, args []string) error {
 				matched = true
 			}
 		}
+		for _, gateway := range expectation.PaymentGateways {
+			if container.Role == "payment-gateway" && container.Image == gateway.Image && args[6] == "http://localhost:8000/" {
+				matched = true
+			}
+		}
+		if matched && container.Image == "sub2api-gmpay-fixture:v2.0.1" && fileExists(filepath.Join(os.Getenv("PROVIDER_RUNTIME_TRACE"), "gateway-readiness-failure")) {
+			return errors.New("fixture gateway is not ready")
+		}
 		if !matched {
 			return errors.New("invalid container probe")
 		}
@@ -970,6 +1100,38 @@ func (s *dockerTrace) apply(root string, args []string) error {
 			return errors.New("stop absent container")
 		}
 		s.effect("container-stop", args[3], container.AppToken, container.Slot, container.Owner, container.Target)
+		container.Running = false
+		s.Containers[args[3]] = container
+		return nil
+	}
+	if len(args) == 2 && args[0] == "stop" {
+		container, ok := s.Containers[args[1]]
+		if !ok || !validDestructiveContainer(root, args[1], container) {
+			return errors.New("stop absent container")
+		}
+		s.effect("container-stop", args[1], container.AppToken, container.Slot, container.Owner, container.Target)
+		container.Running = false
+		s.Containers[args[1]] = container
+		return nil
+	}
+	if len(args) == 3 && args[0] == "rename" {
+		container, ok := s.Containers[args[1]]
+		if !ok || !validDestructiveContainer(root, args[1], container) || s.Containers[args[2]].Owner != "" {
+			return errors.New("rename absent container")
+		}
+		delete(s.Containers, args[1])
+		s.Containers[args[2]] = container
+		s.effect("container-rename", args[1]+"->"+args[2], container.AppToken, container.Slot, container.Owner, container.Target)
+		return nil
+	}
+	if len(args) == 2 && args[0] == "start" {
+		container, ok := s.Containers[args[1]]
+		if !ok || !validDestructiveContainer(root, args[1], container) {
+			return errors.New("start absent container")
+		}
+		container.Running = true
+		s.Containers[args[1]] = container
+		s.effect("container-start", args[1], container.AppToken, container.Slot, container.Owner, container.Target)
 		return nil
 	}
 	if len(args) == 3 && args[0] == "rm" && args[1] == "-f" {
@@ -1005,24 +1167,77 @@ func validDestructiveContainer(root, name string, container dockerContainer) boo
 	if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &state) != nil {
 		return false
 	}
-	if len(container.AppToken) != 24 || strings.Trim(container.AppToken, "0123456789abcdef") != "" || (container.Slot != "blue" && container.Slot != "green") {
+	if len(container.AppToken) != 24 || strings.Trim(container.AppToken, "0123456789abcdef") != "" || container.Slot != "live" && container.Slot != "blue" && container.Slot != "green" {
 		return false
+	}
+	if container.Role == "payment-gateway" {
+		var inventory struct {
+			Objects []struct {
+				Role, AppToken, Name, Image, Revision, Type string
+			} `json:"objects"`
+		}
+		if json.Unmarshal(mustReadFixture(filepath.Join(root, "runtime", "managed", "inventory.json")), &inventory) != nil {
+			return false
+		}
+		var gateway *struct {
+			Role, AppToken, Name, Image, Revision, Type string
+		}
+		for i := range inventory.Objects {
+			object := &inventory.Objects[i]
+			if object.Role == "payment-gateway" && object.AppToken == container.AppToken {
+				gateway = object
+			}
+		}
+		if gateway == nil || gateway.Type != "gmpay" || gateway.Revision == "" || container.Slot != "live" {
+			return false
+		}
+		token := container.AppToken
+		activeName := "s2h-" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "payment-gateway", token, "live")
+		rollbackName := "s2h-" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "payment-gateway-rollback", token, gateway.Revision)
+		if name != activeName && name != rollbackName {
+			return false
+		}
+		owner := "s2h1:" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "payment-gateway", token, "live")
+		var expectation targetExpectation
+		if json.Unmarshal(mustReadFixture(filepath.Join(os.Getenv("PROVIDER_RUNTIME_TRACE"), "target.expectation.json")), &expectation) != nil {
+			return false
+		}
+		currentImage, currentRevision, currentMember := "", "", false
+		for _, target := range expectation.PaymentGateways {
+			if fixtureToken("payment-gateway", target.ID) == token {
+				currentImage, currentRevision, currentMember = target.Image, expectation.Revision, true
+			}
+		}
+		priorMember := gateway != nil
+		for _, target := range expectation.CurrentPaymentGateways {
+			if fixtureToken("payment-gateway", target.ID) == token && target.Image == gateway.Image {
+				priorMember = true
+			}
+		}
+		if name == activeName {
+			oldTarget := "s2ht1:" + fixtureToken("payment-gateway", token, "live", gateway.Revision, gateway.Image, gateway.Type, "0", "false")
+			currentTarget := "s2ht1:" + fixtureToken("payment-gateway", token, "live", currentRevision, currentImage, gateway.Type, "0", "false")
+			return container.Owner == owner && (priorMember && container.Image == gateway.Image && container.Target == oldTarget || currentMember && container.Image == currentImage && container.Target == currentTarget)
+		}
+		return priorMember && container.Image == gateway.Image && container.Owner == owner && container.Target == "s2ht1:"+fixtureToken("payment-gateway", token, "live", gateway.Revision, gateway.Image, gateway.Type, "0", "false")
 	}
 	var inventory struct {
 		Objects []struct {
-			Role, AppToken, Name, Image, Revision, Active string
+			Role, AppToken, Name, Image, Revision, Active, Type string
+			Port                                                int
+			Persistence                                         bool
 		} `json:"objects"`
 	}
 	if json.Unmarshal(mustReadFixture(filepath.Join(root, "runtime", "managed", "inventory.json")), &inventory) != nil {
 		return false
 	}
-	var object *struct{ Role, AppToken, Name, Image, Revision, Active string }
+	objectIndex := -1
 	for i := range inventory.Objects {
-		if inventory.Objects[i].Role == "app" && inventory.Objects[i].AppToken == container.AppToken {
-			object = &inventory.Objects[i]
+		if inventory.Objects[i].Role == container.Role && inventory.Objects[i].AppToken == container.AppToken {
+			objectIndex = i
 		}
 	}
-	if object == nil || object.Active != container.Slot || object.Image != container.Image || object.Revision == "" {
+	if objectIndex < 0 || inventory.Objects[objectIndex].Image != container.Image || inventory.Objects[objectIndex].Revision == "" || container.Role == "app" && inventory.Objects[objectIndex].Active != container.Slot || container.Role == "payment-gateway" && container.Slot != "live" {
 		return false
 	}
 	var expectation targetExpectation
@@ -1035,12 +1250,25 @@ func validDestructiveContainer(root, name string, container dockerContainer) boo
 			member = true
 		}
 	}
+	for _, gateway := range expectation.PaymentGateways {
+		if fixtureToken("payment-gateway", gateway.ID) == container.AppToken && gateway.Image == container.Image {
+			member = true
+		}
+	}
 	if !member {
 		return false
 	}
-	wantName := "s2h-" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "app", container.AppToken, container.Slot)
-	wantOwner := "s2h1:" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "app", container.AppToken, container.Slot)
-	wantTarget := "s2ht1:" + fixtureToken("app", container.AppToken, container.Slot, object.Revision, object.Image, "", "0", "false")
+	role := container.Role
+	wantName := "s2h-" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, role, container.AppToken, container.Slot)
+	if role == "payment-gateway" {
+		rollbackName := "s2h-" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "payment-gateway-rollback", container.AppToken, container.Slot)
+		if name == rollbackName {
+			wantName = rollbackName
+		}
+	}
+	wantOwner := "s2h1:" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, role, container.AppToken, container.Slot)
+	object := inventory.Objects[objectIndex]
+	wantTarget := "s2ht1:" + fixtureToken(role, container.AppToken, container.Slot, object.Revision, object.Image, object.Type, strconv.Itoa(object.Port), strconv.FormatBool(object.Persistence))
 	return name == wantName && object.Name == wantName && container.Owner == wantOwner && container.Target == wantTarget
 }
 func (s *dockerTrace) effect(action, name, appToken, slot, owner, target string) {
@@ -1108,6 +1336,11 @@ func fixtureToken(values ...string) string {
 		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 func expectedRevision(t *testing.T) string { t.Helper(); return expectedRevisionNoTest() }
 func expectedRevisionForRelease(t *testing.T, release string) string {
@@ -1673,6 +1906,9 @@ func writeTargetExpectation(t *testing.T, h *providerProcess, inputs property.Ma
 	for _, app := range target.Apps {
 		expectation.Apps = append(expectation.Apps, expectedTargetApp{ID: app.ID, Image: app.Image, Hostname: app.Hostname, ReadinessPath: app.ReadinessPath, DrainSeconds: frozenDrainSeconds(t, app.DrainTimeout), DataLinks: append([]hostcontract.DataLink(nil), app.DataLinks...)})
 	}
+	for _, gateway := range target.PaymentGateways {
+		expectation.PaymentGateways = append(expectation.PaymentGateways, expectedTargetGateway{ID: gateway.ID, Type: gateway.Type, Image: gateway.Image, Hostname: gateway.Hostname})
+	}
 	if len(current) != 0 && current[0] != nil {
 		old := unmarshalProperties(t, current[0])
 		if value, ok := old.GetOk("target"); ok {
@@ -1682,6 +1918,9 @@ func writeTargetExpectation(t *testing.T, h *providerProcess, inputs property.Ma
 			}
 			for _, app := range target.Apps {
 				expectation.CurrentApps = append(expectation.CurrentApps, expectedTargetApp{ID: app.ID, Image: app.Image, Hostname: app.Hostname, ReadinessPath: app.ReadinessPath, DrainSeconds: frozenDrainSeconds(t, app.DrainTimeout), DataLinks: append([]hostcontract.DataLink(nil), app.DataLinks...)})
+			}
+			for _, gateway := range target.PaymentGateways {
+				expectation.CurrentPaymentGateways = append(expectation.CurrentPaymentGateways, expectedTargetGateway{ID: gateway.ID, Type: gateway.Type, Image: gateway.Image, Hostname: gateway.Hostname})
 			}
 		}
 	}

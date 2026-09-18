@@ -39,6 +39,18 @@ func TestProviderSchemaHasOnlyHostAndSecretRevisionKey(t *testing.T) {
 	if target := schema.Types["sub2api-host:index:Target"]; target.Properties["apps"].Items.Ref != "#/types/sub2api-host:index:AppTarget" || target.Properties["reverseProxy"].Ref != "#/types/sub2api-host:index:ReverseProxyTarget" {
 		t.Fatalf("Target shape = %#v", target)
 	}
+	if target := schema.Types["sub2api-host:index:Target"]; target.Properties["paymentGateways"].Items.Ref != "#/types/sub2api-host:index:PaymentGatewayTarget" {
+		t.Fatalf("Target payment gateway shape = %#v", target)
+	}
+	if gateway := schema.Types["sub2api-host:index:PaymentGatewayTarget"]; gateway.Properties["id"].Type != "string" || gateway.Properties["type"].Type != "string" || gateway.Properties["image"].Type != "string" || gateway.Properties["hostname"].Type != "string" || len(gateway.Properties) != 4 || len(gateway.Required) != 4 {
+		t.Fatalf("PaymentGatewayTarget shape = %#v", gateway)
+	}
+	if observation := schema.Types["sub2api-host:index:StableObservation"]; observation.Properties["paymentGateways"].Items.Ref != "#/types/sub2api-host:index:PaymentGatewayObservation" {
+		t.Fatalf("StableObservation payment gateway shape = %#v", observation)
+	}
+	if gateway := schema.Types["sub2api-host:index:PaymentGatewayObservation"]; gateway.Properties["id"].Type != "string" || gateway.Properties["activeImage"].Type != "string" || gateway.Properties["ready"].Type != "boolean" || len(gateway.Properties) != 3 || len(gateway.Required) != 3 {
+		t.Fatalf("PaymentGatewayObservation shape = %#v", gateway)
+	}
 	if app := schema.Types["sub2api-host:index:AppTarget"]; app.Properties["initialBootstrap"].Type != "boolean" || app.Properties["initialAdminEmail"].Type != "string" || !contains(app.Required, "initialAdminEmail") || app.Properties["dataLinks"].Items.Ref != "#/types/sub2api-host:index:DataLink" {
 		t.Fatalf("App shape = %#v", app)
 	}
@@ -63,10 +75,71 @@ func TestProviderSchemaHasOnlyHostAndSecretRevisionKey(t *testing.T) {
 	if localSecret := schema.Types["sub2api-host:index:LocalDataServiceSecrets"]; localSecret.Properties["clientPasswords"].AdditionalProperties.Type != "string" {
 		t.Fatalf("local data secret shape = %#v", localSecret)
 	}
+	if secrets := schema.Types["sub2api-host:index:Secrets"]; secrets.Properties["paymentGateways"].Type != "" {
+		t.Fatalf("payment gateway secrets leaked into schema: %#v", secrets.Properties["paymentGateways"])
+	}
 	for _, forbidden := range []string{"path", "compose", "slot", "phase", "approval"} {
 		if _, ok := schema.Resources["sub2api-host:index:Host"].InputProperties[forbidden]; ok {
 			t.Fatalf("forbidden property %q", forbidden)
 		}
+	}
+}
+
+func TestCheckValidatesPaymentGatewayShapeBeforeMutation(t *testing.T) {
+	provider := New("1.0.0")
+	valid := hostInputs(property.New("edge")).Set("target", object(
+		"releaseArtifact", property.New("release"),
+		"paymentGateways", property.New(property.NewArray([]property.Value{object("id", property.New("pay-primary"), "type", property.New("gmpay"), "image", property.New("gmwallet/epusdt:v2.0.0"), "hostname", property.New("pay.example"))})),
+	))
+	response, err := provider.Check(t.Context(), p.CheckRequest{Inputs: valid})
+	if err != nil || len(response.Failures) != 0 {
+		t.Fatalf("valid payment gateway Check = %#v, %v", response, err)
+	}
+	for name, mutate := range map[string]func(property.Map) property.Map{
+		"unknown gateway field": func(inputs property.Map) property.Map {
+			return inputs.Set("target", object("releaseArtifact", property.New("release"), "paymentGateways", property.New(property.NewArray([]property.Value{object("id", property.New("pay-primary"), "type", property.New("gmpay"), "image", property.New("gmwallet/epusdt:v2.0.0"), "hostname", property.New("pay.example"), "port", property.New(8000.0))}))))
+		},
+		"wrong type": func(inputs property.Map) property.Map {
+			return inputs.Set("target", object("releaseArtifact", property.New("release"), "paymentGateways", property.New(property.NewArray([]property.Value{object("id", property.New("pay-primary"), "type", property.New("stripe"), "image", property.New("gmwallet/epusdt:v2.0.0"), "hostname", property.New("pay.example"))}))))
+		},
+		"invalid image": func(inputs property.Map) property.Map {
+			return inputs.Set("target", object("releaseArtifact", property.New("release"), "paymentGateways", property.New(property.NewArray([]property.Value{object("id", property.New("pay-primary"), "type", property.New("gmpay"), "image", property.New("gmwallet/epusdt:latest"), "hostname", property.New("pay.example"))}))))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response, err := provider.Check(t.Context(), p.CheckRequest{Inputs: mutate(valid)})
+			if err != nil || len(response.Failures) == 0 {
+				t.Fatalf("invalid payment gateway %s accepted: %#v, %v", name, response, err)
+			}
+		})
+	}
+}
+
+func TestCheckValidatesKnownPaymentGatewaysAlongsideComputedSiblings(t *testing.T) {
+	provider := New("1.0.0")
+	gateway := func(id, image, hostname string) property.Value {
+		return object("id", property.New(id), "type", property.New("gmpay"), "image", property.New(image), "hostname", property.New(hostname))
+	}
+	target := func(gateways property.Value) property.Value {
+		return object("releaseArtifact", property.New("release"), "apps", property.New(property.Computed), "paymentGateways", gateways)
+	}
+	for name, value := range map[string]property.Value{
+		"invalid id":          property.New(property.NewArray([]property.Value{gateway("Pay_primary", "gmwallet/epusdt:v2.0.0", "pay.example")})),
+		"latest image":        property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:latest", "pay.example")})),
+		"malformed image":     property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:v2", "pay.example")})),
+		"uppercase hostname":  property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:v2.0.0", "Pay.example")})),
+		"duplicate known ids": property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:v2.0.0", "pay.example"), gateway("pay-primary", "gmwallet/epusdt:v2.0.1", "other.example")})),
+	} {
+		t.Run(name, func(t *testing.T) {
+			response, err := provider.Check(t.Context(), p.CheckRequest{Inputs: hostInputs(property.New("edge")).Set("target", target(value))})
+			if err != nil || len(response.Failures) == 0 {
+				t.Fatalf("known invalid gateway %s was accepted with a computed sibling: %#v, %v", name, response, err)
+			}
+		})
+	}
+	valid, err := provider.Check(t.Context(), p.CheckRequest{Inputs: hostInputs(property.New("edge")).Set("target", target(property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:v2.0.0", "pay.example")}))))})
+	if err != nil || len(valid.Failures) != 0 {
+		t.Fatalf("valid known gateway was rejected with a computed sibling: %#v, %v", valid, err)
 	}
 }
 

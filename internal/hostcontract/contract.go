@@ -9,6 +9,7 @@ import (
 	"net"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -61,6 +62,12 @@ type AppTarget struct {
 	RuntimeSettings   map[string]string `json:"runtimeSettings,omitempty"`
 	DataLinks         []DataLink        `json:"dataLinks,omitempty"`
 }
+type PaymentGatewayTarget struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Image    string `json:"image"`
+	Hostname string `json:"hostname"`
+}
 type LocalDataServiceTarget struct {
 	ID          string             `json:"id"`
 	Type        string             `json:"type"`
@@ -97,6 +104,7 @@ type TunnelConnectorTarget struct {
 type Target struct {
 	ReleaseArtifact string                   `json:"releaseArtifact"`
 	Apps            []AppTarget              `json:"apps,omitempty"`
+	PaymentGateways []PaymentGatewayTarget   `json:"paymentGateways,omitempty"`
 	DataServices    []LocalDataServiceTarget `json:"dataServices,omitempty"`
 	ReverseProxy    *ReverseProxyTarget      `json:"reverseProxy,omitempty"`
 	MicroSocks      *MicroSocksTarget        `json:"microSocks,omitempty"`
@@ -144,19 +152,25 @@ type AppObservation struct {
 	ActiveImage string `json:"activeImage"`
 	Ready       bool   `json:"ready"`
 }
+type PaymentGatewayObservation struct {
+	ID          string `json:"id"`
+	ActiveImage string `json:"activeImage"`
+	Ready       bool   `json:"ready"`
+}
 type DataObservation struct {
 	Identity DataIdentity `json:"identity"`
 	Ready    bool         `json:"ready"`
 }
 type StableObservation struct {
-	Machine         MachineIdentity   `json:"machine"`
-	Ownership       OwnershipIdentity `json:"ownership"`
-	HostRelease     string            `json:"hostRelease"`
-	AppliedRevision string            `json:"appliedRevision"`
-	Drifted         bool              `json:"drifted,omitempty"`
-	Ready           bool              `json:"ready"`
-	Apps            []AppObservation  `json:"apps,omitempty"`
-	Data            []DataObservation `json:"data,omitempty"`
+	Machine         MachineIdentity             `json:"machine"`
+	Ownership       OwnershipIdentity           `json:"ownership"`
+	HostRelease     string                      `json:"hostRelease"`
+	AppliedRevision string                      `json:"appliedRevision"`
+	Drifted         bool                        `json:"drifted,omitempty"`
+	Ready           bool                        `json:"ready"`
+	Apps            []AppObservation            `json:"apps,omitempty"`
+	PaymentGateways []PaymentGatewayObservation `json:"paymentGateways,omitempty"`
+	Data            []DataObservation           `json:"data,omitempty"`
 }
 
 type OperationKey struct {
@@ -312,6 +326,8 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 		}
 		sort.Slice(target.Apps[i].DataLinks, func(a, b int) bool { return target.Apps[i].DataLinks[a].Name < target.Apps[i].DataLinks[b].Name })
 	}
+	target.PaymentGateways = append([]PaymentGatewayTarget(nil), target.PaymentGateways...)
+	sort.Slice(target.PaymentGateways, func(i, j int) bool { return target.PaymentGateways[i].ID < target.PaymentGateways[j].ID })
 	if target.MicroSocks != nil {
 		microSocks := *target.MicroSocks
 		target.MicroSocks = &microSocks
@@ -354,6 +370,9 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 	sort.Slice(target.Connectors, func(i, j int) bool { return target.Connectors[i].ID < target.Connectors[j].ID })
 	if len(target.Apps) == 0 {
 		target.Apps = nil
+	}
+	if len(target.PaymentGateways) == 0 {
+		target.PaymentGateways = nil
 	}
 	if len(target.DataServices) == 0 {
 		target.DataServices = nil
@@ -449,6 +468,7 @@ func validate(target Target, secrets Secrets) error {
 		return fmt.Errorf("release")
 	}
 	apps := map[string]bool{}
+	gateways := map[string]bool{}
 	services := map[string]bool{}
 	connectors := map[string]bool{}
 	for _, a := range target.Apps {
@@ -463,6 +483,12 @@ func validate(target Target, secrets Secrets) error {
 			}
 			links[l.Name] = true
 		}
+	}
+	for _, gateway := range target.PaymentGateways {
+		if !validPaymentGatewayTarget(gateway) || gateways[gateway.ID] {
+			return fmt.Errorf("payment gateway")
+		}
+		gateways[gateway.ID] = true
 	}
 	for _, s := range target.DataServices {
 		if s.ID == "" || services[s.ID] || (s.Type != "postgres" && s.Type != "redis") || s.Port < 1 || s.Port > 65535 {
@@ -597,6 +623,119 @@ var postgresIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 func validPostgresIdentifier(value string) bool {
 	return postgresIdentifierPattern.MatchString(value) && !strings.HasPrefix(value, "s2h_")
 }
+
+var (
+	paymentGatewayIDPattern      = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+	paymentGatewayVersionPattern = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
+	paymentGatewayDigestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	paymentGatewayRepoPattern    = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
+)
+
+func validPaymentGatewayTarget(gateway PaymentGatewayTarget) bool {
+	return validPaymentGatewayID(gateway.ID) && gateway.Type == "gmpay" && validPaymentGatewayImage(gateway.Image) && validHostname(gateway.Hostname)
+}
+
+func validPaymentGatewayID(value string) bool {
+	return paymentGatewayIDPattern.MatchString(value)
+}
+
+func validPaymentGatewayImage(image string) bool {
+	if !validSafeString(image) || strings.Count(image, "@") > 1 {
+		return false
+	}
+	name, digest := image, ""
+	if at := strings.IndexByte(image, '@'); at >= 0 {
+		name, digest = image[:at], image[at+1:]
+		if !paymentGatewayDigestPattern.MatchString(digest) {
+			return false
+		}
+	}
+	lastSlash := strings.LastIndexByte(name, '/')
+	lastColon := strings.LastIndexByte(name, ':')
+	tag := ""
+	if lastColon > lastSlash {
+		tag = name[lastColon+1:]
+		name = name[:lastColon]
+		if !paymentGatewayVersionPattern.MatchString(tag) {
+			return false
+		}
+	} else if digest == "" {
+		return false
+	}
+	return validPaymentGatewayRepository(name)
+}
+
+func validPaymentGatewayRepository(value string) bool {
+	parts := strings.Split(value, "/")
+	start := 0
+	if strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":") || parts[0] == "localhost" {
+		if !validPaymentGatewayRegistry(parts[0]) {
+			return false
+		}
+		start = 1
+	}
+	if start == len(parts) {
+		return false
+	}
+	for _, part := range parts[start:] {
+		if !paymentGatewayRepoPattern.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func validPaymentGatewayRegistry(value string) bool {
+	host, port := value, ""
+	if index := strings.LastIndexByte(value, ':'); index >= 0 {
+		host, port = value[:index], value[index+1:]
+		if port == "" {
+			return false
+		}
+		for _, digit := range port {
+			if digit < '0' || digit > '9' {
+				return false
+			}
+		}
+		if len(port) > 5 {
+			return false
+		}
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return false
+		}
+	}
+	return host != "" && (validHostname(host) || net.ParseIP(host) != nil)
+}
+
+func validHostname(value string) bool {
+	if !validSafeString(value) || len(value) > 253 || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validSafeString(value string) bool {
+	if value == "" || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f || unicode.IsSpace(character) {
+			return false
+		}
+	}
+	return true
+}
 func validPostgresDatabase(value string) bool {
 	return postgresIdentifierPattern.MatchString(value) && value != "postgres" && value != "template0" && value != "template1"
 }
@@ -658,6 +797,16 @@ func (o StableObservation) Validate() error {
 			return fmt.Errorf("observation")
 		}
 	}
+	gateways := map[string]bool{}
+	for i, gateway := range o.PaymentGateways {
+		if !validPaymentGatewayID(gateway.ID) || !validPaymentGatewayImage(gateway.ActiveImage) || gateways[gateway.ID] {
+			return fmt.Errorf("observation")
+		}
+		if i > 0 && o.PaymentGateways[i-1].ID >= gateway.ID {
+			return fmt.Errorf("observation")
+		}
+		gateways[gateway.ID] = true
+	}
 	for _, d := range o.Data {
 		if validateData(d.Identity) != nil {
 			return fmt.Errorf("observation")
@@ -683,6 +832,11 @@ func validTargetStrings(v Target) bool {
 			if !valid(l.Name) || !validDataStrings(l.Identity) {
 				return false
 			}
+		}
+	}
+	for _, gateway := range v.PaymentGateways {
+		if !valid(gateway.ID) || !valid(gateway.Type) || !valid(gateway.Image) || !valid(gateway.Hostname) {
+			return false
 		}
 	}
 	for _, s := range v.DataServices {

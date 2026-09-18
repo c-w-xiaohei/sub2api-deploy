@@ -21,21 +21,25 @@ import (
 )
 
 var (
-	idPattern     = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
-	serverPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$`)
-	hostPattern   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	imagePattern  = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
-	envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	idPattern              = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+	serverPattern          = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$`)
+	hostPattern            = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	imagePattern           = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+	gatewayVersionPattern  = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
+	digestPattern          = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	dockerComponentPattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
+	envKeyPattern          = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
 type Config struct {
-	Version      int                 `yaml:"version"`
-	Cloudflare   *CloudflareConfig   `yaml:"cloudflare"`
-	ReverseProxy ReverseProxyConfig  `yaml:"reverseProxy"`
-	Servers      map[string]Server   `yaml:"servers"`
-	Postgres     map[string]Postgres `yaml:"postgres"`
-	Redis        map[string]Redis    `yaml:"redis"`
-	Apps         map[string]App      `yaml:"apps"`
+	Version         int                 `yaml:"version"`
+	Cloudflare      *CloudflareConfig   `yaml:"cloudflare"`
+	ReverseProxy    ReverseProxyConfig  `yaml:"reverseProxy"`
+	Servers         map[string]Server   `yaml:"servers"`
+	Postgres        map[string]Postgres `yaml:"postgres"`
+	Redis           map[string]Redis    `yaml:"redis"`
+	Apps            map[string]App      `yaml:"apps"`
+	PaymentGateways PaymentGateways     `yaml:"paymentGateways"`
 }
 
 type CloudflareConfig struct {
@@ -106,6 +110,22 @@ type App struct {
 	OutboundProxy     *OutboundProxy    `yaml:"outboundProxy"`
 	serversSet        bool
 }
+type PaymentGateway struct {
+	Type         string                     `yaml:"type"`
+	Server       string                     `yaml:"server"`
+	Hostname     string                     `yaml:"hostname"`
+	Image        string                     `yaml:"image"`
+	PublicAccess PaymentGatewayPublicAccess `yaml:"publicAccess"`
+}
+type PaymentGatewayPublicAccess struct {
+	Type       string                    `yaml:"type"`
+	Cloudflare *PaymentGatewayCloudflare `yaml:"cloudflare"`
+}
+type PaymentGatewayCloudflare struct {
+	Mode      string `yaml:"mode"`
+	ConnectBy string `yaml:"connectBy"`
+}
+type PaymentGateways map[string]PaymentGateway
 type AppPostgres struct {
 	Name     string `yaml:"name"`
 	Database string `yaml:"database"`
@@ -298,6 +318,77 @@ func (a *App) UnmarshalYAML(node *yaml.Node) error {
 	if hasMappingField(node, "outboundProxy") && a.OutboundProxy == nil {
 		return fmt.Errorf("outboundProxy must not be null")
 	}
+	return nil
+}
+
+func (p *PaymentGateway) UnmarshalYAML(node *yaml.Node) error {
+	if err := knownMappingFields(node, map[string]bool{"type": true, "server": true, "hostname": true, "image": true, "publicAccess": true}); err != nil {
+		return err
+	}
+	for index := 0; index < len(node.Content); index += 2 {
+		field, value := node.Content[index], node.Content[index+1]
+		if value.Tag == "!!null" {
+			return fmt.Errorf("payment gateway field %q must not be null", field.Value)
+		}
+	}
+	type plain PaymentGateway
+	var value plain
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	*p = PaymentGateway(value)
+	return nil
+}
+
+func (p *PaymentGateways) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("paymentGateways must be a YAML object")
+	}
+	type plain PaymentGateways
+	var value plain
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	*p = PaymentGateways(value)
+	return nil
+}
+
+func (p *PaymentGatewayPublicAccess) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("payment gateway publicAccess must be a YAML object")
+	}
+	if err := knownMappingFields(node, map[string]bool{"type": true, "cloudflare": true}); err != nil {
+		return err
+	}
+	for index := 0; index < len(node.Content); index += 2 {
+		if node.Content[index+1].Tag == "!!null" {
+			return fmt.Errorf("payment gateway publicAccess field %q must not be null", node.Content[index].Value)
+		}
+	}
+	type plain PaymentGatewayPublicAccess
+	var value plain
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	*p = PaymentGatewayPublicAccess(value)
+	return nil
+}
+
+func (c *PaymentGatewayCloudflare) UnmarshalYAML(node *yaml.Node) error {
+	if err := knownMappingFields(node, map[string]bool{"mode": true, "connectBy": true}); err != nil {
+		return err
+	}
+	for index := 0; index < len(node.Content); index += 2 {
+		if node.Content[index+1].Tag == "!!null" {
+			return fmt.Errorf("payment gateway cloudflare field %q must not be null", node.Content[index].Value)
+		}
+	}
+	type plain PaymentGatewayCloudflare
+	var value plain
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	*c = PaymentGatewayCloudflare(value)
 	return nil
 }
 
@@ -610,20 +701,40 @@ func Validate(config Config, secrets Secrets) (ValidatedConfig, error) {
 		return ValidatedConfig{}, err
 	}
 	cloudflareUsed := false
+	hostnames := make(map[string]string, len(config.Apps)+len(config.PaymentGateways))
 	for appID, app := range config.Apps {
 		if err := validateApp(appID, app, config); err != nil {
 			return ValidatedConfig{}, err
 		}
+		if other, exists := hostnames[app.Hostname]; exists {
+			return ValidatedConfig{}, fmt.Errorf("hostname %q is used by %s and apps.%s", app.Hostname, other, appID)
+		}
+		hostnames[app.Hostname] = "apps." + appID
 		if app.PublicAccess.Type == "cloudflare" {
+			cloudflareUsed = true
+		}
+	}
+	for gatewayID, gateway := range config.PaymentGateways {
+		if !idPattern.MatchString(gatewayID) {
+			return ValidatedConfig{}, fmt.Errorf("payment gateway ID %q is invalid", gatewayID)
+		}
+		if err := validatePaymentGateway(gatewayID, gateway, config); err != nil {
+			return ValidatedConfig{}, err
+		}
+		if other, exists := hostnames[gateway.Hostname]; exists {
+			return ValidatedConfig{}, fmt.Errorf("hostname %q is used by %s and paymentGateways.%s", gateway.Hostname, other, gatewayID)
+		}
+		hostnames[gateway.Hostname] = "paymentGateways." + gatewayID
+		if gateway.PublicAccess.Type == "cloudflare" {
 			cloudflareUsed = true
 		}
 	}
 	if cloudflareUsed {
 		if config.Cloudflare == nil || config.Cloudflare.ZoneID == "" {
-			return ValidatedConfig{}, fmt.Errorf("cloudflare.zoneId is required when an App uses Cloudflare")
+			return ValidatedConfig{}, fmt.Errorf("cloudflare.zoneId is required when an App or payment gateway uses Cloudflare")
 		}
 		if secrets.Cloudflare == nil || secrets.Cloudflare.APIToken == "" {
-			return ValidatedConfig{}, fmt.Errorf("cloudflare.apiToken is required when an App uses Cloudflare")
+			return ValidatedConfig{}, fmt.Errorf("cloudflare.apiToken is required when an App or payment gateway uses Cloudflare")
 		}
 	}
 	if !cloudflareUsed && (config.Cloudflare != nil || secrets.Cloudflare != nil) {
@@ -925,6 +1036,106 @@ func validateApp(id string, app App, config Config) error {
 		}
 	}
 	return validateCrossServerAddresses(id, app, config)
+}
+
+func validatePaymentGateway(id string, gateway PaymentGateway, config Config) error {
+	name := "paymentGateways." + id
+	if gateway.Type != "gmpay" {
+		return fmt.Errorf("%s.type must be gmpay", name)
+	}
+	if gateway.Server == "" {
+		return fmt.Errorf("%s.server is required", name)
+	}
+	server, exists := config.Servers[gateway.Server]
+	if !exists {
+		return fmt.Errorf("%s.server references missing server %q", name, gateway.Server)
+	}
+	if !validHostname(gateway.Hostname) {
+		return fmt.Errorf("%s.hostname must be a lowercase DNS hostname", name)
+	}
+	if !validPaymentGatewayImage(gateway.Image) {
+		return fmt.Errorf("%s.image must be an explicit version tag or immutable sha256 digest", name)
+	}
+	access := gateway.PublicAccess
+	if access.Type != "cloudflare" || access.Cloudflare == nil {
+		return fmt.Errorf("%s.publicAccess requires Cloudflare settings", name)
+	}
+	if access.Cloudflare.Mode != "dns" || access.Cloudflare.ConnectBy != "publicAddress" {
+		return fmt.Errorf("%s.publicAccess.cloudflare requires dns and publicAddress", name)
+	}
+	if !hasPublicAddress(server) {
+		return fmt.Errorf("%s.publicAccess server %q lacks a public address", name, gateway.Server)
+	}
+	return nil
+}
+
+func validPaymentGatewayImage(image string) bool {
+	if strings.IndexFunc(image, unicode.IsSpace) >= 0 || strings.Count(image, "@") > 1 {
+		return false
+	}
+	name, digest := image, ""
+	if at := strings.IndexByte(image, '@'); at >= 0 {
+		name, digest = image[:at], image[at+1:]
+		if !digestPattern.MatchString(digest) {
+			return false
+		}
+	}
+	lastSlash := strings.LastIndexByte(name, '/')
+	lastColon := strings.LastIndexByte(name, ':')
+	tag := ""
+	if lastColon > lastSlash {
+		tag = name[lastColon+1:]
+		name = name[:lastColon]
+		if !gatewayVersionPattern.MatchString(tag) {
+			return false
+		}
+	} else if digest == "" {
+		return false
+	}
+	return name != "" && validDockerRepository(name)
+}
+
+func validDockerRepository(value string) bool {
+	parts := strings.Split(value, "/")
+	start := 0
+	if strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":") || parts[0] == "localhost" {
+		if !validDockerRegistry(parts[0]) {
+			return false
+		}
+		start = 1
+	}
+	if start == len(parts) {
+		return false
+	}
+	for _, part := range parts[start:] {
+		if !dockerComponentPattern.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func validDockerRegistry(value string) bool {
+	host, port := value, ""
+	if index := strings.LastIndexByte(value, ':'); index >= 0 {
+		host, port = value[:index], value[index+1:]
+		if len(port) == 0 || len(port) > 5 {
+			return false
+		}
+		for index := 0; index < len(port); index++ {
+			if port[index] < '0' || port[index] > '9' {
+				return false
+			}
+		}
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return false
+		}
+	}
+	if host == "" || (!validHostname(host) && net.ParseIP(host) == nil) {
+		return false
+	}
+	return true
 }
 
 func validateCloudflareAccess(name string, access *CloudflareAccess) error {

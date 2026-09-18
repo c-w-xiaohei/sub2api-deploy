@@ -54,6 +54,8 @@ const (
 	localDataReadinessInterval = time.Second
 	appReadinessBudget         = time.Minute
 	appReadinessInterval       = time.Second
+	gatewayReadinessBudget     = time.Minute
+	gatewayReadinessInterval   = time.Second
 )
 
 var routeWriteHook func() error
@@ -62,6 +64,7 @@ var artifactRemoveHook func(string) error
 var artifactRemoveSyncHook func(int) error
 var routeRemoveHook func(string) error
 var newAppReadinessContext = context.WithTimeout
+var newGatewayReadinessContext = context.WithTimeout
 
 type commandError struct{ ExitCode int }
 
@@ -237,6 +240,33 @@ func findLocalDataMetadata(i inventory, token string) managedObject {
 	return managedObject{}
 }
 
+func findPaymentGateway(i inventory, token string) managedObject {
+	for _, o := range i.Objects {
+		if o.Role == "payment-gateway" && o.AppToken == token {
+			return o
+		}
+	}
+	return managedObject{}
+}
+
+func findPaymentGatewayMetadata(i inventory, token string) managedObject {
+	for _, o := range i.Objects {
+		if o.Role == "payment-gateway-meta" && o.AppToken == token {
+			return o
+		}
+	}
+	return managedObject{}
+}
+
+func paymentGatewayToken(id string) string { return token("payment-gateway", id) }
+func paymentGatewayDataToken(gateway string) string {
+	return token("payment-gateway-data", gateway)
+}
+func paymentGatewayPathToken(gateway string) string {
+	return token("payment-gateway-path", gateway)
+}
+func paymentGatewayAlias(gateway string) string { return "gmpay-" + gateway }
+
 func (r *Runtime) Handle(ctx context.Context, q hostprotocol.Request) (hostprotocol.Result, error) {
 	switch q.Action {
 	case hostcontract.ActionInspect:
@@ -390,6 +420,11 @@ func validateReconcileRequest(q hostprotocol.Request) error {
 			return errors.New("app")
 		}
 	}
+	for _, gateway := range q.Target.PaymentGateways {
+		if gateway.ID == "" || gateway.Type != "gmpay" || gateway.Image == "" || !validHostname(gateway.Hostname) {
+			return errors.New("payment gateway")
+		}
+	}
 	for _, target := range q.Target.DataServices {
 		secret, ok := (*q.Secrets).LocalDataServices[target.ID]
 		if !validClientAppID(target.ID) || !ok || !validLocalPassword(secret.AdminPassword) || !validLocalDataCredentials(target, secret) {
@@ -528,7 +563,293 @@ func (r *Runtime) preflightTargets(ctx context.Context, state State, inv invento
 			return err
 		}
 	}
+	for _, target := range q.Target.PaymentGateways {
+		token := paymentGatewayToken(target.ID)
+		candidate := paymentGatewayObject(state, target, q.TargetRevision)
+		old := findPaymentGateway(inv, token)
+		if old.Name == "" {
+			old = findPaymentGatewayMetadata(inv, token)
+		}
+		if err := r.admitGatewayRoute(inv, old, candidate, pending); err != nil {
+			return err
+		}
+		if old.Role == "" {
+			exists, err := r.candidateExists(ctx, inv, candidate)
+			if err != nil {
+				return err
+			}
+			if exists {
+				if !pending {
+					return conflict()
+				}
+				if err := r.inspectGatewayContract(ctx, inv, candidate); err != nil {
+					return err
+				}
+			}
+		}
+		if old.Role == "payment-gateway" {
+			if err := r.inspectGatewayForRequest(ctx, inv, old, candidate, pending); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+func (r *Runtime) inspectGatewayForRequest(ctx context.Context, inv inventory, old, candidate managedObject, pending bool) error {
+	present, err := r.ownedPresent(ctx, inv, old)
+	if err == nil && present {
+		if err = r.inspectGatewayContract(ctx, inv, old); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err == nil && !pending {
+		return nil
+	}
+	if err != nil && (!isConflict(err) || !pending) {
+		return err
+	}
+	candidatePresent, candidateErr := r.ownedPresent(ctx, inv, candidate)
+	if candidateErr != nil {
+		return candidateErr
+	}
+	if candidatePresent {
+		return r.inspectGatewayContract(ctx, inv, candidate)
+	}
+	return nil
+}
+
+type gatewayDockerInspect struct {
+	Config struct {
+		Image string   `json:"Image"`
+		Env   []string `json:"Env"`
+	} `json:"Config"`
+	HostConfig struct {
+		RestartPolicy struct {
+			Name string `json:"Name"`
+		} `json:"RestartPolicy"`
+		Binds           []string                               `json:"Binds"`
+		PortBindings    map[string][]gatewayInspectPortBinding `json:"PortBindings"`
+		PublishAllPorts bool                                   `json:"PublishAllPorts"`
+	} `json:"HostConfig"`
+	NetworkSettings struct {
+		Networks map[string]struct {
+			Aliases []string `json:"Aliases"`
+		} `json:"Networks"`
+	} `json:"NetworkSettings"`
+	State struct {
+		Running bool `json:"Running"`
+	} `json:"State"`
+}
+
+type gatewayInspectPortBinding struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}
+
+func (r *Runtime) inspectGatewayContract(ctx context.Context, inv inventory, o managedObject) error {
+	out, err := r.runner.Run(ctx, []string{"container", "inspect", "--format", `{{json .}}`, o.Name}, nil)
+	if err != nil {
+		return recovery()
+	}
+	var document gatewayDockerInspect
+	if decodeGatewayDockerInspect(out, &document) != nil {
+		return recovery()
+	}
+	if document.Config.Image != o.Image || document.HostConfig.RestartPolicy.Name != "unless-stopped" || document.HostConfig.PublishAllPorts || len(document.HostConfig.PortBindings) != 0 || len(document.HostConfig.Binds) != 1 || !writableGatewayDataBind(document.HostConfig.Binds[0], r.dataPath(o.DataToken)) || !exactGatewayEnv(document.Config.Env) || !exactGatewayNetwork(document.NetworkSettings.Networks, networkName(State{Resource: inv.Resource, Ownership: inv.Ownership}), o.Name, paymentGatewayAlias(o.AppToken)) || !document.State.Running {
+		return conflict()
+	}
+	return nil
+}
+
+func writableGatewayDataBind(bind, source string) bool {
+	if bind == source+":/data" {
+		return true
+	}
+	return bind == source+":/data:rw"
+}
+
+func decodeGatewayDockerInspect(b []byte, out *gatewayDockerInspect) error {
+	if len(b) == 0 || len(b) > maxCommandOutput || duplicateKey(b) {
+		return errors.New("docker inspect json")
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(b, &root); err != nil {
+		return err
+	}
+	for _, field := range []string{"Config", "HostConfig", "NetworkSettings", "State"} {
+		if _, err := gatewayInspectObject(root, field); err != nil {
+			return err
+		}
+	}
+	config, _ := gatewayInspectObject(root, "Config")
+	if err := gatewayInspectFields(config, "Image", "Env"); err != nil {
+		return err
+	}
+	if err := gatewayInspectRequiredString(config, "Image"); err != nil {
+		return err
+	}
+	if err := gatewayInspectRequiredStrings(config, "Env"); err != nil {
+		return err
+	}
+	hostConfig, _ := gatewayInspectObject(root, "HostConfig")
+	if err := gatewayInspectFields(hostConfig, "RestartPolicy", "Binds", "PortBindings", "PublishAllPorts"); err != nil {
+		return err
+	}
+	restartPolicy, err := gatewayInspectObject(hostConfig, "RestartPolicy")
+	if err != nil {
+		return err
+	}
+	if err := gatewayInspectFields(restartPolicy, "Name"); err != nil {
+		return err
+	}
+	if err := gatewayInspectRequiredString(restartPolicy, "Name"); err != nil {
+		return err
+	}
+	if err := gatewayInspectRequiredStrings(hostConfig, "Binds"); err != nil {
+		return err
+	}
+	if err := gatewayInspectRequiredBool(hostConfig, "PublishAllPorts"); err != nil {
+		return err
+	}
+	if raw := hostConfig["PortBindings"]; string(raw) != "null" {
+		var bindings map[string][]gatewayInspectPortBinding
+		if err := json.Unmarshal(raw, &bindings); err != nil || bindings == nil {
+			return errors.New("docker inspect port bindings")
+		}
+	}
+	networkSettings, _ := gatewayInspectObject(root, "NetworkSettings")
+	networks, err := gatewayInspectObject(networkSettings, "Networks")
+	if err != nil {
+		return err
+	}
+	for _, raw := range networks {
+		value, err := gatewayInspectObject(map[string]json.RawMessage{"network": raw}, "network")
+		if err != nil || gatewayInspectRequiredStrings(value, "Aliases") != nil {
+			return errors.New("docker inspect network")
+		}
+	}
+	state, _ := gatewayInspectObject(root, "State")
+	if err := gatewayInspectFields(state, "Running"); err != nil {
+		return err
+	}
+	if err := gatewayInspectRequiredBool(state, "Running"); err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
+}
+
+func gatewayInspectObject(fields map[string]json.RawMessage, name string) (map[string]json.RawMessage, error) {
+	raw, ok := fields[name]
+	if !ok || string(raw) == "null" {
+		return nil, errors.New("docker inspect object")
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, errors.New("docker inspect object")
+	}
+	return object, nil
+}
+
+func gatewayInspectFields(object map[string]json.RawMessage, names ...string) error {
+	for _, name := range names {
+		if _, ok := object[name]; !ok {
+			return errors.New("docker inspect field")
+		}
+	}
+	return nil
+}
+
+func gatewayInspectRequiredString(object map[string]json.RawMessage, name string) error {
+	raw, ok := object[name]
+	if !ok || string(raw) == "null" {
+		return errors.New("docker inspect string")
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return errors.New("docker inspect string")
+	}
+	return nil
+}
+
+func gatewayInspectRequiredStrings(object map[string]json.RawMessage, name string) error {
+	raw, ok := object[name]
+	if !ok || string(raw) == "null" {
+		return errors.New("docker inspect strings")
+	}
+	var value []string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return errors.New("docker inspect strings")
+	}
+	return nil
+}
+
+func gatewayInspectRequiredBool(object map[string]json.RawMessage, name string) error {
+	raw, ok := object[name]
+	if !ok || string(raw) == "null" {
+		return errors.New("docker inspect bool")
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return errors.New("docker inspect bool")
+	}
+	return nil
+}
+
+func exactGatewayEnv(env []string) bool {
+	count := 0
+	for _, value := range env {
+		if strings.HasPrefix(value, "EPUSDT_CONFIG=") {
+			if value != "EPUSDT_CONFIG=/data/.env" {
+				return false
+			}
+			count++
+		}
+	}
+	return count == 1
+}
+
+func exactGatewayNetwork(networks map[string]struct {
+	Aliases []string `json:"Aliases"`
+}, managed, name, alias string) bool {
+	if len(networks) != 1 {
+		return false
+	}
+	value, ok := networks[managed]
+	if !ok || len(value.Aliases) != 2 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, value := range value.Aliases {
+		seen[value] = true
+	}
+	return seen[name] && seen[alias]
+}
+
+func (r *Runtime) admitGatewayRoute(inv inventory, old, candidate managedObject, pending bool) error {
+	route, err := r.readArtifactBytes(routeName(candidate.AppToken))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return recovery()
+	}
+	if old.Role == "payment-gateway" && bytes.Equal(route, mustGatewayRouteBytes(inv, old)) {
+		return nil
+	}
+	if pending && bytes.Equal(route, mustGatewayRouteBytes(inv, candidate)) {
+		return nil
+	}
+	return conflict()
+}
+
+func mustGatewayRouteBytes(inv inventory, object managedObject) []byte {
+	bytes, err := routeBytesFor(inv, object)
+	if err != nil {
+		return nil
+	}
+	return bytes
 }
 func (r *Runtime) validatePersistedRoutes(inv inventory, q hostprotocol.Request) error {
 	state, err := r.readState()
@@ -739,15 +1060,21 @@ func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.Stable
 	observation.Drifted, observation.Ready = false, true
 	apps := map[string]bool{}
 	data := map[hostcontract.DataIdentity]bool{}
+	gateways := map[string]bool{}
 	inventoryApps := map[string]bool{}
 	inventoryData := map[hostcontract.DataIdentity]bool{}
+	inventoryGateways := map[string]bool{}
 	stableApps := map[string]hostcontract.AppObservation{}
 	stableData := map[hostcontract.DataIdentity]bool{}
+	stableGateways := map[string]hostcontract.PaymentGatewayObservation{}
 	for _, app := range observation.Apps {
 		stableApps[appToken(app.ID)] = app
 	}
 	for _, datum := range observation.Data {
 		stableData[datum.Identity] = true
+	}
+	for _, gateway := range observation.PaymentGateways {
+		stableGateways[paymentGatewayToken(gateway.ID)] = gateway
 	}
 	if strings.TrimSpace(string(network)) == "" {
 		observation.Drifted, observation.Ready = true, false
@@ -764,7 +1091,7 @@ func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.Stable
 			observation.Drifted, observation.Ready = true, false
 			continue
 		}
-		if object.Role != "local-data" && object.Revision != state.AppliedRevision {
+		if object.Role != "local-data" && object.Role != "payment-gateway" && object.Revision != state.AppliedRevision {
 			observation.Drifted, observation.Ready = true, false
 		}
 		switch object.Role {
@@ -822,6 +1149,31 @@ func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.Stable
 			if r.proxyReady(ctx, object) != nil {
 				observation.Drifted, observation.Ready = true, false
 			}
+		case "payment-gateway":
+			inventoryGateways[object.AppToken] = true
+			stable, known := stableGateways[object.AppToken]
+			if !known || stable.ActiveImage != object.Image {
+				observation.Drifted, observation.Ready = true, false
+			}
+			route, routeErr := r.readArtifactBytes(routeName(object.AppToken))
+			if routeErr != nil && !errors.Is(routeErr, os.ErrNotExist) {
+				return hostcontract.StableObservation{}, recovery()
+			}
+			if routeErr == nil {
+				var parsed traefikRoute
+				if strictJSON(route, &parsed) != nil || !validRouteDocument(parsed) {
+					return hostcontract.StableObservation{}, recovery()
+				}
+			}
+			contractErr := r.inspectGatewayContract(ctx, inv, object)
+			if contractErr != nil && !isConflict(contractErr) {
+				return hostcontract.StableObservation{}, contractErr
+			}
+			if routeErr != nil || !r.routeMatches(inv, object) || contractErr != nil || r.gatewayReady(ctx, object.Name) != nil {
+				observation.Drifted, observation.Ready = true, false
+			} else {
+				gateways[object.AppToken] = true
+			}
 		}
 	}
 	if err := r.observeNft(ctx, state, inv); err != nil {
@@ -840,7 +1192,13 @@ func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.Stable
 			observation.Ready = false
 		}
 	}
-	if len(inventoryApps) != len(observation.Apps) || len(inventoryData) != len(observation.Data) || len(apps) != len(observation.Apps) || len(data) != len(observation.Data) {
+	for index := range observation.PaymentGateways {
+		observation.PaymentGateways[index].Ready = gateways[paymentGatewayToken(observation.PaymentGateways[index].ID)]
+		if !observation.PaymentGateways[index].Ready {
+			observation.Ready = false
+		}
+	}
+	if len(inventoryApps) != len(observation.Apps) || len(inventoryData) != len(observation.Data) || len(inventoryGateways) != len(observation.PaymentGateways) || len(apps) != len(observation.Apps) || len(data) != len(observation.Data) || len(gateways) != len(observation.PaymentGateways) {
 		observation.Drifted, observation.Ready = true, false
 	}
 	if state.Journal != nil && state.Journal.Status == journalPending {
@@ -891,6 +1249,15 @@ func pendingReplacement(state State, old managedObject, q hostprotocol.Request) 
 	if old.Role == "proxy" && q.Target.ReverseProxy != nil {
 		return proxyObject(state, *q.Target.ReverseProxy, q.TargetRevision), true
 	}
+	if old.Role == "payment-gateway" {
+		for _, target := range q.Target.PaymentGateways {
+			if paymentGatewayToken(target.ID) == old.AppToken {
+				candidate := paymentGatewayObject(state, target, q.TargetRevision)
+				candidate.DataToken, candidate.PathToken = old.DataToken, old.PathToken
+				return candidate, true
+			}
+		}
+	}
 	return managedObject{}, false
 }
 func (r *Runtime) ownedPresent(ctx context.Context, inv inventory, o managedObject) (bool, error) {
@@ -931,6 +1298,12 @@ func (r *Runtime) inspectOwned(ctx context.Context, inv inventory, o managedObje
 	return nil
 }
 func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request) (hostprotocol.Result, hostcontract.StableObservation, error) {
+	if q.Target != nil {
+		target := *q.Target
+		target.PaymentGateways = append([]hostcontract.PaymentGatewayTarget(nil), q.Target.PaymentGateways...)
+		sort.Slice(target.PaymentGateways, func(i, j int) bool { return target.PaymentGateways[i].ID < target.PaymentGateways[j].ID })
+		q.Target = &target
+	}
 	inv, e := r.readInventory()
 	if errors.Is(e, os.ErrNotExist) {
 		inv = inventory{Version: inventoryVersion, Resource: s.Resource, Ownership: s.Ownership, AppliedRevision: s.AppliedRevision}
@@ -967,7 +1340,7 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 	}
 	for _, o := range inv.Objects {
 		if o.Role != "app" {
-			if o.Role == "local-data" || o.Role == "local-data-meta" || o.Role == "proxy" {
+			if o.Role == "local-data" || o.Role == "local-data-meta" || o.Role == "proxy" || o.Role == "payment-gateway" || o.Role == "payment-gateway-meta" {
 				continue
 			}
 			if o.Role == "app-data" && target[o.AppToken].ID != "" {
@@ -993,6 +1366,37 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 		if len(o.Data) != 0 {
 			kept = append(kept, managedObject{Role: "app-data", AppToken: o.AppToken, Data: o.Data})
 		}
+	}
+	gatewayTargets := map[string]hostcontract.PaymentGatewayTarget{}
+	for _, gateway := range q.Target.PaymentGateways {
+		gatewayTargets[paymentGatewayToken(gateway.ID)] = gateway
+	}
+	for _, old := range inv.Objects {
+		if old.Role != "payment-gateway" {
+			if old.Role == "payment-gateway-meta" {
+				if gatewayTargets[old.AppToken].ID == "" {
+					kept = append(kept, old)
+				}
+			}
+			continue
+		}
+		if gatewayTargets[old.AppToken].ID != "" {
+			continue
+		}
+		if err := r.removeRouteProgress(inv, old, true); err != nil {
+			return hostprotocol.Result{}, hostcontract.StableObservation{}, err
+		}
+		if err := r.removeOwnedProgress(ctx, inv, old, true); err != nil {
+			return hostprotocol.Result{}, hostcontract.StableObservation{}, err
+		}
+		kept = append(kept, gatewayMetadata(old))
+	}
+	for _, gateway := range q.Target.PaymentGateways {
+		object, err := r.reconcilePaymentGateway(ctx, s, inv, gateway, q.TargetRevision)
+		if err != nil {
+			return hostprotocol.Result{}, hostcontract.StableObservation{}, err
+		}
+		kept = append(kept, object)
 	}
 	appReadyCtx := ctx
 	cancelAppReadiness := func() {}
@@ -1116,8 +1520,12 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 	for _, a := range q.Target.Apps {
 		obs.Apps = append(obs.Apps, hostcontract.AppObservation{ID: a.ID, ActiveImage: a.Image, Ready: true})
 	}
+	for _, gateway := range q.Target.PaymentGateways {
+		object := findPaymentGateway(inventory{Objects: kept}, paymentGatewayToken(gateway.ID))
+		obs.PaymentGateways = append(obs.PaymentGateways, hostcontract.PaymentGatewayObservation{ID: gateway.ID, ActiveImage: object.Image, Ready: true})
+	}
 	obs.Data = append(obs.Data, localObservations(data)...)
-	if !coversTarget(obs, q.Target.Apps) || !exactDataObservations(obs.Data, q.Target.DataServices, s) {
+	if !coversTarget(obs, q.Target.Apps) || !coversPaymentGateways(obs, q.Target.PaymentGateways) || !exactDataObservations(obs.Data, q.Target.DataServices, s) {
 		return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
 	}
 	return hostprotocol.Result{Status: hostprotocol.ResultApplied, AppliedRevision: q.TargetRevision}, obs, nil
@@ -1422,6 +1830,329 @@ func appObject(s State, a hostcontract.AppTarget, revision, active string) manag
 	token := appToken(a.ID)
 	return managedObject{Role: "app", AppToken: token, Name: objectName(s, "app", token, active), Image: a.Image, Data: links(a), Revision: revision, Active: active, Env: envName(token, revision), Hostname: a.Hostname, ReadinessPath: a.ReadinessPath, DrainSeconds: appDrainSeconds(a)}
 }
+
+func paymentGatewayObject(s State, gateway hostcontract.PaymentGatewayTarget, revision string) managedObject {
+	t := paymentGatewayToken(gateway.ID)
+	return managedObject{Role: "payment-gateway", AppToken: t, Name: objectName(s, "payment-gateway", t, "live"), Image: gateway.Image, Revision: revision, Active: "live", Type: "gmpay", DataToken: paymentGatewayDataToken(t), PathToken: paymentGatewayPathToken(t), Hostname: gateway.Hostname}
+}
+
+func gatewayMetadata(o managedObject) managedObject {
+	return managedObject{Role: "payment-gateway-meta", AppToken: o.AppToken, Type: "gmpay", DataToken: o.DataToken, PathToken: o.PathToken, Hostname: o.Hostname}
+}
+
+func coversPaymentGateways(obs hostcontract.StableObservation, targets []hostcontract.PaymentGatewayTarget) bool {
+	if len(obs.PaymentGateways) != len(targets) {
+		return false
+	}
+	seen := map[string]hostcontract.PaymentGatewayObservation{}
+	for _, gateway := range obs.PaymentGateways {
+		if !gateway.Ready {
+			return false
+		}
+		seen[gateway.ID] = gateway
+	}
+	for _, target := range targets {
+		gateway, ok := seen[target.ID]
+		if !ok || gateway.ActiveImage != target.Image {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Runtime) reconcilePaymentGateway(ctx context.Context, s State, inv inventory, target hostcontract.PaymentGatewayTarget, revision string) (managedObject, error) {
+	t := paymentGatewayToken(target.ID)
+	old := findPaymentGateway(inv, t)
+	if old.Name == "" {
+		old = findPaymentGatewayMetadata(inv, t)
+	}
+	candidate := paymentGatewayObject(s, target, revision)
+	if old.Name != "" {
+		candidate.DataToken, candidate.PathToken = old.DataToken, old.PathToken
+	}
+	if old.Role != "payment-gateway" {
+		return r.createPaymentGateway(ctx, s, inv, candidate)
+	}
+	if old.Image == target.Image {
+		if err := r.ensureDataDir(candidate.DataToken); err != nil {
+			return managedObject{}, operationFailed()
+		}
+		candidate.Revision = old.Revision
+		present, err := r.ownedPresent(ctx, inv, old)
+		if err != nil {
+			return managedObject{}, err
+		}
+		if !present {
+			if err := r.runPaymentGateway(ctx, s, candidate); err != nil {
+				if present, observed := r.ownedPresent(ctx, inv, candidate); observed != nil || !present {
+					return managedObject{}, operationFailed()
+				}
+				return managedObject{}, operationFailed()
+			}
+		}
+		return r.finishPaymentGateway(ctx, inv, old, candidate)
+	}
+	return r.upgradePaymentGateway(ctx, s, inv, old, candidate)
+}
+
+func (r *Runtime) createPaymentGateway(ctx context.Context, s State, inv inventory, candidate managedObject) (managedObject, error) {
+	present, err := r.ownedPresent(ctx, inv, candidate)
+	if err != nil {
+		return managedObject{}, err
+	}
+	if !present {
+		if err := r.docker(ctx, "pull", candidate.Image); err != nil {
+			return managedObject{}, operationFailed()
+		}
+	}
+	if err := r.ensureDataDir(candidate.DataToken); err != nil {
+		return managedObject{}, operationFailed()
+	}
+	if !present {
+		if err := r.runPaymentGateway(ctx, s, candidate); err != nil {
+			present, observed := r.ownedPresent(ctx, inv, candidate)
+			if observed != nil || !present {
+				return managedObject{}, operationFailed()
+			}
+			return managedObject{}, operationFailed()
+		}
+	}
+	return r.finishPaymentGateway(ctx, inv, managedObject{}, candidate)
+}
+
+func (r *Runtime) finishPaymentGateway(ctx context.Context, inv inventory, old, candidate managedObject) (managedObject, error) {
+	readyCtx, cancel := newGatewayReadinessContext(ctx, gatewayReadinessBudget)
+	defer cancel()
+	if err := r.waitGatewayReady(readyCtx, candidate.Name, gatewayReadinessInterval); err != nil {
+		if old.Name == "" {
+			_ = r.removeOwnedProgress(ctx, inv, candidate, true)
+		}
+		return managedObject{}, operationFailed()
+	}
+	if err := r.inspectGatewayContract(ctx, inv, candidate); err != nil {
+		return managedObject{}, err
+	}
+	if !r.routeMatches(inv, candidate) {
+		if err := r.writeRoute(inv, candidate); err != nil {
+			if old.Name == "" {
+				if cleanupErr := r.removeRouteProgress(inv, candidate, true); cleanupErr != nil {
+					return managedObject{}, recovery()
+				}
+				if cleanupErr := r.removeOwnedProgress(ctx, inv, candidate, true); cleanupErr != nil {
+					return managedObject{}, cleanupErr
+				}
+			} else if restoreErr := r.restorePriorRoute(inv, old, candidate); restoreErr != nil {
+				return managedObject{}, restoreErr
+			}
+			return managedObject{}, operationFailed()
+		}
+	}
+	return candidate, nil
+}
+
+func (r *Runtime) runPaymentGateway(ctx context.Context, s State, o managedObject) error {
+	return r.docker(ctx, "run", "--pull", "never", "-d", "--restart", "unless-stopped", "--label", "sub2api.host="+ownershipLabelFor(s.Resource, s.Ownership, o.Role, o.AppToken, o.Active), "--label", "sub2api.host.target="+targetLabelFor(o), "--name", o.Name, "--network", networkName(s), "--network-alias", paymentGatewayAlias(o.AppToken), "-e", "EPUSDT_CONFIG=/data/.env", "-v", r.dataPath(o.DataToken)+":/data", o.Image)
+}
+
+func (r *Runtime) upgradePaymentGateway(ctx context.Context, s State, inv inventory, old, candidate managedObject) (managedObject, error) {
+	rollback := old
+	rollback.Name = objectName(s, "payment-gateway-rollback", old.AppToken, old.Revision)
+	rollback.Active = old.Active
+	if err := r.docker(ctx, "pull", candidate.Image); err != nil {
+		return managedObject{}, operationFailed()
+	}
+	if err := r.ensureDataDir(candidate.DataToken); err != nil {
+		return managedObject{}, operationFailed()
+	}
+	stablePresent, err := r.ownedPresentEither(ctx, inv, old, candidate, true)
+	if err != nil {
+		return managedObject{}, err
+	}
+	rollbackPresent, err := r.ownedPresent(ctx, inv, rollback)
+	if err != nil {
+		return managedObject{}, err
+	}
+	if !rollbackPresent {
+		if !stablePresent {
+			return managedObject{}, recovery()
+		}
+		activeTarget, inspectErr := r.containerTarget(ctx, old.Name)
+		if inspectErr != nil {
+			return managedObject{}, recovery()
+		}
+		if activeTarget != targetLabelFor(candidate) {
+			running, err := r.containerRunning(ctx, old.Name)
+			if err != nil {
+				return managedObject{}, recovery()
+			}
+			if running {
+				if err := r.docker(ctx, "stop", old.Name); err != nil {
+					running, inspectErr := r.containerRunning(ctx, old.Name)
+					if inspectErr != nil || running {
+						return managedObject{}, operationFailed()
+					}
+				}
+			}
+			if err := r.docker(ctx, "rename", old.Name, rollback.Name); err != nil {
+				rollbackPresent, inspectErr := r.ownedPresent(ctx, inv, rollback)
+				if inspectErr != nil || !rollbackPresent {
+					return managedObject{}, operationFailed()
+				}
+			}
+		}
+	}
+	if err := r.stopGatewayIfRunning(ctx, inv, rollback); err != nil {
+		return managedObject{}, err
+	}
+	if present, err := r.ownedPresent(ctx, inv, candidate); err != nil {
+		return managedObject{}, err
+	} else if !present {
+		if err := r.runPaymentGateway(ctx, s, candidate); err != nil {
+			present, observed := r.ownedPresent(ctx, inv, candidate)
+			if observed != nil {
+				return managedObject{}, observed
+			}
+			if !present {
+				if restoreErr := r.restoreGateway(ctx, inv, old, candidate); restoreErr != nil {
+					return managedObject{}, restoreErr
+				}
+				return managedObject{}, operationFailed()
+			}
+		}
+	}
+	if _, err := r.finishPaymentGateway(ctx, inv, old, candidate); err != nil {
+		if restoreErr := r.restoreGateway(ctx, inv, old, candidate); restoreErr != nil {
+			return managedObject{}, restoreErr
+		}
+		return managedObject{}, err
+	}
+	if present, err := r.ownedPresent(ctx, inv, rollback); err != nil {
+		return managedObject{}, err
+	} else if present {
+		if err := r.docker(ctx, "rm", "-f", rollback.Name); err != nil {
+			if stillPresent, observed := r.ownedPresent(ctx, inv, rollback); observed != nil || stillPresent {
+				return managedObject{}, operationFailed()
+			}
+		}
+	}
+	return candidate, nil
+}
+
+func (r *Runtime) stopGatewayIfRunning(ctx context.Context, inv inventory, o managedObject) error {
+	present, err := r.ownedPresent(ctx, inv, o)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	running, err := r.containerRunning(ctx, o.Name)
+	if err != nil {
+		return recovery()
+	}
+	if !running {
+		return nil
+	}
+	if err := r.docker(ctx, "stop", o.Name); err != nil {
+		running, inspectErr := r.containerRunning(ctx, o.Name)
+		if inspectErr != nil {
+			return recovery()
+		}
+		if running {
+			return operationFailed()
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) restoreGateway(ctx context.Context, inv inventory, old, candidate managedObject) error {
+	if err := r.removeOwnedProgress(ctx, inv, candidate, true); err != nil {
+		if present, observed := r.ownedPresent(ctx, inv, candidate); observed != nil || present {
+			return recovery()
+		}
+	}
+	rollback := old
+	rollback.Name = objectName(State{Resource: inv.Resource, Ownership: inv.Ownership}, "payment-gateway-rollback", old.AppToken, old.Revision)
+	rollback.Active = old.Active
+	if present, err := r.ownedPresent(ctx, inv, rollback); err != nil {
+		return err
+	} else if present {
+		if err := r.docker(ctx, "rename", rollback.Name, old.Name); err != nil {
+			if restored, observed := r.ownedPresent(ctx, inv, old); observed != nil || !restored {
+				return recovery()
+			}
+		}
+	}
+	running, err := r.containerRunning(ctx, old.Name)
+	if err != nil {
+		return recovery()
+	}
+	if !running {
+		if err := r.docker(ctx, "start", old.Name); err != nil {
+			running, inspectErr := r.containerRunning(ctx, old.Name)
+			if inspectErr != nil || !running {
+				return recovery()
+			}
+		}
+	}
+	if err := r.restorePriorRoute(inv, old, candidate); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Runtime) gatewayReady(ctx context.Context, name string) error {
+	return r.docker(ctx, "exec", name, "wget", "-q", "-O", "/dev/null", "http://localhost:8000/")
+}
+
+func (r *Runtime) waitGatewayReady(ctx context.Context, name string, interval time.Duration) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.gatewayReady(ctx, name); err == nil {
+			return nil
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (r *Runtime) containerRunning(ctx context.Context, name string) (bool, error) {
+	out, err := r.runner.Run(ctx, []string{"container", "inspect", "--format", "{{.State.Running}}", name}, nil)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errors.New("container state")
+	}
+}
+
+func (r *Runtime) containerTarget(ctx context.Context, name string) (string, error) {
+	out, err := r.runner.Run(ctx, []string{"container", "ls", "--all", "--filter", "name=^/" + name + "$", "--format", "{{.Names}}\t{{.Label \"sub2api.host.target\"}}"}, nil)
+	if err != nil {
+		return "", err
+	}
+	rows := strings.FieldsFunc(string(out), func(r rune) bool { return r == '\n' || r == '\r' })
+	if len(rows) != 1 {
+		return "", errors.New("container target")
+	}
+	fields := strings.Split(rows[0], "\t")
+	if len(fields) != 2 || fields[0] != name || fields[1] == "" {
+		return "", errors.New("container target")
+	}
+	return fields[1], nil
+}
 func appDrainSeconds(a hostcontract.AppTarget) int {
 	v := a.DrainTimeout
 	if v == "" {
@@ -1562,13 +2293,13 @@ func (r *Runtime) Retire(ctx context.Context, q hostprotocol.Request) (hostproto
 				return hostprotocol.Result{}, hostcontract.StableObservation{}, recovery()
 			}
 			for _, o := range inv.Objects {
-				if o.Role == "app" {
+				if o.Role == "app" || o.Role == "payment-gateway" {
 					if e = r.removeRouteProgress(inv, o, true); e != nil {
 						return hostprotocol.Result{}, hostcontract.StableObservation{}, e
 					}
 				}
 			}
-			for _, role := range []string{"app", "proxy", "local-data"} {
+			for _, role := range []string{"app", "proxy", "local-data", "payment-gateway"} {
 				for _, o := range inv.Objects {
 					if o.Role != role || o.Name == "" {
 						continue
@@ -2568,13 +3299,19 @@ func validateInventory(v inventory) error {
 	}
 	objects, names, logical := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, o := range v.Objects {
-		if o.Role != "app" && o.Role != "app-data" && o.Role != "local-data" && o.Role != "local-data-meta" && o.Role != "proxy" || (o.Role != "proxy" && (len(o.AppToken) != 24 || !lowerHex(o.AppToken))) || objects[o.Role+"\x00"+o.AppToken] {
+		if o.Role != "app" && o.Role != "app-data" && o.Role != "local-data" && o.Role != "local-data-meta" && o.Role != "payment-gateway" && o.Role != "payment-gateway-meta" && o.Role != "proxy" || (o.Role != "proxy" && (len(o.AppToken) != 24 || !lowerHex(o.AppToken))) || objects[o.Role+"\x00"+o.AppToken] {
 			return errors.New("inventory object")
 		}
 		objects[o.Role+"\x00"+o.AppToken] = true
 		if o.Role == "local-data" || o.Role == "local-data-meta" {
 			if logical[o.AppToken] {
 				return errors.New("inventory local duplicate")
+			}
+			logical[o.AppToken] = true
+		}
+		if o.Role == "payment-gateway" || o.Role == "payment-gateway-meta" {
+			if logical[o.AppToken] {
+				return errors.New("inventory payment gateway duplicate")
 			}
 			logical[o.AppToken] = true
 		}
@@ -2649,6 +3386,21 @@ func validateInventory(v inventory) error {
 		} else if o.Role == "local-data-meta" {
 			if o.Name != "" || o.Type == "" || o.DataIdentity.Kind != o.Type || len(o.DataToken) != 24 || !lowerHex(o.DataToken) || len(o.PathToken) != 24 || !lowerHex(o.PathToken) || o.DataToken != token("data", o.AppToken) || o.PathToken != token("path", o.AppToken) || !validDataIdentity(o.DataIdentity) || o.Image != "" || o.Revision != "" || o.Active != "" || o.Env != "" || o.Config != "" || o.HBA != "" || o.Ident != "" || len(o.Data) != 0 || o.Port != 0 || o.Persistence || o.Hostname != "" || o.ReadinessPath != "" || o.DrainSeconds != 0 {
 				return errors.New("inventory local data meta")
+			}
+		} else if o.Role == "payment-gateway" {
+			if o.Name == "" || names[o.Name] || o.Type != "gmpay" || o.Image == "" || o.Revision == "" || o.Active != "live" || o.Env != "" || o.Config != "" || o.HBA != "" || o.Ident != "" || len(o.Data) != 0 || o.Port != 0 || o.Persistence || o.ReadinessPath != "" || o.DrainSeconds != 0 || !validHostname(o.Hostname) || len(o.DataToken) != 24 || !lowerHex(o.DataToken) || len(o.PathToken) != 24 || !lowerHex(o.PathToken) || o.DataToken != paymentGatewayDataToken(o.AppToken) || o.PathToken != paymentGatewayPathToken(o.AppToken) {
+				return errors.New("inventory payment gateway")
+			}
+			if _, err := hostcontract.ParseRevision(o.Revision); err != nil || hostcontract.ValidateTarget(hostcontract.Target{ReleaseArtifact: "inventory", PaymentGateways: []hostcontract.PaymentGatewayTarget{{ID: "gateway", Type: "gmpay", Image: o.Image, Hostname: o.Hostname}}}, hostcontract.Secrets{}) != nil {
+				return errors.New("inventory payment gateway")
+			}
+			if o.Name != objectName(State{Resource: v.Resource, Ownership: v.Ownership}, "payment-gateway", o.AppToken, "live") {
+				return errors.New("inventory payment gateway")
+			}
+			names[o.Name] = true
+		} else if o.Role == "payment-gateway-meta" {
+			if o.Name != "" || o.Type != "gmpay" || o.Image != "" || o.Revision != "" || o.Active != "" || o.Env != "" || o.Config != "" || o.HBA != "" || o.Ident != "" || len(o.Data) != 0 || o.Port != 0 || o.Persistence || o.ReadinessPath != "" || o.DrainSeconds != 0 || !validHostname(o.Hostname) || len(o.DataToken) != 24 || !lowerHex(o.DataToken) || len(o.PathToken) != 24 || o.DataToken != paymentGatewayDataToken(o.AppToken) || o.PathToken != paymentGatewayPathToken(o.AppToken) {
+				return errors.New("inventory payment gateway meta")
 			}
 		} else if o.Role == "proxy" {
 			if o.Name == "" || names[o.Name] || o.Image == "" || o.Revision == "" || !validArtifactName(o.Env) || !validArtifactName(o.Config) || o.AppToken != "" || o.Active != "" || len(o.Data) != 0 || o.Type != "" || o.Port != 0 || o.Persistence || o.DataToken != "" || o.PathToken != "" || o.DataIdentity != (hostcontract.DataIdentity{}) || o.Hostname != "" || o.ReadinessPath != "" || o.DrainSeconds != 0 {
@@ -2827,8 +3579,13 @@ func (r *Runtime) writeRoute(inv inventory, o managedObject) error {
 	}
 	return err
 }
+
 func routeBytesFor(inv inventory, o managedObject) ([]byte, error) {
-	key := token("route", inv.Resource.Environment, inv.Resource.ServerKey, inv.Ownership.Value, o.AppToken, o.Revision, o.Active, o.Name)
+	keyParts := []string{"route", inv.Resource.Environment, inv.Resource.ServerKey, inv.Ownership.Value, o.AppToken, o.Revision, o.Active, o.Name}
+	if o.Role == "payment-gateway" {
+		keyParts = []string{"route", inv.Resource.Environment, inv.Resource.ServerKey, inv.Ownership.Value, o.AppToken, o.Hostname, o.Name}
+	}
+	key := token(keyParts...)
 	service := token("service", key)
 	var route traefikRoute
 	publicKey := token("router", "public", key)
@@ -2838,7 +3595,11 @@ func routeBytesFor(inv inventory, o managedObject) ([]byte, error) {
 		probeKey:  {Rule: "Host(`" + hostnameFor(inv, o) + "`)", EntryPoints: []string{"probe"}, Service: service},
 	}
 	serviceValue := traefikService{}
-	serviceValue.LoadBalancer.Servers = []traefikServer{{URL: "http://" + o.Name + ":8080"}}
+	port := 8080
+	if o.Role == "payment-gateway" {
+		port = 8000
+	}
+	serviceValue.LoadBalancer.Servers = []traefikServer{{URL: "http://" + o.Name + ":" + strconv.Itoa(port)}}
 	route.HTTP.Services = map[string]traefikService{service: serviceValue}
 	return json.Marshal(route)
 }

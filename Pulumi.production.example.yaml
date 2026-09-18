@@ -56,6 +56,17 @@ config:
           cloudflare:
             mode: dns
             connectBy: publicAddress
+    paymentGateways:
+      gmpay-primary:
+        type: gmpay
+        server: api-one
+        hostname: pay.example.com
+        image: gmwallet/epusdt:v2.0.0
+        publicAccess:
+          type: cloudflare
+          cloudflare:
+            mode: dns
+            connectBy: publicAddress
     cloudflare:
       zoneId: replace-with-zone-id
   sub2api-environment:environmentSecrets:

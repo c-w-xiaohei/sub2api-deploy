@@ -104,6 +104,7 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 	if cloudflareProvider == nil {
 		return nil
 	}
+	usedDNSResourceNames := map[string]bool{}
 	for _, appID := range sortedAppIDs(validated.Config) {
 		app := validated.Apps[appID]
 		if app.PublicAccess.Type != "cloudflare" {
@@ -120,7 +121,9 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 				if net.ParseIP(address).To4() == nil {
 					recordType = "AAAA"
 				}
-				_, err := cloudflareresource.NewDnsRecord(ctx, "dns-"+appID+"-"+serverID+"-"+recordType, &cloudflareresource.DnsRecordArgs{
+				resourceName := "dns-" + appID + "-" + serverID + "-" + recordType
+				usedDNSResourceNames[resourceName] = true
+				_, err := cloudflareresource.NewDnsRecord(ctx, resourceName, &cloudflareresource.DnsRecordArgs{
 					Name:    pulumi.String(app.Hostname),
 					Content: pulumi.StringPtr(address),
 					Proxied: pulumi.BoolPtr(true),
@@ -131,6 +134,28 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 				if err != nil {
 					return err
 				}
+			}
+		}
+	}
+	for _, gatewayID := range sortedPaymentGatewayIDs(validated.Config) {
+		gateway := validated.PaymentGateways[gatewayID]
+		host := hosts[gateway.Server]
+		for _, address := range publicAddresses(validated.Servers[gateway.Server]) {
+			recordType := "A"
+			if net.ParseIP(address).To4() == nil {
+				recordType = "AAAA"
+			}
+			resourceName := uniqueDNSResourceName("dns-payment-gateway-"+gatewayID+"-"+gateway.Server+"-"+recordType, usedDNSResourceNames)
+			_, err := cloudflareresource.NewDnsRecord(ctx, resourceName, &cloudflareresource.DnsRecordArgs{
+				Name:    pulumi.String(gateway.Hostname),
+				Content: pulumi.StringPtr(address),
+				Proxied: pulumi.BoolPtr(true),
+				Ttl:     pulumi.Float64(1),
+				Type:    pulumi.String(recordType),
+				ZoneId:  pulumi.String(validated.Cloudflare.ZoneID),
+			}, pulumi.Provider(cloudflareProvider), pulumi.DependsOn([]pulumi.Resource{host}))
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -397,6 +422,19 @@ func hostTarget(config environment.Config, secrets environment.Secrets, release,
 		}
 		apps = append(apps, value)
 	}
+	gateways := pulumi.Array{}
+	for _, id := range sortedPaymentGatewayIDs(config) {
+		gateway := config.PaymentGateways[id]
+		if gateway.Server != server {
+			continue
+		}
+		gateways = append(gateways, pulumi.Map{
+			"id":       pulumi.String(id),
+			"type":     pulumi.String(gateway.Type),
+			"image":    pulumi.String(gateway.Image),
+			"hostname": pulumi.String(gateway.Hostname),
+		})
+	}
 	services := localServices(config, secrets, server)
 	target := pulumi.Map{
 		"releaseArtifact": pulumi.String(release),
@@ -407,6 +445,9 @@ func hostTarget(config environment.Config, secrets environment.Secrets, release,
 	}
 	if len(apps) != 0 {
 		target["apps"] = apps
+	}
+	if len(gateways) != 0 {
+		target["paymentGateways"] = gateways
 	}
 	if len(services) != 0 {
 		target["dataServices"] = services
@@ -763,6 +804,11 @@ func hasCloudflare(config environment.Config) bool {
 			return true
 		}
 	}
+	for _, gateway := range config.PaymentGateways {
+		if gateway.PublicAccess.Type == "cloudflare" {
+			return true
+		}
+	}
 	return false
 }
 
@@ -794,6 +840,23 @@ func sortedRedisIDs(config environment.Config) []string {
 		result = append(result, id)
 	}
 	return sortedStrings(result)
+}
+
+func sortedPaymentGatewayIDs(config environment.Config) []string {
+	result := make([]string, 0, len(config.PaymentGateways))
+	for id := range config.PaymentGateways {
+		result = append(result, id)
+	}
+	return sortedStrings(result)
+}
+
+func uniqueDNSResourceName(candidate string, used map[string]bool) string {
+	name := candidate
+	for suffix := 2; used[name]; suffix++ {
+		name = fmt.Sprintf("%s-%d", candidate, suffix)
+	}
+	used[name] = true
+	return name
 }
 
 func contains(values []string, want string) bool {

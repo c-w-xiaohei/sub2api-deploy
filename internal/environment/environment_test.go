@@ -105,6 +105,167 @@ func TestParseAndValidateAcceptsValidEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseAndValidateAcceptsPaymentGateway(t *testing.T) {
+	for _, image := range []string{
+		"gmwallet/epusdt:v2.0.0",
+		"gmwallet/epusdt:v2.0.0@sha256:" + strings.Repeat("b", 64),
+		"gmwallet/epusdt@sha256:" + strings.Repeat("c", 64),
+		"registry.example.com:5000/epusdt:v2.0.0",
+		"registry.example.com:5000/epusdt@sha256:" + strings.Repeat("d", 64),
+		"registry.example.com:00001/epusdt:v2.0.0",
+	} {
+		t.Run(image, func(t *testing.T) {
+			validated, err := Validate(mustParseConfig(t, paymentGatewayConfig(image, "pay.example.com")), mustParseSecrets(t, paymentGatewaySecrets))
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateway, ok := validated.PaymentGateways["gmpay-primary"]
+			if !ok || gateway.Type != "gmpay" || gateway.Server != "Edge_Box" || gateway.Hostname != "pay.example.com" || gateway.Image != image {
+				t.Fatalf("normalized payment gateway = %#v", gateway)
+			}
+			if gateway.PublicAccess.Type != "cloudflare" || gateway.PublicAccess.Cloudflare == nil {
+				t.Fatalf("normalized payment gateway public access = %#v", gateway.PublicAccess)
+			}
+		})
+	}
+}
+
+func TestParseConfigRejectsInvalidPaymentGatewayFields(t *testing.T) {
+	base := paymentGatewayConfig("gmwallet/epusdt:v2.0.0", "pay.example.com")
+	for name, input := range map[string]string{
+		"unknown gateway field":       strings.Replace(base, "    image: gmwallet/epusdt:v2.0.0", "    image: gmwallet/epusdt:v2.0.0\n    unknown: true", 1),
+		"unknown public access field": strings.Replace(base, "      type: cloudflare", "      type: cloudflare\n      servers: [Edge_Box]", 1),
+		"unknown cloudflare field":    strings.Replace(base, "        connectBy: publicAddress", "        connectBy: publicAddress\n        unknown: true", 1),
+		"null type":                   strings.Replace(base, "    type: gmpay", "    type: null", 1),
+		"null server":                 strings.Replace(base, "    server: Edge_Box", "    server: null", 1),
+		"null hostname":               strings.Replace(base, "    hostname: pay.example.com", "    hostname: null", 1),
+		"null image":                  strings.Replace(base, "    image: gmwallet/epusdt:v2.0.0", "    image: null", 1),
+		"null public access":          strings.Replace(base, "    publicAccess:", "    publicAccess: null\n    #", 1),
+		"null cloudflare field":       strings.Replace(base, "        connectBy: publicAddress", "        connectBy: null", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseConfig([]byte(input)); err == nil {
+				t.Fatalf("ParseConfig accepted %s", name)
+			}
+		})
+	}
+
+	for name, field := range map[string]string{
+		"missing type":         "type: gmpay\n",
+		"missing server":       "server: Edge_Box\n",
+		"missing hostname":     "hostname: pay.example.com\n",
+		"missing image":        "image: gmwallet/epusdt:v2.0.0\n",
+		"missing publicAccess": "publicAccess:\n      type: cloudflare\n      cloudflare:\n        mode: dns\n        connectBy: publicAddress\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := base
+			input = strings.Replace(input, "    "+field, "", 1)
+			config := mustParseConfig(t, input)
+			if _, err := Validate(config, mustParseSecrets(t, paymentGatewaySecrets)); err == nil {
+				t.Fatalf("Validate accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestParseConfigRemainsStrictForExistingPlainNestedTypes(t *testing.T) {
+	for name, input := range map[string]string{
+		"reverseProxy": strings.Replace(validConfig, "  acmeEmail: ops@example.com", "  acmeEmail: ops@example.com\n  unexpected: true", 1),
+		"cloudflare":   strings.Replace(paymentGatewayConfig("gmwallet/epusdt:v2.0.0", "pay.example.com"), "  zoneId: zone", "  zoneId: zone\n  unexpected: true", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseConfig([]byte(input)); err == nil {
+				t.Fatalf("ParseConfig accepted unknown %s field", name)
+			}
+		})
+	}
+}
+
+func TestValidatePaymentGatewayPlacementAndHostnameRules(t *testing.T) {
+	base := paymentGatewayConfig("gmwallet/epusdt:v2.0.0", "pay.example.com")
+	for name, input := range map[string]string{
+		"invalid gateway ID":       strings.Replace(base, "gmpay-primary:", "GMPay-primary:", 1),
+		"unsupported gateway type": strings.Replace(base, "type: gmpay", "type: stripe", 1),
+		"missing server":           strings.Replace(base, "server: Edge_Box", "server: missing", 1),
+		"no public address":        strings.Replace(base, "      public:\n        ipv4: 203.0.113.10\n", "", 1),
+		"uppercase hostname":       strings.Replace(base, "pay.example.com", "Pay.example.com", 1),
+		"malformed hostname":       strings.Replace(base, "pay.example.com", "pay example.com", 1),
+		"duplicate app hostname":   strings.Replace(base, "pay.example.com", "app.example.com", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Validate(mustParseConfig(t, input), mustParseSecrets(t, paymentGatewaySecrets)); err == nil {
+				t.Fatalf("Validate accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestParseConfigRejectsDuplicatePaymentGatewayIDs(t *testing.T) {
+	input := strings.Replace(paymentGatewayConfig("gmwallet/epusdt:v2.0.0", "pay.example.com"), "    type: gmpay", "    type: gmpay\n  gmpay-primary:\n    type: gmpay", 1)
+	if _, err := ParseConfig([]byte(input)); err == nil {
+		t.Fatal("ParseConfig accepted duplicate payment gateway ID")
+	}
+}
+
+func TestValidatePaymentGatewayCloudflareConfigurationIsRequiredAndExclusive(t *testing.T) {
+	withoutCloudflare := strings.Replace(paymentGatewayConfig("gmwallet/epusdt:v2.0.0", "pay.example.com"), "cloudflare:\n  zoneId: zone\n", "", 1)
+	if _, err := Validate(mustParseConfig(t, withoutCloudflare), mustParseSecrets(t, paymentGatewaySecrets)); err == nil {
+		t.Fatal("Validate accepted gateway Cloudflare access without zoneId")
+	}
+
+	withoutToken := strings.Replace(paymentGatewaySecrets, "cloudflare:\n  apiToken: cf-token\n", "", 1)
+	if _, err := Validate(mustParseConfig(t, paymentGatewayConfig("gmwallet/epusdt:v2.0.0", "pay.example.com")), mustParseSecrets(t, withoutToken)); err == nil {
+		t.Fatal("Validate accepted gateway Cloudflare access without apiToken")
+	}
+
+	for name, access := range map[string]string{
+		"none":          "type: none",
+		"external":      "type: external",
+		"load balancer": "type: cloudflare\n      cloudflare:\n        mode: loadBalancer\n        connectBy: publicAddress",
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := strings.Replace(paymentGatewayConfig("gmwallet/epusdt:v2.0.0", "pay.example.com"), "type: cloudflare\n      cloudflare:\n        mode: dns\n        connectBy: publicAddress", access, 1)
+			if _, err := Validate(mustParseConfig(t, input), mustParseSecrets(t, paymentGatewaySecrets)); err == nil {
+				t.Fatalf("Validate accepted unsupported gateway public access %s", name)
+			}
+		})
+	}
+
+	empty := mustParseConfig(t, emptyTopologyConfig)
+	empty.Cloudflare = &CloudflareConfig{ZoneID: "zone"}
+	if _, err := Validate(empty, mustParseSecrets(t, strings.Replace(emptyTopologySecrets, "reverseProxy:\n", "cloudflare:\n  apiToken: cf-token\nreverseProxy:\n", 1))); err == nil {
+		t.Fatal("Validate accepted unused Cloudflare settings without Apps or gateways")
+	}
+}
+
+func TestValidateRejectsInvalidPaymentGatewayImages(t *testing.T) {
+	for _, image := range []string{
+		"gmwallet/epusdt",
+		"gmwallet/epusdt:latest",
+		"gmwallet/epusdt:latest@sha256:" + strings.Repeat("d", 64),
+		"gmwallet/epusdt:v2",
+		"gmwallet/epusdt:2.0.0",
+		"gmwallet/epusdt:v2.0.0.1",
+		"gmwallet/epusdt:v2.0.0-rc.1",
+		"gmwallet/epusdt::v2.0.0",
+		"gmwallet//epusdt@sha256:" + strings.Repeat("e", 64),
+		"registry:bad/epusdt:v2.0.0",
+		"registry.example.com:+5000/epusdt:v2.0.0",
+		"registry.example.com:-5000/epusdt:v2.0.0",
+		"registry.example.com:50O0/epusdt:v2.0.0",
+		"registry.example.com:0000005000/epusdt:v2.0.0",
+		"gmwallet/epusdt:v2.0.0@sha256:" + strings.Repeat("A", 64),
+		"gmwallet/epusdt:v01.2.3",
+		"gmwallet/epusdt:v2.0.0 with-space",
+	} {
+		t.Run(image, func(t *testing.T) {
+			if _, err := Validate(mustParseConfig(t, paymentGatewayConfig(image, "pay.example.com")), mustParseSecrets(t, paymentGatewaySecrets)); err == nil {
+				t.Fatalf("Validate accepted payment gateway image %q", image)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsExplicitlyEmptyTopology(t *testing.T) {
 	validated, err := Validate(mustParseConfig(t, emptyTopologyConfig), mustParseSecrets(t, emptyTopologySecrets))
 	if err != nil {
@@ -871,4 +1032,32 @@ func mustParseSecrets(t *testing.T, input string) Secrets {
 		t.Fatal(err)
 	}
 	return secrets
+}
+
+const paymentGatewaySecrets = `revisionKey: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+cloudflare:
+  apiToken: cf-token
+reverseProxy:
+  dnsChallengeToken: dns-placeholder
+apps:
+  web-app:
+    initialAdminPassword: SENTINEL_ONLY_FOR_REDACTION_TEST
+    jwtSecret: jwt-placeholder
+    totpEncryptionKey: totp-placeholder
+    postgres:
+      username: sub2api
+      password: postgres-placeholder
+    redis:
+      username: default
+      password: redis-placeholder
+postgres:
+  main-db:
+    adminPassword: postgres-admin-placeholder
+redis:
+  main-cache:
+    adminPassword: redis-admin-placeholder
+`
+
+func paymentGatewayConfig(image, hostname string) string {
+	return strings.Replace(validConfig, "servers:\n", "cloudflare:\n  zoneId: zone\npaymentGateways:\n  gmpay-primary:\n    type: gmpay\n    server: Edge_Box\n    hostname: "+hostname+"\n    image: "+image+"\n    publicAccess:\n      type: cloudflare\n      cloudflare:\n        mode: dns\n        connectBy: publicAddress\nservers:\n", 1)
 }

@@ -277,6 +277,175 @@ func TestRegisterPublishesDNSOnlyForPublicAccessServers(t *testing.T) {
 	}
 }
 
+func TestRegisterProjectsPaymentGatewaysToSelectedHostsAndPublishesSelectedHostDNS(t *testing.T) {
+	config := paymentGatewayConfig()
+	mocks := &recordingMocks{}
+	if err := runRegister(t, mocks, pinnedRelease, config, managedSecrets()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	hosts := resourcesOfType(mocks.resources, hostresource.HostToken)
+	alpha, bravo, charlie := hostForServer(t, hosts, "alpha"), hostForServer(t, hosts, "bravo"), hostForServer(t, hosts, "charlie")
+	assertPaymentGatewayTargets(t, alpha, []hostcontract.PaymentGatewayTarget{
+		{ID: "gateway-a", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay-a.example.test"},
+		{ID: "gateway-m", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.3", Hostname: "pay-m.example.test"},
+	})
+	assertPaymentGatewayTargets(t, bravo, []hostcontract.PaymentGatewayTarget{{ID: "gateway-z", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.1", Hostname: "pay-z.example.test"}})
+	assertPaymentGatewayTargets(t, charlie, nil)
+
+	dns := resourcesOfType(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord")
+	if len(dns) != 10 {
+		t.Fatalf("Cloudflare DNS registrations = %d, want 10 App and gateway address records", len(dns))
+	}
+	want := map[string]struct {
+		name, address, recordType string
+		host                      pulumi.MockResourceArgs
+	}{
+		"dns-payment-gateway-a-alpha-A":    {"pay-a.example.test", "198.51.100.11", "A", alpha},
+		"dns-payment-gateway-a-alpha-AAAA": {"pay-a.example.test", "2001:db8::11", "AAAA", alpha},
+		"dns-payment-gateway-m-alpha-A":    {"pay-m.example.test", "198.51.100.11", "A", alpha},
+		"dns-payment-gateway-m-alpha-AAAA": {"pay-m.example.test", "2001:db8::11", "AAAA", alpha},
+		"dns-payment-gateway-z-bravo-A":    {"pay-z.example.test", "198.51.100.12", "A", bravo},
+		"dns-payment-gateway-z-bravo-AAAA": {"pay-z.example.test", "2001:db8::12", "AAAA", bravo},
+	}
+	gatewayRecords := 0
+	appRecords := map[string]bool{}
+	for _, record := range dns {
+		wantRecord, ok := want[record.Name]
+		if !ok {
+			if !strings.HasPrefix(record.Name, "dns-payment-gateway-") {
+				appRecords[record.Name] = true
+				continue
+			}
+			t.Fatalf("unexpected gateway DNS resource %q", record.Name)
+		}
+		gatewayRecords++
+		if stringValue(t, property(record.Inputs, "name")) != wantRecord.name || stringValue(t, property(record.Inputs, "content")) != wantRecord.address || stringValue(t, property(record.Inputs, "type")) != wantRecord.recordType {
+			t.Fatalf("gateway DNS resource %q inputs = %v", record.Name, record.Inputs)
+		}
+		if !unwrap(property(record.Inputs, "proxied")).BoolValue() || int(unwrap(property(record.Inputs, "ttl")).NumberValue()) != 1 {
+			t.Fatalf("gateway DNS resource %q must be proxied with ttl 1", record.Name)
+		}
+		assertProvider(t, record, onlyResource(t, mocks.resources, "pulumi:providers:cloudflare"))
+		dependencies := directDependencies(record)
+		if len(dependencies) != 1 || !containsURN(dependencies, wantRecord.host) {
+			t.Fatalf("gateway DNS resource %q dependencies = %v, want only selected Host %q", record.Name, dependencies, wantRecord.host.Name)
+		}
+	}
+	if gatewayRecords != len(want) {
+		t.Fatalf("gateway DNS registrations = %d, want %d", gatewayRecords, len(want))
+	}
+	for _, name := range []string{"dns-app-alpha-A", "dns-app-alpha-AAAA", "dns-app-bravo-A", "dns-app-bravo-AAAA"} {
+		if !appRecords[name] {
+			t.Fatalf("App DNS resource %q was not preserved: %v", name, appRecords)
+		}
+	}
+}
+
+func TestRegisterAddingPaymentGatewayPreservesAppAndDataPlacement(t *testing.T) {
+	baseline, withGateway := &recordingMocks{}, &recordingMocks{}
+	if err := runRegister(t, baseline, pinnedRelease, managedConfig(), managedSecrets()); err != nil {
+		t.Fatalf("baseline Register() error = %v", err)
+	}
+	config := strings.Replace(managedConfig(), "apps:\n", "paymentGateways:\n  gateway-a:\n    type: gmpay\n    server: alpha\n    hostname: pay.example.test\n    image: gmwallet/epusdt:v2.0.0\n    publicAccess:\n      type: cloudflare\n      cloudflare:\n        mode: dns\n        connectBy: publicAddress\napps:\n", 1)
+	if err := runRegister(t, withGateway, pinnedRelease, config, managedSecrets()); err != nil {
+		t.Fatalf("gateway Register() error = %v", err)
+	}
+	for _, server := range []string{"alpha", "bravo"} {
+		before := hostForServer(t, resourcesOfType(baseline.resources, hostresource.HostToken), server)
+		after := hostForServer(t, resourcesOfType(withGateway.resources, hostresource.HostToken), server)
+		beforeTarget := object(t, before.Inputs, "target")
+		afterTarget := object(t, after.Inputs, "target")
+		for _, key := range []string{"apps", "dataServices"} {
+			if got, want := sanitize(resource.PropertyMap{resource.PropertyKey(key): afterTarget[resource.PropertyKey(key)]}), sanitize(resource.PropertyMap{resource.PropertyKey(key): beforeTarget[resource.PropertyKey(key)]}); got != want {
+				t.Fatalf("server %q %s placement changed after adding gateway", server, key)
+			}
+		}
+	}
+}
+
+func TestRegisterPaymentGatewayChangesOnlySelectedHostAndItsDNS(t *testing.T) {
+	base := paymentGatewayConfig()
+	changed := strings.Replace(base, "image: gmwallet/epusdt:v2.0.0", "image: gmwallet/epusdt:v2.0.2", 1)
+	changed = strings.Replace(changed, "hostname: pay-a.example.test", "hostname: pay-a-new.example.test", 1)
+
+	first, second := &recordingMocks{}, &recordingMocks{}
+	if err := runRegister(t, first, pinnedRelease, base, managedSecrets()); err != nil {
+		t.Fatalf("initial Register() error = %v", err)
+	}
+	if err := runRegister(t, second, pinnedRelease, changed, managedSecrets()); err != nil {
+		t.Fatalf("changed Register() error = %v", err)
+	}
+
+	firstAlpha := hostForServer(t, resourcesOfType(first.resources, hostresource.HostToken), "alpha")
+	secondAlpha := hostForServer(t, resourcesOfType(second.resources, hostresource.HostToken), "alpha")
+	firstBravo := hostForServer(t, resourcesOfType(first.resources, hostresource.HostToken), "bravo")
+	secondBravo := hostForServer(t, resourcesOfType(second.resources, hostresource.HostToken), "bravo")
+	firstCharlie := hostForServer(t, resourcesOfType(first.resources, hostresource.HostToken), "charlie")
+	secondCharlie := hostForServer(t, resourcesOfType(second.resources, hostresource.HostToken), "charlie")
+	if got, want := sanitize(secondAlpha.Inputs), sanitize(firstAlpha.Inputs); got == want {
+		t.Fatal("selected Host inputs did not change after gateway image and hostname change")
+	}
+	if got, want := sanitize(secondBravo.Inputs), sanitize(firstBravo.Inputs); got != want {
+		t.Fatal("unrelated Host inputs changed after selected gateway change")
+	}
+	if got, want := sanitize(secondCharlie.Inputs), sanitize(firstCharlie.Inputs); got != want {
+		t.Fatal("unselected Host inputs changed after selected gateway change")
+	}
+
+	dns := resourcesOfType(second.resources, "cloudflare:index/dnsRecord:DnsRecord")
+	gatewayRecords := 0
+	for _, record := range dns {
+		if strings.HasPrefix(record.Name, "dns-payment-gateway-a-alpha-") {
+			gatewayRecords++
+			if stringValue(t, property(record.Inputs, "name")) != "pay-a-new.example.test" {
+				t.Fatalf("changed gateway DNS = %q / %v", record.Name, record.Inputs)
+			}
+			continue
+		}
+		if name := stringValue(t, property(record.Inputs, "name")); name == "pay-a-new.example.test" || name == "pay-a.example.test" {
+			t.Fatalf("changed gateway DNS was published on unrelated resource %q", record.Name)
+		}
+	}
+	if gatewayRecords != 2 {
+		t.Fatalf("changed gateway DNS records = %d, want A and AAAA", gatewayRecords)
+	}
+}
+
+func TestRegisterUsesUniqueDNSNamesWhenGatewayAndAppNamesOverlap(t *testing.T) {
+	config := strings.Replace(managedConfig(), "apps:\n  app:\n", "paymentGateways:\n  a:\n    type: gmpay\n    server: alpha\n    hostname: pay.example.test\n    image: gmwallet/epusdt:v2.0.0\n    publicAccess:\n      type: cloudflare\n      cloudflare:\n        mode: dns\n        connectBy: publicAddress\napps:\n  payment-gateway-a:\n", 1)
+	secrets := strings.Replace(managedSecrets(), "apps:\n  app:\n", "apps:\n  payment-gateway-a:\n", 1)
+	mocks := &recordingMocks{}
+	if err := runRegister(t, mocks, pinnedRelease, config, secrets); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	names := map[string]bool{}
+	for _, record := range resourcesOfType(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord") {
+		if names[record.Name] {
+			t.Fatalf("duplicate DNS resource name %q", record.Name)
+		}
+		names[record.Name] = true
+	}
+	if !names["dns-payment-gateway-a-alpha-A"] || !names["dns-payment-gateway-a-alpha-A-2"] {
+		t.Fatalf("overlapping App/gateway DNS names = %v", names)
+	}
+}
+
+func TestRegisterWithoutPaymentGatewaysPreservesGraph(t *testing.T) {
+	first, second := &recordingMocks{}, &recordingMocks{}
+	if err := runRegister(t, first, pinnedRelease, managedConfig(), managedSecrets()); err != nil {
+		t.Fatalf("baseline Register() error = %v", err)
+	}
+	withoutGatewayMap := strings.Replace(managedConfig(), "apps:\n", "paymentGateways: {}\napps:\n", 1)
+	if err := runRegister(t, second, pinnedRelease, withoutGatewayMap, managedSecrets()); err != nil {
+		t.Fatalf("repeat Register() error = %v", err)
+	}
+	if got, want := canonicalSnapshot(second.resources), canonicalSnapshot(first.resources); got != want {
+		t.Fatal("paymentGateways absence changed the existing graph")
+	}
+}
+
 func TestRegisterRejectsBeforeRegistration(t *testing.T) {
 	for _, tc := range []struct{ name, release, config, secrets string }{
 		{"strict YAML", pinnedRelease, managedConfig() + "\nunknown: true\n", managedSecrets()},
@@ -878,6 +1047,31 @@ func appTarget(t *testing.T, inputs resource.PropertyMap, id string) resource.Pr
 	t.Fatalf("App %q absent from target", id)
 	return nil
 }
+func assertPaymentGatewayTargets(t *testing.T, host pulumi.MockResourceArgs, want []hostcontract.PaymentGatewayTarget) {
+	t.Helper()
+	target := object(t, host.Inputs, "target")
+	value, exists := target[resource.PropertyKey("paymentGateways")]
+	if !exists {
+		if len(want) == 0 {
+			return
+		}
+		t.Fatalf("Host %q has no paymentGateways", host.Name)
+	}
+	gateways := unwrap(value)
+	if !gateways.IsArray() {
+		t.Fatalf("Host %q paymentGateways is not an array: %v", host.Name, gateways)
+	}
+	if len(gateways.ArrayValue()) != len(want) {
+		t.Fatalf("Host %q paymentGateways = %v, want %d targets", host.Name, gateways, len(want))
+	}
+	for index, value := range gateways.ArrayValue() {
+		actual := value.ObjectValue()
+		got := hostcontract.PaymentGatewayTarget{ID: stringValue(t, property(actual, "id")), Type: stringValue(t, property(actual, "type")), Image: stringValue(t, property(actual, "image")), Hostname: stringValue(t, property(actual, "hostname"))}
+		if got != want[index] || len(actual) != 4 {
+			t.Fatalf("Host %q payment gateway target = %#v, want exactly %#v", host.Name, actual, want[index])
+		}
+	}
+}
 func dataLink(t *testing.T, app resource.PropertyMap, name string) resource.PropertyMap {
 	t.Helper()
 	links := unwrap(property(app, "dataLinks"))
@@ -1288,6 +1482,44 @@ func sanitize(value resource.PropertyMap) string {
 }
 
 func managedConfig() string { return baseConfig("external", "upstash", "cloudflare") }
+func paymentGatewayConfig() string {
+	config := strings.Replace(managedConfig(), "      public:\n        ipv4: 198.51.100.11", "      public:\n        ipv4: 198.51.100.11\n        ipv6: 2001:db8::11", 1)
+	config = strings.Replace(config, "      public:\n        ipv4: 198.51.100.12", "      public:\n        ipv4: 198.51.100.12\n        ipv6: 2001:db8::12", 1)
+	config = strings.Replace(config, "postgres:\n", "  charlie:\n    sshAlias: charlie-ssh\npostgres:\n", 1)
+	gateways := `paymentGateways:
+  gateway-z:
+    type: gmpay
+    server: bravo
+    hostname: pay-z.example.test
+    image: gmwallet/epusdt:v2.0.1
+    publicAccess:
+      type: cloudflare
+      cloudflare:
+        mode: dns
+        connectBy: publicAddress
+  gateway-a:
+    type: gmpay
+    server: alpha
+    hostname: pay-a.example.test
+    image: gmwallet/epusdt:v2.0.0
+    publicAccess:
+      type: cloudflare
+      cloudflare:
+        mode: dns
+        connectBy: publicAddress
+  gateway-m:
+    type: gmpay
+    server: alpha
+    hostname: pay-m.example.test
+    image: gmwallet/epusdt:v2.0.3
+    publicAccess:
+      type: cloudflare
+      cloudflare:
+        mode: dns
+        connectBy: publicAddress
+`
+	return strings.Replace(config, "apps:\n", gateways+"apps:\n", 1)
+}
 func managedSinglePublicServerConfig() string {
 	return strings.Replace(managedConfig(), "servers: [alpha, bravo]\n      cloudflare:", "servers: [bravo]\n      cloudflare:", 1)
 }
