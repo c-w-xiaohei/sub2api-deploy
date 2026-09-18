@@ -187,13 +187,28 @@ PY
   restart_policy="$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container")"
   test "$restart_policy" = unless-stopped || contract_failure restart-policy
   test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")" = none || contract_failure network-mode
-  test "$(docker inspect --format '{{len .Mounts}}' "$container")" -eq 1 || contract_failure mount-count
-  test "$(docker inspect --format '{{(index .Mounts 0).Type}}' "$container")" = bind || contract_failure mount-type
-  test "$(docker inspect --format '{{(index .Mounts 0).Destination}}' "$container")" = /data || contract_failure mount-destination
   expected_source="$(realpath -e -- "$data_dir")"
-  inspected_source="$(docker inspect --format '{{(index .Mounts 0).Source}}' "$container")"
-  inspected_source="$(realpath -e -- "$inspected_source")"
-  test "$inspected_source" = "$expected_source" || contract_failure mount-source
+  mounts="$(docker inspect --format '{{json .Mounts}}' "$container")"
+  python3 - "$mounts" "$expected_source" <<'PY' || contract_failure mounts
+import json
+import os
+import sys
+
+mounts = json.loads(sys.argv[1])
+expected_source = os.path.realpath(sys.argv[2])
+data = [mount for mount in mounts if mount.get("Destination") == "/data"]
+if len(data) != 1:
+    raise SystemExit(1)
+mount = data[0]
+if (
+    mount.get("Type") != "bind"
+    or os.path.realpath(mount.get("Source", "")) != expected_source
+    or mount.get("RW") is not True
+):
+    raise SystemExit(1)
+if any(mount.get("Type") == "bind" and mount.get("Destination") != "/data" for mount in mounts):
+    raise SystemExit(1)
+PY
   env_matches="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" | grep -Fx 'EPUSDT_CONFIG=/data/.env' | wc -l)"
   test "$env_matches" -eq 1 || contract_failure environment
 }

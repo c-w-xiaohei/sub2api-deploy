@@ -206,6 +206,10 @@ class GmPayImageContractTests(unittest.TestCase):
                 self.assertIn(contract, self.script)
         self.assertIn("value not in (None, [])", self.script)
         self.assertIn("container_contract=%s", self.script)
+        self.assertIn('mount.get("Destination") == "/data"', self.script)
+        self.assertIn('mount.get("Type") == "bind"', self.script)
+        self.assertIn('mount.get("RW") is not True', self.script)
+        self.assertIn('mount.get("Destination") != "/data"', self.script)
         run_block = re.search(
             r"docker\s+run\s+--detach\s+\\\n(?P<args>(?:.*\\\n)+)\s+\"\$IMMUTABLE_IMAGE\"",
             self.script,
@@ -236,7 +240,8 @@ class GmPayImageContractTests(unittest.TestCase):
 
     def test_script_canonicalizes_bind_sources_and_writes_nonempty_phase_failure_artifact(self):
         self.assertIn('realpath -e -- "$data_dir"', self.script)
-        self.assertIn('realpath -e -- "$inspected_source"', self.script)
+        self.assertIn('os.path.realpath(mount.get("Source", ""))', self.script)
+        self.assertIn("os.path.realpath(sys.argv[2])", self.script)
         self.assertIn('phase=', self.script)
         self.assertIn("printf 'phase=%s\\nstatus=%s\\n' \"$phase\" \"$1\"", self.script)
         self.assertIn('test -s "$failure_log"', self.script)
