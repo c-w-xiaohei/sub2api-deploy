@@ -160,7 +160,9 @@ start_container() {
 
 assert_one_process() {
   phase=process-count
-  process_count="$(docker top "$container" -eo pid= | wc -l)"
+  process_lines="$(docker top "$container" | wc -l)"
+  test "$process_lines" -ge 1
+  process_count=$((process_lines - 1))
   test "$process_count" -eq 1
 }
 

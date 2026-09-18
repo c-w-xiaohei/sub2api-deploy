@@ -301,12 +301,12 @@ func TestRegisterProjectsPaymentGatewaysToSelectedHostsAndPublishesSelectedHostD
 		name, address, recordType string
 		host                      pulumi.MockResourceArgs
 	}{
-		"dns-payment-gateway-a-alpha-A":    {"pay-a.example.test", "198.51.100.11", "A", alpha},
-		"dns-payment-gateway-a-alpha-AAAA": {"pay-a.example.test", "2001:db8::11", "AAAA", alpha},
-		"dns-payment-gateway-m-alpha-A":    {"pay-m.example.test", "198.51.100.11", "A", alpha},
-		"dns-payment-gateway-m-alpha-AAAA": {"pay-m.example.test", "2001:db8::11", "AAAA", alpha},
-		"dns-payment-gateway-z-bravo-A":    {"pay-z.example.test", "198.51.100.12", "A", bravo},
-		"dns-payment-gateway-z-bravo-AAAA": {"pay-z.example.test", "2001:db8::12", "AAAA", bravo},
+		"dns-payment-gateway-gateway-a-alpha-A":    {"pay-a.example.test", "198.51.100.11", "A", alpha},
+		"dns-payment-gateway-gateway-a-alpha-AAAA": {"pay-a.example.test", "2001:db8::11", "AAAA", alpha},
+		"dns-payment-gateway-gateway-m-alpha-A":    {"pay-m.example.test", "198.51.100.11", "A", alpha},
+		"dns-payment-gateway-gateway-m-alpha-AAAA": {"pay-m.example.test", "2001:db8::11", "AAAA", alpha},
+		"dns-payment-gateway-gateway-z-bravo-A":    {"pay-z.example.test", "198.51.100.12", "A", bravo},
+		"dns-payment-gateway-gateway-z-bravo-AAAA": {"pay-z.example.test", "2001:db8::12", "AAAA", bravo},
 	}
 	gatewayRecords := 0
 	appRecords := map[string]bool{}
@@ -396,7 +396,7 @@ func TestRegisterPaymentGatewayChangesOnlySelectedHostAndItsDNS(t *testing.T) {
 	dns := resourcesOfType(second.resources, "cloudflare:index/dnsRecord:DnsRecord")
 	gatewayRecords := 0
 	for _, record := range dns {
-		if strings.HasPrefix(record.Name, "dns-payment-gateway-a-alpha-") {
+		if strings.HasPrefix(record.Name, "dns-payment-gateway-gateway-a-alpha-") {
 			gatewayRecords++
 			if stringValue(t, property(record.Inputs, "name")) != "pay-a-new.example.test" {
 				t.Fatalf("changed gateway DNS = %q / %v", record.Name, record.Inputs)

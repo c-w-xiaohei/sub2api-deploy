@@ -223,6 +223,8 @@ class GmPayImageContractTests(unittest.TestCase):
         self.assertRegex(self.script, r"timeout .*docker exec .*wget -q -O /dev/null http://localhost:8000/")
         self.assertRegex(self.script, r"timeout .*docker exec .*command -v wget")
         self.assertGreaterEqual(self.script.count("assert_one_process"), 2)
+        self.assertNotIn("-eo pid=", self.script)
+        self.assertIn("process_count=$((process_lines - 1))", self.script)
         self.assertIn("compatibility-sentinel", self.script)
         self.assertIn('docker exec "$container" sh -ceu', self.script)
         self.assertIn('> "/data/$2"', self.script)
