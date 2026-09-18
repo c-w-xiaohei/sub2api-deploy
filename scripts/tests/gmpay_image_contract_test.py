@@ -204,6 +204,7 @@ class GmPayImageContractTests(unittest.TestCase):
         ):
             with self.subTest(contract=contract):
                 self.assertIn(contract, self.script)
+        self.assertIn("null|'{}'", self.script)
         run_block = re.search(
             r"docker\s+run\s+--detach\s+\\\n(?P<args>(?:.*\\\n)+)\s+\"\$IMMUTABLE_IMAGE\"",
             self.script,

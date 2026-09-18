@@ -442,7 +442,7 @@ func TestRegisterWithoutPaymentGatewaysPreservesGraph(t *testing.T) {
 		t.Fatalf("repeat Register() error = %v", err)
 	}
 	if got, want := canonicalSnapshot(second.resources), canonicalSnapshot(first.resources); got != want {
-		t.Fatal("paymentGateways absence changed the existing graph")
+		t.Fatalf("paymentGateways absence changed the existing graph\nexplicit empty: %s\nomitted:        %s", got, want)
 	}
 }
 

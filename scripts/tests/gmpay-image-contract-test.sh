@@ -169,7 +169,10 @@ assert_one_process() {
 assert_container_contract() {
   phase=container-contract
   port_bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$container")"
-  test "$port_bindings" = null
+  case "$port_bindings" in
+    null|'{}') ;;
+    *) return 1 ;;
+  esac
   restart_policy="$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container")"
   test "$restart_policy" = unless-stopped
   test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")" = none
