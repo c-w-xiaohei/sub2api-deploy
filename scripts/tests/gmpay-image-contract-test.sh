@@ -168,23 +168,34 @@ assert_one_process() {
 
 assert_container_contract() {
   phase=container-contract
+  contract_failure() {
+    printf 'container_contract=%s\n' "$1" > "$evidence_dir/container-contract.stderr"
+    return 1
+  }
   port_bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$container")"
-  case "$port_bindings" in
-    null|'{}') ;;
-    *) return 1 ;;
-  esac
+  python3 - "$port_bindings" <<'PY' || contract_failure port-bindings
+import json
+import sys
+
+bindings = json.loads(sys.argv[1])
+if bindings is not None and (
+    not isinstance(bindings, dict)
+    or any(value not in (None, []) for value in bindings.values())
+):
+    raise SystemExit(1)
+PY
   restart_policy="$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container")"
-  test "$restart_policy" = unless-stopped
-  test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")" = none
-  test "$(docker inspect --format '{{len .Mounts}}' "$container")" -eq 1
-  test "$(docker inspect --format '{{(index .Mounts 0).Type}}' "$container")" = bind
-  test "$(docker inspect --format '{{(index .Mounts 0).Destination}}' "$container")" = /data
+  test "$restart_policy" = unless-stopped || contract_failure restart-policy
+  test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")" = none || contract_failure network-mode
+  test "$(docker inspect --format '{{len .Mounts}}' "$container")" -eq 1 || contract_failure mount-count
+  test "$(docker inspect --format '{{(index .Mounts 0).Type}}' "$container")" = bind || contract_failure mount-type
+  test "$(docker inspect --format '{{(index .Mounts 0).Destination}}' "$container")" = /data || contract_failure mount-destination
   expected_source="$(realpath -e -- "$data_dir")"
   inspected_source="$(docker inspect --format '{{(index .Mounts 0).Source}}' "$container")"
   inspected_source="$(realpath -e -- "$inspected_source")"
-  test "$inspected_source" = "$expected_source"
+  test "$inspected_source" = "$expected_source" || contract_failure mount-source
   env_matches="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" | grep -Fx 'EPUSDT_CONFIG=/data/.env' | wc -l)"
-  test "$env_matches" -eq 1
+  test "$env_matches" -eq 1 || contract_failure environment
 }
 
 wait_until_ready() {

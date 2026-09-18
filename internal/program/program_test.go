@@ -1399,7 +1399,9 @@ func canonicalSnapshot(resources []pulumi.MockResourceArgs) string {
 		snapshot = append(snapshot, snapshotResource{item.TypeToken, semanticIdentity(item), providerToken(item, resources), item.RegisterRPC.GetProtect(), item.RegisterRPC.GetRetainOnDelete(), sanitize(item.Inputs), normalizedDependencies(item, resources)})
 	}
 	sort.Slice(snapshot, func(i, j int) bool {
-		return snapshot[i].Type+snapshot[i].Identity < snapshot[j].Type+snapshot[j].Identity
+		left := snapshot[i].Type + "\x00" + snapshot[i].Identity + "\x00" + snapshot[i].Provider + "\x00" + snapshot[i].Inputs + "\x00" + strings.Join(snapshot[i].Dependencies, "\x00")
+		right := snapshot[j].Type + "\x00" + snapshot[j].Identity + "\x00" + snapshot[j].Provider + "\x00" + snapshot[j].Inputs + "\x00" + strings.Join(snapshot[j].Dependencies, "\x00")
+		return left < right
 	})
 	bytes, _ := json.Marshal(snapshot)
 	return string(bytes)
