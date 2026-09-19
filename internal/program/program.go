@@ -208,9 +208,7 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 		var host hostResource
 		dependencies := hostDependencies(serverID, validated.Config, hosts, dockerDependencies)
 		for _, gatewayID := range sortedPaymentGatewayIDs(validated.Config) {
-			if validated.PaymentGateways[gatewayID].Server == serverID {
-				dependencies = append(dependencies, placements[gatewayID])
-			}
+			dependencies = append(dependencies, placements[gatewayID])
 		}
 		var options []pulumi.ResourceOption
 		if len(dependencies) != 0 {

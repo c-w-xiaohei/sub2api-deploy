@@ -35,7 +35,4 @@ apps:
     servers: [alpha, bravo]
     postgres: {name: app-postgres, database: sub2api}
     redis: {name: app-redis, database: 0}
-    publicAccess:
-      type: cloudflare
-      servers: [alpha, bravo]
-      cloudflare: {mode: dns, connectBy: publicAddress}
+    publicAccess: {type: none}
