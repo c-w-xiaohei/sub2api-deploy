@@ -89,6 +89,15 @@ func TestGatewayContractDriftMarksObservationAndFailsClosed(t *testing.T) {
 		{name: "data-bind-read-only", tamper: func(s *gatewayInspectState, o managedObject, _ State) {
 			s.Binds = []string{"/data/" + o.DataToken + ":/data:ro"}
 		}},
+		{name: "effective-data-bind-read-only", tamper: func(s *gatewayInspectState, _ managedObject, _ State) {
+			s.Mounts[0].RW = false
+		}},
+		{name: "effective-data-bind-source", tamper: func(s *gatewayInspectState, _ managedObject, _ State) {
+			s.Mounts[0].Source = "/tmp/foreign"
+		}},
+		{name: "extra-effective-bind", tamper: func(s *gatewayInspectState, _ managedObject, _ State) {
+			s.Mounts = append(s.Mounts, gatewayMount{Type: "bind", Source: "/tmp/foreign", Destination: "/foreign", RW: true})
+		}},
 		{name: "config-missing", tamper: func(s *gatewayInspectState, _ managedObject, _ State) { s.Env = []string{} }},
 		{name: "config-duplicate", tamper: func(s *gatewayInspectState, _ managedObject, _ State) {
 			s.Env = append(s.Env, "EPUSDT_CONFIG=/data/.env")
@@ -142,7 +151,7 @@ func TestGatewayInspectAcceptsExplicitWritableBindMode(t *testing.T) {
 	runner := &recordingRunner{}
 	rt.runner = runner
 	target := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}
-	if _, err := rt.Reconcile(t.Context(), requestForGateway(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
 		t.Fatal(err)
 	}
 	state = mustState(t, rt)
@@ -156,12 +165,31 @@ func TestGatewayInspectAcceptsExplicitWritableBindMode(t *testing.T) {
 	}
 }
 
+func TestGatewayInspectAcceptsUnallocatedExposedPortAndImageVolume(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	target := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
+		t.Fatal(err)
+	}
+	state = mustState(t, rt)
+	object := findPaymentGateway(mustInventory(t, rt), paymentGatewayToken("primary"))
+	contract := runner.gatewayInspect[object.Name]
+	contract.PortBindings = map[string][]gatewayPortBinding{"8000/tcp": nil}
+	runner.gatewayInspect[object.Name] = contract
+	result, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource})
+	if err != nil || result.Observation == nil || !result.Observation.Ready || result.Observation.Drifted {
+		t.Fatalf("unallocated exposed port and image volume = %#v %v", result, err)
+	}
+}
+
 func TestGatewayInspectPropagatesDockerInspectRecoveryFailure(t *testing.T) {
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
 	rt.runner = runner
 	target := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}
-	if _, err := rt.Reconcile(t.Context(), requestForGateway(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
 		t.Fatal(err)
 	}
 	state = mustState(t, rt)
@@ -173,8 +201,8 @@ func TestGatewayInspectPropagatesDockerInspectRecoveryFailure(t *testing.T) {
 }
 
 func TestDecodeGatewayDockerInspectRejectsNullRequiredFields(t *testing.T) {
-	valid := []byte(`{"Config":{"Image":"image","Env":["EPUSDT_CONFIG=/data/.env"]},"HostConfig":{"RestartPolicy":{"Name":"unless-stopped"},"Binds":["/data:/data"],"PortBindings":null,"PublishAllPorts":false},"NetworkSettings":{"Networks":{"managed":{"Aliases":["name","alias"]}}},"State":{"Running":true}}`)
-	for _, field := range []string{"Config", "HostConfig", "NetworkSettings", "State"} {
+	valid := []byte(`{"Config":{"Image":"image","Env":["EPUSDT_CONFIG=/data/.env"]},"HostConfig":{"RestartPolicy":{"Name":"unless-stopped"},"Binds":["/data:/data"],"PortBindings":null,"PublishAllPorts":false},"Mounts":[{"Type":"bind","Source":"/data","Destination":"/data","RW":true}],"NetworkSettings":{"Networks":{"managed":{"Aliases":["name","alias"]}}},"State":{"Running":true}}`)
+	for _, field := range []string{"Config", "HostConfig", "Mounts", "NetworkSettings", "State"} {
 		t.Run(field, func(t *testing.T) {
 			var document map[string]any
 			if err := json.Unmarshal(valid, &document); err != nil {
@@ -224,7 +252,7 @@ func TestGatewayInspectAcceptsRealDockerEnvelopeWithUnrelatedFields(t *testing.T
 	runner := &recordingRunner{}
 	rt.runner = runner
 	target := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}
-	if _, err := rt.Reconcile(t.Context(), requestForGateway(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
 		t.Fatal(err)
 	}
 	state = mustState(t, rt)
@@ -323,6 +351,21 @@ func requestForGateway(state State, revision string, gateways []hostcontract.Pay
 	request := requestFor(state, revision)
 	request.Target.PaymentGateways = gateways
 	return request
+}
+
+func requestForGatewayWithProxy(state State, revision string, gateways []hostcontract.PaymentGatewayTarget) hostprotocol.Request {
+	request := requestForGateway(state, revision, gateways)
+	request.Target.ReverseProxy = &hostcontract.ReverseProxyTarget{Image: "traefik:v3", ACMEEmail: "ops@example.test"}
+	request.Secrets.ReverseProxy = &hostcontract.ReverseProxySecrets{DNSChallengeToken: "CANARY"}
+	return request
+}
+
+func useShortGatewayReadinessTimeout(t *testing.T) {
+	t.Helper()
+	newGatewayReadinessContext = func(ctx context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(ctx, 5*time.Millisecond)
+	}
+	t.Cleanup(func() { newGatewayReadinessContext = context.WithTimeout })
 }
 
 func countRunning(runner *recordingRunner) int {
@@ -451,7 +494,7 @@ func TestGatewayRemovalResponseLossReplaysAfterContainerWasRemoved(t *testing.T)
 		}
 		return nil
 	}
-	removal := requestForGateway(state, revisionC(), nil)
+	removal := requestForGatewayWithProxy(state, revisionC(), nil)
 	if _, err := rt.Reconcile(t.Context(), removal); err == nil {
 		t.Fatal("response-loss removal unexpectedly succeeded")
 	}
@@ -772,11 +815,46 @@ func TestGatewayUpgradeRouteWriteFailureRestoresOldWorkerAndRoute(t *testing.T) 
 	}
 }
 
+func TestGatewayUpgradePostRouteReadinessFailureRestoresOldWorkerAndRoute(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	first := requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "old.example.test"}})
+	if _, err := rt.Reconcile(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	useShortGatewayReadinessTimeout(t)
+	state = mustState(t, rt)
+	old := findPaymentGateway(mustInventory(t, rt), paymentGatewayToken("primary"))
+	oldRoute := mustRouteArtifact(t, rt, routeName(old.AppToken))
+	runner.fail = func(argv []string) error {
+		if len(argv) > 2 && argv[0] == "exec" && containsPair(argv, "--header", "Host:new.example.test") {
+			return errors.New("route not ready")
+		}
+		return nil
+	}
+	second := requestForGatewayWithProxy(state, revisionC(), []hostcontract.PaymentGatewayTarget{{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.1", Hostname: "new.example.test"}})
+	if _, err := rt.Reconcile(t.Context(), second); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("post-route readiness failure = %v calls=%#v", err, runner.calls)
+	}
+	if runner.running[old.Name] != true || !bytes.Equal(mustRouteArtifact(t, rt, routeName(old.AppToken)), oldRoute) {
+		t.Fatalf("post-route failure did not restore old state: running=%#v route=%q calls=%#v", runner.running, mustRouteArtifact(t, rt, routeName(old.AppToken)), runner.calls)
+	}
+	runner.fail = nil
+	if result, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource}); err != nil || result.Observation == nil || !result.Observation.Drifted || result.Observation.Ready {
+		t.Fatalf("post-route rollback pending inspect = %#v, %v", result.Observation, err)
+	}
+	newGatewayReadinessContext = context.WithTimeout
+	if _, err := rt.Reconcile(t.Context(), second); err != nil {
+		t.Fatalf("post-route rollback retry = %v calls=%#v", err, runner.calls)
+	}
+}
+
 func TestGatewayRemovalRouteResponseLossReplaysBeforeContainerRemoval(t *testing.T) {
 	rt, state := initialized(t)
 	runner := &recordingRunner{}
 	rt.runner = runner
-	request := requestForGateway(state, revisionB(), []hostcontract.PaymentGatewayTarget{{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}})
+	request := requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}})
 	if _, err := rt.Reconcile(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +862,7 @@ func TestGatewayRemovalRouteResponseLossReplaysBeforeContainerRemoval(t *testing
 	object := findPaymentGateway(mustInventory(t, rt), paymentGatewayToken("primary"))
 	routeRemoveHook = func(string) error { return errors.New("route response lost") }
 	t.Cleanup(func() { routeRemoveHook = nil })
-	removal := requestForGateway(state, revisionC(), nil)
+	removal := requestForGatewayWithProxy(state, revisionC(), nil)
 	if _, err := rt.Reconcile(t.Context(), removal); err == nil {
 		t.Fatal("route removal loss unexpectedly succeeded")
 	}
@@ -797,6 +875,21 @@ func TestGatewayRemovalRouteResponseLossReplaysBeforeContainerRemoval(t *testing
 	}
 	if runner.mutations("rm") != 1 {
 		t.Fatalf("route removal retry did not remove worker: %#v", runner.calls)
+	}
+}
+
+func TestInspectMarksGatewayDriftedWhenOwnedProxyIsMissing(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	target := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}
+	if _, err := rt.Reconcile(t.Context(), requestForGateway(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
+		t.Fatal(err)
+	}
+	state = mustState(t, rt)
+	result, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource})
+	if err != nil || result.Observation == nil || !result.Observation.Drifted || result.Observation.Ready || result.Observation.PaymentGateways[0].Ready {
+		t.Fatalf("missing proxy observation = %#v, %v", result.Observation, err)
 	}
 }
 
@@ -823,6 +916,33 @@ func TestGatewayCreateRouteFailureRemovesWorkerAndLeavesDataForRetry(t *testing.
 	}
 	if _, err := rt.readInventory(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed create advanced inventory: %v", err)
+	}
+}
+
+func TestGatewayCreatePostRouteReadinessFailureRemovesWorkerAndRoute(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	useShortGatewayReadinessTimeout(t)
+	runner.fail = func(argv []string) error {
+		if len(argv) > 2 && argv[0] == "exec" && containsPair(argv, "--header", "Host:pay.example.test") {
+			return errors.New("route not ready")
+		}
+		return nil
+	}
+	rt.runner = runner
+	target := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}
+	object := paymentGatewayObject(state, target, revisionB())
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("post-route readiness failure = %v calls=%#v", err, runner.calls)
+	}
+	if runner.inspect[object.Name] != "" || runner.running[object.Name] {
+		t.Fatalf("candidate worker was not removed: inspect=%#v running=%#v calls=%#v", runner.inspect, runner.running, runner.calls)
+	}
+	if _, err := rt.readArtifactBytes(routeName(object.AppToken)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("candidate route remains: %v", err)
+	}
+	if _, err := os.Stat(rt.dataPath(object.DataToken)); err != nil {
+		t.Fatalf("data root was not preserved: %v", err)
 	}
 }
 
@@ -879,6 +999,35 @@ func TestGatewaySameImageHostnameRouteResponseLossAfterWriteRestoresOldRoute(t *
 	}
 	if !bytes.Equal(mustRouteArtifact(t, rt, routeName(old.AppToken)), oldRoute) || runner.mutations("pull", "run", "stop", "rm") != 0 {
 		t.Fatalf("old state was not restored: route=%q calls=%#v", mustRouteArtifact(t, rt, routeName(old.AppToken)), runner.calls)
+	}
+}
+
+func TestGatewaySameImageHostnamePostRouteReadinessFailureRestoresOldRoute(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	oldTarget := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "old.example.test"}
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{oldTarget})); err != nil {
+		t.Fatal(err)
+	}
+	useShortGatewayReadinessTimeout(t)
+	state = mustState(t, rt)
+	old := findPaymentGateway(mustInventory(t, rt), paymentGatewayToken("primary"))
+	oldRoute := mustRouteArtifact(t, rt, routeName(old.AppToken))
+	runner.fail = func(argv []string) error {
+		if len(argv) > 2 && argv[0] == "exec" && containsPair(argv, "--header", "Host:new.example.test") {
+			return errors.New("route not ready")
+		}
+		return nil
+	}
+	newTarget := oldTarget
+	newTarget.Hostname = "new.example.test"
+	runner.calls = nil
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionC(), []hostcontract.PaymentGatewayTarget{newTarget})); !isRemote(err, hostprotocol.ErrorRemoteOperation, hostprotocol.CodeOperationFailed) {
+		t.Fatalf("post-route readiness failure = %v calls=%#v", err, runner.calls)
+	}
+	if !bytes.Equal(mustRouteArtifact(t, rt, routeName(old.AppToken)), oldRoute) || !runner.running[old.Name] {
+		t.Fatalf("old state was not retained: route=%q calls=%#v", mustRouteArtifact(t, rt, routeName(old.AppToken)), runner.calls)
 	}
 }
 
@@ -1177,12 +1326,33 @@ func TestInspectReportsExactGatewayObservationAndLegacyNoGatewayObservation(t *t
 	if result, err := rt.Handle(t.Context(), noGateway); err != nil || result.Observation == nil || len(result.Observation.PaymentGateways) != 0 {
 		t.Fatalf("legacy inspect = %#v %v", result, err)
 	}
-	request := requestForGateway(state, revisionB(), []hostcontract.PaymentGatewayTarget{{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}})
+	request := requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}})
 	if _, err := rt.Reconcile(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
 	result, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource})
 	if err != nil || result.Observation == nil || len(result.Observation.PaymentGateways) != 1 || result.Observation.PaymentGateways[0].ActiveImage != "gmwallet/epusdt:v2.0.0" || !result.Observation.PaymentGateways[0].Ready || !result.Observation.Ready {
 		t.Fatalf("gateway inspect = %#v %v", result, err)
+	}
+}
+
+func TestInspectMarksGatewayDriftedWhenTraefikRouteIsUnavailable(t *testing.T) {
+	rt, state := initialized(t)
+	runner := &recordingRunner{}
+	rt.runner = runner
+	target := hostcontract.PaymentGatewayTarget{ID: "primary", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.0", Hostname: "pay.example.test"}
+	if _, err := rt.Reconcile(t.Context(), requestForGatewayWithProxy(state, revisionB(), []hostcontract.PaymentGatewayTarget{target})); err != nil {
+		t.Fatalf("initial gateway reconcile = %v calls=%#v", err, runner.calls)
+	}
+	state = mustState(t, rt)
+	runner.fail = func(argv []string) error {
+		if len(argv) > 2 && argv[0] == "exec" && containsPair(argv, "--header", "Host:pay.example.test") {
+			return errors.New("route unavailable")
+		}
+		return nil
+	}
+	result, err := rt.Handle(t.Context(), hostprotocol.Request{Action: hostcontract.ActionInspect, Resource: state.Resource})
+	if err != nil || result.Observation == nil || !result.Observation.Drifted || result.Observation.Ready || len(result.Observation.PaymentGateways) != 1 || result.Observation.PaymentGateways[0].Ready {
+		t.Fatalf("Traefik route drift observation = %#v, %v", result.Observation, err)
 	}
 }

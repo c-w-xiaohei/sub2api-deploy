@@ -1,4 +1,4 @@
-// Package hostprovider exposes the single Host resource.
+// Package hostprovider exposes Host deployment resources.
 package hostprovider
 
 import (
@@ -8,14 +8,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostcontract"
+	"github.com/c-w-xiaohei/sub2api-deploy/internal/hostresource"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/openssh"
 	p "github.com/pulumi/pulumi-go-provider"
+	pulumiresource "github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
-const hostToken = "sub2api-host:index:Host"
+const hostToken = hostresource.HostToken
 
 // New creates the Host provider using the preinstalled Nix Host profile.
 func New(version string) p.Provider {
@@ -29,7 +32,50 @@ func NewWithApproval(version string, approve func(context.Context, hostcontract.
 }
 
 func newProvider(h *host) p.Provider {
-	return p.Provider{GetSchema: h.schema, CheckConfig: h.checkConfig, Configure: h.configure, Check: h.check, Diff: h.diff, Create: h.create, Read: h.read, Update: h.update, Delete: h.delete}
+	placement := paymentGatewayPlacement{}
+	return p.Provider{
+		GetSchema: h.schema, CheckConfig: h.checkConfig, Configure: h.configure,
+		Check: func(ctx context.Context, req p.CheckRequest) (p.CheckResponse, error) {
+			if isPaymentGatewayPlacement(req.Urn) {
+				return placement.check(ctx, req)
+			}
+			return h.check(ctx, req)
+		},
+		Diff: func(ctx context.Context, req p.DiffRequest) (p.DiffResponse, error) {
+			if isPaymentGatewayPlacement(req.Urn) {
+				return placement.diff(ctx, req)
+			}
+			return h.diff(ctx, req)
+		},
+		Create: func(ctx context.Context, req p.CreateRequest) (p.CreateResponse, error) {
+			if isPaymentGatewayPlacement(req.Urn) {
+				return placement.create(ctx, req)
+			}
+			return h.create(ctx, req)
+		},
+		Read: func(ctx context.Context, req p.ReadRequest) (p.ReadResponse, error) {
+			if isPaymentGatewayPlacement(req.Urn) {
+				return placement.read(ctx, req)
+			}
+			return h.read(ctx, req)
+		},
+		Update: func(ctx context.Context, req p.UpdateRequest) (p.UpdateResponse, error) {
+			if isPaymentGatewayPlacement(req.Urn) {
+				return placement.update(ctx, req)
+			}
+			return h.update(ctx, req)
+		},
+		Delete: func(ctx context.Context, req p.DeleteRequest) error {
+			if isPaymentGatewayPlacement(req.Urn) {
+				return placement.delete(ctx, req)
+			}
+			return h.delete(ctx, req)
+		},
+	}
+}
+
+func isPaymentGatewayPlacement(resourceURN pulumiresource.URN) bool {
+	return resourceURN != "" && string(resourceURN.Type()) == hostresource.PaymentGatewayPlacementToken
 }
 
 func newHost(version string) *host {
@@ -50,7 +96,7 @@ func (h *host) schema(context.Context, p.GetSchemaRequest) (p.GetSchemaResponse,
 	if err != nil {
 		return p.GetSchemaResponse{}, err
 	}
-	return p.GetSchemaResponse{Schema: fmt.Sprintf(`{"name":"sub2api-host","version":%q,"config":{"variables":{"revisionKey":{"type":"string","secret":true}},"defaults":["revisionKey"]},"resources":{"%s":{"inputProperties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true}},"requiredInputs":["resource","server","target","secrets"],"properties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true},"machine":{"$ref":"#/types/sub2api-host:index:MachineIdentity"},"ownership":{"$ref":"#/types/sub2api-host:index:OwnershipIdentity"},"appliedRevision":{"type":"string"},"observation":{"$ref":"#/types/sub2api-host:index:StableObservation"}}}},"types":%s}`, h.version, hostToken, types)}, nil
+	return p.GetSchemaResponse{Schema: fmt.Sprintf(`{"name":"sub2api-host","version":%q,"config":{"variables":{"revisionKey":{"type":"string","secret":true}},"defaults":["revisionKey"]},"resources":{"%s":{"inputProperties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true}},"requiredInputs":["resource","server","target","secrets"],"properties":{"resource":{"$ref":"#/types/sub2api-host:index:ResourceIdentity"},"server":{"$ref":"#/types/sub2api-host:index:ServerTarget"},"target":{"$ref":"#/types/sub2api-host:index:Target"},"secrets":{"$ref":"#/types/sub2api-host:index:Secrets","secret":true},"machine":{"$ref":"#/types/sub2api-host:index:MachineIdentity"},"ownership":{"$ref":"#/types/sub2api-host:index:OwnershipIdentity"},"appliedRevision":{"type":"string"},"observation":{"$ref":"#/types/sub2api-host:index:StableObservation"}}},%q:{"inputProperties":{"id":{"type":"string"},"server":{"type":"string"}},"requiredInputs":["id","server"],"properties":{"id":{"type":"string"},"server":{"type":"string"}},"required":["id","server"]}},"types":%s}`, h.version, hostToken, hostresource.PaymentGatewayPlacementToken, types)}, nil
 }
 
 func expandedSchemaTypes() (string, error) {
@@ -67,6 +113,7 @@ func expandedSchemaTypes() (string, error) {
 	local["properties"].(map[string]any)["clients"] = map[string]any{"type": "array", "items": map[string]any{"$ref": "#/types/sub2api-host:index:LocalDataClient"}}
 	target := types["sub2api-host:index:Target"].(map[string]any)
 	target["properties"].(map[string]any)["paymentGateways"] = map[string]any{"type": "array", "items": map[string]any{"$ref": "#/types/sub2api-host:index:PaymentGatewayTarget"}}
+	target["properties"].(map[string]any)["paymentGatewayPlacements"] = map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}
 	types["sub2api-host:index:PaymentGatewayTarget"] = map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "type": map[string]any{"type": "string"}, "image": map[string]any{"type": "string"}, "hostname": map[string]any{"type": "string"}}, "required": []string{"id", "type", "image", "hostname"}}
 	observation := types["sub2api-host:index:StableObservation"].(map[string]any)
 	observation["properties"].(map[string]any)["paymentGateways"] = map[string]any{"type": "array", "items": map[string]any{"$ref": "#/types/sub2api-host:index:PaymentGatewayObservation"}}
@@ -146,6 +193,7 @@ func (h *host) check(_ context.Context, req p.CheckRequest) (p.CheckResponse, er
 	if hasComputed(inputs) {
 		failures = append(failures, validateKnownPaymentGateways(inputs)...)
 	}
+	failures = append(failures, validatePaymentGatewayProxy(inputs)...)
 	if resource, ok := inputs.GetOk("resource"); ok && !resource.IsComputed() && unwrap(resource).IsMap() {
 		for _, name := range []string{"environment", "serverKey"} {
 			if v, ok := unwrap(resource).AsMap().GetOk(name); ok && !v.IsComputed() && v.IsString() && v.AsString() == "" {
@@ -179,12 +227,23 @@ func (h *host) diff(_ context.Context, req p.DiffRequest) (p.DiffResponse, error
 	if hasComputed(old) || hasComputed(next) {
 		return p.DiffResponse{HasChanges: true, DetailedDiff: map[string]p.PropertyDiff{}}, nil
 	}
+	oldIdentity, oldTarget, err := hostResourceAndTarget(old)
+	if err != nil {
+		return p.DiffResponse{}, err
+	}
+	_, nextTarget, err := hostResourceAndTarget(next)
+	if err != nil {
+		return p.DiffResponse{}, err
+	}
+	if err := rejectUnstagedGatewayMoves(oldIdentity.ServerKey, oldTarget, nextTarget); err != nil {
+		return p.DiffResponse{}, err
+	}
 	if err := validate(next); err != nil {
 		return p.DiffResponse{}, err
 	}
 	d := map[string]p.PropertyDiff{}
 	for _, key := range []string{"target", "secrets"} {
-		if changed(old, next, key) {
+		if changed(old, next, key) && (key != "target" || !targetRuntimeEqual(oldTarget, nextTarget)) {
 			d[key] = p.PropertyDiff{Kind: p.Update, InputDiff: true}
 		}
 	}
@@ -210,6 +269,34 @@ func (h *host) diff(_ context.Context, req p.DiffRequest) (p.DiffResponse, error
 		}
 	}
 	return p.DiffResponse{HasChanges: len(d) > 0, DetailedDiff: d}, nil
+}
+
+func targetRuntimeEqual(a, b hostcontract.Target) bool {
+	a.PaymentGatewayPlacements = nil
+	b.PaymentGatewayPlacements = nil
+	return reflect.DeepEqual(a, b)
+}
+
+func hostResourceAndTarget(inputs property.Map) (hostcontract.ResourceIdentity, hostcontract.Target, error) {
+	var resource hostcontract.ResourceIdentity
+	var target hostcontract.Target
+	if decode(valueAtMap(inputs, "resource"), &resource) != nil || decode(valueAtMap(inputs, "target"), &target) != nil {
+		return hostcontract.ResourceIdentity{}, hostcontract.Target{}, fmt.Errorf("lifecycle inputs are invalid")
+	}
+	return resource, target, nil
+}
+
+func rejectUnstagedGatewayMoves(server string, old, next hostcontract.Target) error {
+	for _, gateway := range old.PaymentGateways {
+		if nextServer := next.PaymentGatewayPlacements[gateway.ID]; nextServer != "" && nextServer != server {
+			return paymentGatewayMoveError(gateway.ID, server, nextServer)
+		}
+	}
+	return nil
+}
+
+func paymentGatewayMoveError(id, oldServer, nextServer string) error {
+	return fmt.Errorf("paymentGateways.%s.server cannot change from %q to %q in one Pulumi update; remove and apply first, then backup/restore and re-add", id, oldServer, nextServer)
 }
 
 func (h *host) create(ctx context.Context, req p.CreateRequest) (p.CreateResponse, error) {
@@ -296,6 +383,9 @@ func validate(m property.Map) error {
 	if err := hostcontract.ValidateTarget(t, s); err != nil {
 		return err
 	}
+	if len(t.PaymentGateways) != 0 && (t.ReverseProxy == nil || s.ReverseProxy == nil) {
+		return fmt.Errorf("payment gateways require reverse proxy target and secrets")
+	}
 	for _, app := range t.Apps {
 		if _, ok := app.RuntimeSettings["ADMIN_EMAIL"]; ok {
 			return fmt.Errorf("runtime settings reserve ADMIN_EMAIL")
@@ -367,6 +457,41 @@ func validateKnownPaymentGateways(inputs property.Map) []p.CheckFailure {
 	return failures
 }
 
+func validatePaymentGatewayProxy(inputs property.Map) []p.CheckFailure {
+	target, ok := inputs.GetOk("target")
+	if !ok || target.IsComputed() {
+		return nil
+	}
+	target = unwrap(target)
+	if !target.IsMap() {
+		return nil
+	}
+	gateways, ok := target.AsMap().GetOk("paymentGateways")
+	if !ok || gateways.IsComputed() {
+		return nil
+	}
+	gateways = unwrap(gateways)
+	if !gateways.IsArray() || gateways.AsArray().Len() == 0 {
+		return nil
+	}
+	var failures []p.CheckFailure
+	if proxy, ok := target.AsMap().GetOk("reverseProxy"); !ok || proxy.IsNull() {
+		failures = append(failures, p.CheckFailure{Property: "target.reverseProxy", Reason: "is required when paymentGateways is nonempty"})
+	}
+	secrets, ok := inputs.GetOk("secrets")
+	if !ok || secrets.IsComputed() {
+		return failures
+	}
+	secrets = unwrap(secrets)
+	if !secrets.IsMap() {
+		return failures
+	}
+	if proxy, ok := secrets.AsMap().GetOk("reverseProxy"); !ok || proxy.IsNull() {
+		failures = append(failures, p.CheckFailure{Property: "secrets.reverseProxy", Reason: "is required when paymentGateways is nonempty"})
+	}
+	return failures
+}
+
 func decode(value property.Value, out any) error {
 	raw, err := rawValue(unwrap(value))
 	if err != nil {
@@ -434,7 +559,7 @@ var port = shape{kind: "number", minimum: 1, maximum: 65535}
 var dataIdentity = shape{fields: map[string]shape{"kind": {kind: "string", nonEmpty: true, oneOf: []string{"postgres", "redis"}}, "providerId": requiredString, "endpoint": requiredString, "port": port, "database": requiredString, "tlsMode": {kind: "string", nonEmpty: true, oneOf: []string{"disable", "require", "verify-ca", "verify-full"}}, "tlsServerName": scalar}, required: []string{"kind", "providerId", "endpoint", "port", "database"}}
 var appTarget = shape{fields: map[string]shape{"id": requiredString, "image": requiredString, "hostname": requiredString, "readinessPath": requiredString, "drainTimeout": scalar, "initialBootstrap": boolean, "initialAdminEmail": requiredString, "runtimeSettings": {mapValue: &scalar, keyNonEmpty: true}, "dataLinks": {array: &shape{fields: map[string]shape{"name": requiredString, "identity": dataIdentity}, required: []string{"name", "identity"}}}}, required: []string{"id", "image", "hostname", "readinessPath", "initialAdminEmail"}}
 var paymentGatewayTarget = shape{fields: map[string]shape{"id": requiredString, "type": {kind: "string", nonEmpty: true, oneOf: []string{"gmpay"}}, "image": requiredString, "hostname": requiredString}, required: []string{"id", "type", "image", "hostname"}}
-var targetShape = shape{fields: map[string]shape{"releaseArtifact": requiredString, "apps": {array: &appTarget}, "paymentGateways": {array: &paymentGatewayTarget}, "dataServices": {array: &shape{fields: map[string]shape{"id": requiredString, "type": {kind: "string", nonEmpty: true, oneOf: []string{"postgres", "redis"}}, "port": port, "persistence": boolean, "bindings": {array: &shape{fields: map[string]shape{"address": requiredString, "allowedSources": {array: &requiredString}}, required: []string{"address", "allowedSources"}}}, "clients": {array: &shape{fields: map[string]shape{"appId": requiredString, "username": requiredString, "database": requiredString}, required: []string{"appId", "username", "database"}}}}, required: []string{"id", "type", "port"}}}, "reverseProxy": {fields: map[string]shape{"image": requiredString, "acmeEmail": requiredString}, required: []string{"image", "acmeEmail"}}, "microSocks": {fields: map[string]shape{"server": boolean, "clients": {array: &shape{fields: map[string]shape{"id": requiredString}, required: []string{"id"}}}}}, "connectors": {array: &shape{fields: map[string]shape{"id": requiredString, "tunnelId": requiredString, "appIds": {array: &requiredString}}, required: []string{"id", "tunnelId"}}}}, required: []string{"releaseArtifact"}}
+var targetShape = shape{fields: map[string]shape{"releaseArtifact": requiredString, "apps": {array: &appTarget}, "paymentGateways": {array: &paymentGatewayTarget}, "paymentGatewayPlacements": {mapValue: &requiredString, keyNonEmpty: true}, "dataServices": {array: &shape{fields: map[string]shape{"id": requiredString, "type": {kind: "string", nonEmpty: true, oneOf: []string{"postgres", "redis"}}, "port": port, "persistence": boolean, "bindings": {array: &shape{fields: map[string]shape{"address": requiredString, "allowedSources": {array: &requiredString}}, required: []string{"address", "allowedSources"}}}, "clients": {array: &shape{fields: map[string]shape{"appId": requiredString, "username": requiredString, "database": requiredString}, required: []string{"appId", "username", "database"}}}}, required: []string{"id", "type", "port"}}}, "reverseProxy": {fields: map[string]shape{"image": requiredString, "acmeEmail": requiredString}, required: []string{"image", "acmeEmail"}}, "microSocks": {fields: map[string]shape{"server": boolean, "clients": {array: &shape{fields: map[string]shape{"id": requiredString}, required: []string{"id"}}}}}, "connectors": {array: &shape{fields: map[string]shape{"id": requiredString, "tunnelId": requiredString, "appIds": {array: &requiredString}}, required: []string{"id", "tunnelId"}}}}, required: []string{"releaseArtifact"}}
 var credentials = shape{fields: map[string]shape{"username": requiredString, "password": requiredString}, required: []string{"username", "password"}}
 var secretsShape = shape{fields: map[string]shape{"apps": {mapValue: &shape{fields: map[string]shape{"initialAdminPassword": scalar, "jwtSecret": scalar, "totpEncryptionKey": scalar, "adminApiKey": scalar, "runtimeEnvironment": {mapValue: &scalar, keyNonEmpty: true}, "postgres": credentials, "redis": credentials}}, keyNonEmpty: true}, "localDataServices": {mapValue: &shape{fields: map[string]shape{"adminPassword": requiredString, "clientPasswords": {mapValue: &requiredString, keyNonEmpty: true}}, required: []string{"adminPassword"}}, keyNonEmpty: true}, "reverseProxy": {fields: map[string]shape{"dnsChallengeToken": requiredString}, required: []string{"dnsChallengeToken"}}, "microSocks": {fields: map[string]shape{"serverUsername": scalar, "serverPassword": scalar, "clientCredentials": {mapValue: &credentials, keyNonEmpty: true}}}, "connectors": {mapValue: &shape{fields: map[string]shape{"token": requiredString}, required: []string{"token"}}, keyNonEmpty: true}}}
 

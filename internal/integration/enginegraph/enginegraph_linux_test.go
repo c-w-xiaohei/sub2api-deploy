@@ -23,6 +23,7 @@ import (
 
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/integration/automationtest"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/program"
+	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/events"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optpreview"
@@ -32,7 +33,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-	p "github.com/pulumi/pulumi-go-provider"
 )
 
 const release = "ghcr.io/example/sub2api-deploy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -209,10 +209,10 @@ func (f *traceFixture) recordHostCheck(req p.CheckRequest) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hostChecks = append(f.hostChecks, hostCheckObservation{
-		URN:           req.Urn,
-		Type:          req.Urn.Type(),
-		Name:          string(req.Urn.Name()),
-		News:          clonePropertyMap(resource.ToResourcePropertyMap(req.Inputs)),
+		URN:  req.Urn,
+		Type: req.Urn.Type(),
+		Name: string(req.Urn.Name()),
+		News: clonePropertyMap(resource.ToResourcePropertyMap(req.Inputs)),
 	})
 }
 
@@ -837,6 +837,64 @@ func TestEngineGraphTraceArtifactIsSanitizedJSONL(t *testing.T) {
 	assertSanitizedLifecycleTrace(t, harness.trace.snapshot())
 }
 
+func TestEngineGraphRejectsOneStepPaymentGatewayServerMoveBeforeHostMutation(t *testing.T) {
+	harness := newEngineGraphHarness(t, map[string]bool{"alpha": true, "bravo": true})
+	initial, err := harness.update(t, "payment-gateway-alpha.yaml", "payment-gateway-secrets.yaml")
+	if err != nil {
+		t.Fatalf("initial payment gateway placement: %v", err)
+	}
+	before := len(harness.trace.snapshot())
+	after, err := harness.update(t, "payment-gateway-bravo.yaml", "payment-gateway-secrets.yaml")
+	if err == nil || !strings.Contains(err.Error(), "remove and apply first") {
+		t.Fatalf("one-step payment gateway move error = %v", err)
+	}
+	if events := harness.trace.snapshot()[before:]; len(events) != 0 {
+		t.Fatalf("rejected move reached Host or DNS lifecycle: %v", events)
+	}
+	assertSemanticCheckpointEqual(t, after, initial)
+
+	harness.trace.hostReadiness["alpha"] = false
+	failedRemoval, err := harness.update(t, "payment-gateway-empty.yaml", "payment-gateway-empty-secrets.yaml")
+	if err == nil {
+		t.Fatal("failed source Host removal unexpectedly succeeded")
+	}
+	assertPaymentGatewayPlacement(t, failedRemoval, "primary", "alpha")
+	harness.trace.hostReadiness["alpha"] = true
+	removed, err := harness.update(t, "payment-gateway-empty.yaml", "payment-gateway-empty-secrets.yaml")
+	if err != nil {
+		t.Fatalf("staged payment gateway removal: %v", err)
+	}
+	assertPaymentGatewayPlacement(t, removed, "", "")
+	readded, err := harness.update(t, "payment-gateway-bravo.yaml", "payment-gateway-secrets.yaml")
+	if err != nil {
+		t.Fatalf("payment gateway re-add after removal: %v", err)
+	}
+	assertPaymentGatewayPlacement(t, readded, "primary", "bravo")
+}
+
+func assertPaymentGatewayPlacement(t *testing.T, snapshot *automationtest.Checkpoint, gatewayID, server string) {
+	t.Helper()
+	placements := 0
+	for _, state := range snapshot.Resources {
+		if state.Type != "sub2api-host:index:PaymentGatewayPlacement" {
+			continue
+		}
+		placements++
+		id, idOK := state.Inputs["id"]
+		placed, serverOK := state.Inputs["server"]
+		if !idOK || !serverOK || !id.IsString() || !placed.IsString() || id.StringValue() != gatewayID || placed.StringValue() != server {
+			t.Fatalf("payment gateway placement state = %#v", state.Inputs)
+		}
+	}
+	want := 0
+	if gatewayID != "" {
+		want = 1
+	}
+	if placements != want {
+		t.Fatalf("payment gateway placement resources = %d, want %d", placements, want)
+	}
+}
+
 func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostReadiness map[string]bool) (*traceFixture, *automationtest.Checkpoint, error) {
 	t.Helper()
 	harness := newEngineGraphHarness(t, hostReadiness)
@@ -845,13 +903,13 @@ func runEngineGraphUpdate(t *testing.T, configName, secretsName string, hostRead
 }
 
 type engineGraphHarness struct {
-	stack          auto.Stack
-	workspace      auto.Workspace
-	trace          *traceFixture
-	providers      map[string]*automationtest.ProviderServer
-	revisionKey    string
-	configYAML     []byte
-	secretsYAML    []byte
+	stack       auto.Stack
+	workspace   auto.Workspace
+	trace       *traceFixture
+	providers   map[string]*automationtest.ProviderServer
+	revisionKey string
+	configYAML  []byte
+	secretsYAML []byte
 }
 
 func newEngineGraphHarness(t *testing.T, hostReadiness map[string]bool) *engineGraphHarness {
@@ -933,14 +991,18 @@ func (h *engineGraphHarness) updateTargets(t *testing.T, configName, secretsName
 	options := []optup.Option{optup.Parallel(4), optup.SuppressProgress(), optup.SuppressOutputs(), optup.Color("never"), optup.EventStreams(h.eventStream(t))}
 	if len(targets) != 0 {
 		urns := make([]string, len(targets))
-		for i, target := range targets { urns[i] = string(target) }
+		for i, target := range targets {
+			urns[i] = string(target)
+		}
 		options = append(options, optup.Target(urns))
 	}
 	_, updateErr := h.stack.Up(updateCtx, options...)
 	exportCtx, exportCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer exportCancel()
 	snapshot, snapshotErr := h.exportCheckpoint(exportCtx)
-	if snapshotErr != nil { t.Fatalf("load exported checkpoint: %v", snapshotErr) }
+	if snapshotErr != nil {
+		t.Fatalf("load exported checkpoint: %v", snapshotErr)
+	}
 	if updateErr != nil && len(h.trace.snapshot()) == 0 {
 		t.Log("external Engine failure stage: stack-up-before-provider-effects")
 	}
@@ -992,7 +1054,9 @@ func configureRevisionKey(ctx context.Context, workspace auto.Workspace, stackNa
 
 func (h *engineGraphHarness) exportCheckpoint(ctx context.Context) (*automationtest.Checkpoint, error) {
 	export, err := automationtest.ValidatedExport(ctx, h.stack)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return automationtest.DecodeCheckpoint(export)
 }
 

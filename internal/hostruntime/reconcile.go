@@ -633,6 +633,7 @@ type gatewayDockerInspect struct {
 		PortBindings    map[string][]gatewayInspectPortBinding `json:"PortBindings"`
 		PublishAllPorts bool                                   `json:"PublishAllPorts"`
 	} `json:"HostConfig"`
+	Mounts          []gatewayInspectMount `json:"Mounts"`
 	NetworkSettings struct {
 		Networks map[string]struct {
 			Aliases []string `json:"Aliases"`
@@ -648,6 +649,13 @@ type gatewayInspectPortBinding struct {
 	HostPort string `json:"HostPort"`
 }
 
+type gatewayInspectMount struct {
+	Type        string `json:"Type"`
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	RW          bool   `json:"RW"`
+}
+
 func (r *Runtime) inspectGatewayContract(ctx context.Context, inv inventory, o managedObject) error {
 	out, err := r.runner.Run(ctx, []string{"container", "inspect", "--format", `{{json .}}`, o.Name}, nil)
 	if err != nil {
@@ -657,10 +665,54 @@ func (r *Runtime) inspectGatewayContract(ctx context.Context, inv inventory, o m
 	if decodeGatewayDockerInspect(out, &document) != nil {
 		return recovery()
 	}
-	if document.Config.Image != o.Image || document.HostConfig.RestartPolicy.Name != "unless-stopped" || document.HostConfig.PublishAllPorts || len(document.HostConfig.PortBindings) != 0 || len(document.HostConfig.Binds) != 1 || !writableGatewayDataBind(document.HostConfig.Binds[0], r.dataPath(o.DataToken)) || !exactGatewayEnv(document.Config.Env) || !exactGatewayNetwork(document.NetworkSettings.Networks, networkName(State{Resource: inv.Resource, Ownership: inv.Ownership}), o.Name, paymentGatewayAlias(o.AppToken)) || !document.State.Running {
+	if !r.gatewayContractMatches(document, inv, o) {
 		return conflict()
 	}
 	return nil
+}
+
+func (r *Runtime) gatewayContractMatches(document gatewayDockerInspect, inv inventory, o managedObject) bool {
+	if document.Config.Image != o.Image || document.HostConfig.RestartPolicy.Name != "unless-stopped" || !document.State.Running {
+		return false
+	}
+	if document.HostConfig.PublishAllPorts || hasAllocatedGatewayPort(document.HostConfig.PortBindings) {
+		return false
+	}
+	dataPath := r.dataPath(o.DataToken)
+	if len(document.HostConfig.Binds) != 1 || !writableGatewayDataBind(document.HostConfig.Binds[0], dataPath) || !validGatewayMounts(document.Mounts, dataPath) {
+		return false
+	}
+	if !exactGatewayEnv(document.Config.Env) {
+		return false
+	}
+	managedNetwork := networkName(State{Resource: inv.Resource, Ownership: inv.Ownership})
+	return exactGatewayNetwork(document.NetworkSettings.Networks, managedNetwork, o.Name, paymentGatewayAlias(o.AppToken))
+}
+
+func hasAllocatedGatewayPort(bindings map[string][]gatewayInspectPortBinding) bool {
+	for _, values := range bindings {
+		if len(values) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func validGatewayMounts(mounts []gatewayInspectMount, source string) bool {
+	dataMounts := 0
+	for _, mount := range mounts {
+		if mount.Destination == "/data" {
+			dataMounts++
+			if mount.Type != "bind" || filepath.Clean(mount.Source) != filepath.Clean(source) || !mount.RW {
+				return false
+			}
+			continue
+		}
+		if mount.Type == "bind" {
+			return false
+		}
+	}
+	return dataMounts == 1
 }
 
 func writableGatewayDataBind(bind, source string) bool {
@@ -719,6 +771,19 @@ func decodeGatewayDockerInspect(b []byte, out *gatewayDockerInspect) error {
 			return errors.New("docker inspect port bindings")
 		}
 	}
+	rawMounts, ok := root["Mounts"]
+	if !ok || string(rawMounts) == "null" {
+		return errors.New("docker inspect mounts")
+	}
+	var mounts []map[string]json.RawMessage
+	if err := json.Unmarshal(rawMounts, &mounts); err != nil || mounts == nil {
+		return errors.New("docker inspect mounts")
+	}
+	for _, mount := range mounts {
+		if !validGatewayInspectMount(mount) {
+			return errors.New("docker inspect mount")
+		}
+	}
 	networkSettings, _ := gatewayInspectObject(root, "NetworkSettings")
 	networks, err := gatewayInspectObject(networkSettings, "Networks")
 	if err != nil {
@@ -738,6 +803,18 @@ func decodeGatewayDockerInspect(b []byte, out *gatewayDockerInspect) error {
 		return err
 	}
 	return json.Unmarshal(b, out)
+}
+
+func validGatewayInspectMount(mount map[string]json.RawMessage) bool {
+	if err := gatewayInspectFields(mount, "Type", "Source", "Destination", "RW"); err != nil {
+		return false
+	}
+	for _, field := range []string{"Type", "Source", "Destination"} {
+		if gatewayInspectRequiredString(mount, field) != nil {
+			return false
+		}
+	}
+	return gatewayInspectRequiredBool(mount, "RW") == nil
 }
 
 func gatewayInspectObject(fields map[string]json.RawMessage, name string) (map[string]json.RawMessage, error) {
@@ -1046,6 +1123,7 @@ func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.Stable
 		}
 		return hostcontract.StableObservation{}, recovery()
 	}
+	proxy := findProxy(inv)
 	if validateInventoryForState(inv, state) != nil {
 		return hostcontract.StableObservation{}, recovery()
 	}
@@ -1091,7 +1169,7 @@ func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.Stable
 			observation.Drifted, observation.Ready = true, false
 			continue
 		}
-		if object.Role != "local-data" && object.Role != "payment-gateway" && object.Revision != state.AppliedRevision {
+		if object.Role != "local-data" && object.Role != "payment-gateway" && object.Role != "proxy" && object.Revision != state.AppliedRevision {
 			observation.Drifted, observation.Ready = true, false
 		}
 		switch object.Role {
@@ -1169,7 +1247,7 @@ func (r *Runtime) observe(ctx context.Context, state State) (hostcontract.Stable
 			if contractErr != nil && !isConflict(contractErr) {
 				return hostcontract.StableObservation{}, contractErr
 			}
-			if routeErr != nil || !r.routeMatches(inv, object) || contractErr != nil || r.gatewayReady(ctx, object.Name) != nil {
+			if routeErr != nil || !r.routeMatches(inv, object) || contractErr != nil || proxy.Name == "" || r.postGatewayRouteReady(ctx, proxy, object) != nil {
 				observation.Drifted, observation.Ready = true, false
 			} else {
 				gateways[object.AppToken] = true
@@ -1392,7 +1470,7 @@ func (r *Runtime) reconcile(ctx context.Context, s State, q hostprotocol.Request
 		kept = append(kept, gatewayMetadata(old))
 	}
 	for _, gateway := range q.Target.PaymentGateways {
-		object, err := r.reconcilePaymentGateway(ctx, s, inv, gateway, q.TargetRevision)
+		object, err := r.reconcilePaymentGateway(ctx, s, inv, proxy, gateway, q.TargetRevision)
 		if err != nil {
 			return hostprotocol.Result{}, hostcontract.StableObservation{}, err
 		}
@@ -1752,7 +1830,7 @@ func (r *Runtime) reconcileLocalWithReadiness(ctx context.Context, s State, inv 
 	if err := r.ensureProxyPaths(); err != nil {
 		return nil, managedObject{}, operationFailed()
 	}
-	if proxy.Name != "" && proxy.Image == next.Image && proxy.Revision == next.Revision && r.inspectOwned(ctx, inv, proxy) == nil && r.proxyReady(ctx, proxy) == nil {
+	if proxy.Name != "" && r.proxyMatchesTarget(ctx, inv, proxy, *q.Target.ReverseProxy, *(*q.Secrets).ReverseProxy) {
 		return kept, proxy, nil
 	}
 	pending := s.Journal != nil && s.Journal.Status == journalPending && s.Journal.Key == requestKey(q)
@@ -1776,7 +1854,7 @@ func (r *Runtime) reconcileLocalWithReadiness(ctx context.Context, s State, inv 
 			return nil, managedObject{}, candidateErr
 		}
 	}
-	if err := r.writeArtifact(next.Env, []byte("CF_DNS_API_TOKEN="+(*q.Secrets).ReverseProxy.DNSChallengeToken+"\nACME_EMAIL="+q.Target.ReverseProxy.ACMEEmail+"\n"), 0600); err != nil {
+	if err := r.writeArtifact(next.Env, reverseProxyEnv(*q.Target.ReverseProxy, *(*q.Secrets).ReverseProxy), 0600); err != nil {
 		return nil, managedObject{}, err
 	}
 	if err := r.writeArtifact(next.Config, traefikStaticConfig(q.Target.ReverseProxy.ACMEEmail), 0600); err != nil {
@@ -1806,6 +1884,22 @@ func (r *Runtime) reconcileLocalWithReadiness(ctx context.Context, s State, inv 
 		}
 	}
 	return kept, next, nil
+}
+
+func (r *Runtime) proxyMatchesTarget(ctx context.Context, inv inventory, proxy managedObject, target hostcontract.ReverseProxyTarget, secrets hostcontract.ReverseProxySecrets) bool {
+	if proxy.Image != target.Image || r.inspectOwned(ctx, inv, proxy) != nil || r.proxyReady(ctx, proxy) != nil {
+		return false
+	}
+	env, err := r.readArtifactBytes(proxy.Env)
+	if err != nil || !bytes.Equal(env, reverseProxyEnv(target, secrets)) {
+		return false
+	}
+	config, err := r.readArtifactBytes(proxy.Config)
+	return err == nil && bytes.Equal(config, traefikStaticConfig(target.ACMEEmail))
+}
+
+func reverseProxyEnv(target hostcontract.ReverseProxyTarget, secrets hostcontract.ReverseProxySecrets) []byte {
+	return []byte("CF_DNS_API_TOKEN=" + secrets.DNSChallengeToken + "\nACME_EMAIL=" + target.ACMEEmail + "\n")
 }
 func localObject(s State, t hostcontract.LocalDataServiceTarget, revision string) managedObject {
 	idToken := localDataToken(t.ID)
@@ -1860,7 +1954,7 @@ func coversPaymentGateways(obs hostcontract.StableObservation, targets []hostcon
 	return true
 }
 
-func (r *Runtime) reconcilePaymentGateway(ctx context.Context, s State, inv inventory, target hostcontract.PaymentGatewayTarget, revision string) (managedObject, error) {
+func (r *Runtime) reconcilePaymentGateway(ctx context.Context, s State, inv inventory, proxy managedObject, target hostcontract.PaymentGatewayTarget, revision string) (managedObject, error) {
 	t := paymentGatewayToken(target.ID)
 	old := findPaymentGateway(inv, t)
 	if old.Name == "" {
@@ -1871,7 +1965,7 @@ func (r *Runtime) reconcilePaymentGateway(ctx context.Context, s State, inv inve
 		candidate.DataToken, candidate.PathToken = old.DataToken, old.PathToken
 	}
 	if old.Role != "payment-gateway" {
-		return r.createPaymentGateway(ctx, s, inv, candidate)
+		return r.createPaymentGateway(ctx, s, inv, proxy, candidate)
 	}
 	if old.Image == target.Image {
 		if err := r.ensureDataDir(candidate.DataToken); err != nil {
@@ -1890,12 +1984,12 @@ func (r *Runtime) reconcilePaymentGateway(ctx context.Context, s State, inv inve
 				return managedObject{}, operationFailed()
 			}
 		}
-		return r.finishPaymentGateway(ctx, inv, old, candidate)
+		return r.finishPaymentGateway(ctx, inv, proxy, old, candidate)
 	}
-	return r.upgradePaymentGateway(ctx, s, inv, old, candidate)
+	return r.upgradePaymentGateway(ctx, s, inv, proxy, old, candidate)
 }
 
-func (r *Runtime) createPaymentGateway(ctx context.Context, s State, inv inventory, candidate managedObject) (managedObject, error) {
+func (r *Runtime) createPaymentGateway(ctx context.Context, s State, inv inventory, proxy, candidate managedObject) (managedObject, error) {
 	present, err := r.ownedPresent(ctx, inv, candidate)
 	if err != nil {
 		return managedObject{}, err
@@ -1917,10 +2011,10 @@ func (r *Runtime) createPaymentGateway(ctx context.Context, s State, inv invento
 			return managedObject{}, operationFailed()
 		}
 	}
-	return r.finishPaymentGateway(ctx, inv, managedObject{}, candidate)
+	return r.finishPaymentGateway(ctx, inv, proxy, managedObject{}, candidate)
 }
 
-func (r *Runtime) finishPaymentGateway(ctx context.Context, inv inventory, old, candidate managedObject) (managedObject, error) {
+func (r *Runtime) finishPaymentGateway(ctx context.Context, inv inventory, proxy, old, candidate managedObject) (managedObject, error) {
 	readyCtx, cancel := newGatewayReadinessContext(ctx, gatewayReadinessBudget)
 	defer cancel()
 	if err := r.waitGatewayReady(readyCtx, candidate.Name, gatewayReadinessInterval); err != nil {
@@ -1934,27 +2028,36 @@ func (r *Runtime) finishPaymentGateway(ctx context.Context, inv inventory, old, 
 	}
 	if !r.routeMatches(inv, candidate) {
 		if err := r.writeRoute(inv, candidate); err != nil {
-			if old.Name == "" {
-				if cleanupErr := r.removeRouteProgress(inv, candidate, true); cleanupErr != nil {
-					return managedObject{}, recovery()
-				}
-				if cleanupErr := r.removeOwnedProgress(ctx, inv, candidate, true); cleanupErr != nil {
-					return managedObject{}, cleanupErr
-				}
-			} else if restoreErr := r.restorePriorRoute(inv, old, candidate); restoreErr != nil {
-				return managedObject{}, restoreErr
+			if recoveryErr := r.recoverGatewayRouteFailure(ctx, inv, old, candidate); recoveryErr != nil {
+				return managedObject{}, recoveryErr
 			}
 			return managedObject{}, operationFailed()
 		}
 	}
+	if err := r.waitGatewayRouteReady(readyCtx, proxy, candidate, gatewayReadinessInterval); err != nil {
+		if recoveryErr := r.recoverGatewayRouteFailure(ctx, inv, old, candidate); recoveryErr != nil {
+			return managedObject{}, recoveryErr
+		}
+		return managedObject{}, operationFailed()
+	}
 	return candidate, nil
+}
+
+func (r *Runtime) recoverGatewayRouteFailure(ctx context.Context, inv inventory, old, candidate managedObject) error {
+	if old.Name != "" {
+		return r.restorePriorRoute(inv, old, candidate)
+	}
+	if err := r.removeRouteProgress(inv, candidate, true); err != nil {
+		return recovery()
+	}
+	return r.removeOwnedProgress(ctx, inv, candidate, true)
 }
 
 func (r *Runtime) runPaymentGateway(ctx context.Context, s State, o managedObject) error {
 	return r.docker(ctx, "run", "--pull", "never", "-d", "--restart", "unless-stopped", "--label", "sub2api.host="+ownershipLabelFor(s.Resource, s.Ownership, o.Role, o.AppToken, o.Active), "--label", "sub2api.host.target="+targetLabelFor(o), "--name", o.Name, "--network", networkName(s), "--network-alias", paymentGatewayAlias(o.AppToken), "-e", "EPUSDT_CONFIG=/data/.env", "-v", r.dataPath(o.DataToken)+":/data", o.Image)
 }
 
-func (r *Runtime) upgradePaymentGateway(ctx context.Context, s State, inv inventory, old, candidate managedObject) (managedObject, error) {
+func (r *Runtime) upgradePaymentGateway(ctx context.Context, s State, inv inventory, proxy, old, candidate managedObject) (managedObject, error) {
 	rollback := old
 	rollback.Name = objectName(s, "payment-gateway-rollback", old.AppToken, old.Revision)
 	rollback.Active = old.Active
@@ -2020,7 +2123,7 @@ func (r *Runtime) upgradePaymentGateway(ctx context.Context, s State, inv invent
 			}
 		}
 	}
-	if _, err := r.finishPaymentGateway(ctx, inv, old, candidate); err != nil {
+	if _, err := r.finishPaymentGateway(ctx, inv, proxy, old, candidate); err != nil {
 		if restoreErr := r.restoreGateway(ctx, inv, old, candidate); restoreErr != nil {
 			return managedObject{}, restoreErr
 		}
@@ -2105,12 +2208,31 @@ func (r *Runtime) gatewayReady(ctx context.Context, name string) error {
 	return r.docker(ctx, "exec", name, "wget", "-q", "-O", "/dev/null", "http://localhost:8000/")
 }
 
+func (r *Runtime) postGatewayRouteReady(ctx context.Context, proxy, candidate managedObject) error {
+	if proxy.Name == "" {
+		return r.gatewayReady(ctx, candidate.Name)
+	}
+	return r.docker(ctx, "exec", candidate.Name, "wget", "-q", "-O", "/dev/null", "--header", "Host:"+candidate.Hostname, "http://"+proxy.Name+":8081/")
+}
+
+func (r *Runtime) waitGatewayRouteReady(ctx context.Context, proxy, candidate managedObject, interval time.Duration) error {
+	return waitGatewayProbe(ctx, interval, func() error {
+		return r.postGatewayRouteReady(ctx, proxy, candidate)
+	})
+}
+
 func (r *Runtime) waitGatewayReady(ctx context.Context, name string, interval time.Duration) error {
+	return waitGatewayProbe(ctx, interval, func() error {
+		return r.gatewayReady(ctx, name)
+	})
+}
+
+func waitGatewayProbe(ctx context.Context, interval time.Duration, probe func() error) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := r.gatewayReady(ctx, name); err == nil {
+		if err := probe(); err == nil {
 			return nil
 		}
 		timer := time.NewTimer(interval)

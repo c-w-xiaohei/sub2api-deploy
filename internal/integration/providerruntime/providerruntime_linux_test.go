@@ -375,11 +375,12 @@ type providerProcess struct {
 }
 
 type targetExpectation struct {
-	Revision               string                  `json:"revision"`
-	Apps                   []expectedTargetApp     `json:"apps"`
-	CurrentApps            []expectedTargetApp     `json:"currentApps,omitempty"`
-	PaymentGateways        []expectedTargetGateway `json:"paymentGateways,omitempty"`
-	CurrentPaymentGateways []expectedTargetGateway `json:"currentPaymentGateways,omitempty"`
+	Revision               string                           `json:"revision"`
+	Apps                   []expectedTargetApp              `json:"apps"`
+	CurrentApps            []expectedTargetApp              `json:"currentApps,omitempty"`
+	PaymentGateways        []expectedTargetGateway          `json:"paymentGateways,omitempty"`
+	CurrentPaymentGateways []expectedTargetGateway          `json:"currentPaymentGateways,omitempty"`
+	ReverseProxy           *hostcontract.ReverseProxyTarget `json:"reverseProxy,omitempty"`
 }
 type expectedTargetApp struct {
 	ID            string                  `json:"id"`
@@ -875,7 +876,7 @@ func (s *dockerTrace) apply(root string, args []string) error {
 	if _, ok := listNetwork(); ok {
 		name := strings.TrimSuffix(strings.TrimPrefix(args[3], "name=^"), "$")
 		var runtimeState hostruntime.State
-		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || !validOwnership(runtimeState.Ownership.Value) || name != "s2h-net-"+fixtureToken("test", "edge", runtimeState.Ownership.Value) {
+		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || !validOwnership(runtimeState.Ownership.Value) || name != "s2h-net-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value) {
 			return errors.New("invalid network list")
 		}
 		s.Reads = append(s.Reads, "network-list")
@@ -893,10 +894,13 @@ func (s *dockerTrace) apply(root string, args []string) error {
 				return errors.New("invalid container list")
 			}
 			valid := false
+			if expectation.ReverseProxy != nil && name == "s2h-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "proxy", "proxy", "live") {
+				valid = true
+			}
 			for _, app := range append(append([]expectedTargetApp(nil), expectation.Apps...), expectation.CurrentApps...) {
 				token := fixtureToken("app", app.ID)
 				for _, slot := range []string{"blue", "green"} {
-					if name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, "app", token, slot) {
+					if name == "s2h-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "app", token, slot) {
 						valid = true
 					}
 				}
@@ -904,7 +908,7 @@ func (s *dockerTrace) apply(root string, args []string) error {
 			for _, gateway := range append(append([]expectedTargetGateway(nil), expectation.PaymentGateways...), expectation.CurrentPaymentGateways...) {
 				token := fixtureToken("payment-gateway", gateway.ID)
 				for _, role := range []string{"payment-gateway", "payment-gateway-rollback"} {
-					if name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, role, token, "live") || name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, role, token, "") {
+					if name == "s2h-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, role, token, "live") || name == "s2h-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, role, token, "") {
 						valid = true
 					}
 				}
@@ -915,7 +919,7 @@ func (s *dockerTrace) apply(root string, args []string) error {
 				}
 				if json.Unmarshal(mustReadFixture(filepath.Join(root, "runtime", "managed", "inventory.json")), &inventory) == nil {
 					for _, object := range inventory.Objects {
-						if object.Role == "payment-gateway" && object.AppToken == token && object.Revision != "" && name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, "payment-gateway-rollback", token, object.Revision) {
+						if object.Role == "payment-gateway" && object.AppToken == token && object.Revision != "" && name == "s2h-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "payment-gateway-rollback", token, object.Revision) {
 							valid = true
 						}
 					}
@@ -967,10 +971,19 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		if len(container.PortBindings) != 0 {
 			portBindings = container.PortBindings
 		}
+		mounts := []map[string]any{}
+		for _, bind := range container.Binds {
+			parts := strings.SplitN(bind, ":", 3)
+			if len(parts) >= 2 {
+				mounts = append(mounts, map[string]any{"Type": "bind", "Source": parts[0], "Destination": parts[1], "RW": len(parts) < 3 || parts[2] != "ro"})
+			}
+		}
+		mounts = append(mounts, map[string]any{"Type": "volume", "Source": "fixture-anonymous-volume", "Destination": "/app/conf", "RW": true})
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"Id": "sha256:fixture", "Name": "/" + args[4], "Created": "2026-09-18T00:00:00Z",
 			"Config":          map[string]any{"Image": container.Image, "Env": container.Env, "Cmd": []string{"/bin/epusdt"}},
 			"HostConfig":      map[string]any{"RestartPolicy": map[string]string{"Name": container.RestartPolicy}, "Binds": container.Binds, "PortBindings": portBindings, "PublishAllPorts": false},
+			"Mounts":          mounts,
 			"NetworkSettings": map[string]any{"Networks": networks, "Ports": map[string]any{"8000/tcp": nil}},
 			"State":           map[string]any{"Running": container.Running, "Status": "running"},
 		})
@@ -992,7 +1005,7 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || !validOwnership(runtimeState.Ownership.Value) {
 			return errors.New("runtime ownership unavailable")
 		}
-		if owner != "s2h1:"+fixtureToken("test", "edge", runtimeState.Ownership.Value, "network", "", "") || label != "s2hnet1:"+fixtureToken("test", "edge", runtimeState.Ownership.Value) || name != "s2h-net-"+fixtureToken("test", "edge", runtimeState.Ownership.Value) {
+		if owner != "s2h1:"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "network", "", "") || label != "s2hnet1:"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value) || name != "s2h-net-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value) {
 			return errors.New("network ownership mismatch")
 		}
 		s.Ownership, s.OwnershipLabel, s.Network = runtimeState.Ownership.Value, owner, name
@@ -1016,7 +1029,7 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		for _, candidate := range expectation.Apps {
 			token := fixtureToken("app", candidate.ID)
 			for _, candidateSlot := range []string{"blue", "green"} {
-				if name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, "app", token, candidateSlot) {
+				if name == "s2h-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "app", token, candidateSlot) {
 					app, appToken, slot = candidate, token, candidateSlot
 				}
 			}
@@ -1025,8 +1038,8 @@ func (s *dockerTrace) apply(root string, args []string) error {
 			return errors.New("unexpected target app")
 		}
 		revision := expectation.Revision
-		wantName := "s2h-" + fixtureToken("test", "edge", runtimeState.Ownership.Value, "app", appToken, slot)
-		wantOwner := "s2h1:" + fixtureToken("test", "edge", runtimeState.Ownership.Value, "app", appToken, slot)
+		wantName := "s2h-" + fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "app", appToken, slot)
+		wantOwner := "s2h1:" + fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "app", appToken, slot)
 		wantTarget := "s2ht1:" + fixtureToken("app", appToken, slot, revision, app.Image, "", "0", "false")
 		wantEnv := filepath.Join(root, "runtime", "managed", "env-"+appToken+fixtureToken(revision))
 		wantData := filepath.Join(root, "runtime", "data", fixtureToken("app-data", appToken)) + ":/app/data"
@@ -1037,25 +1050,60 @@ func (s *dockerTrace) apply(root string, args []string) error {
 		s.effect("container-run", name, appToken, slot, owner, target)
 		return nil
 	}
+	if len(args) == 25 && args[0] == "run" && args[1] == "-d" && args[2] == "--restart" && args[3] == "unless-stopped" && args[4] == "--label" && strings.HasPrefix(args[5], "sub2api.host=") && args[6] == "--label" && strings.HasPrefix(args[7], "sub2api.host.target=") && args[8] == "--name" && args[10] == "--network" && args[11] == s.Network && args[12] == "--env-file" && args[14] == "-p" && args[15] == "80:80" && args[16] == "-p" && args[17] == "443:443" && args[18] == "-v" && args[20] == "-v" && args[22] == "-v" {
+		name, owner, target, image := args[9], strings.TrimPrefix(args[5], "sub2api.host="), strings.TrimPrefix(args[7], "sub2api.host.target="), args[24]
+		var runtimeState hostruntime.State
+		var expectation targetExpectation
+		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || runtimeState.Journal == nil || json.Unmarshal(mustReadFixture(filepath.Join(os.Getenv("PROVIDER_RUNTIME_TRACE"), "target.expectation.json")), &expectation) != nil || expectation.ReverseProxy == nil || expectation.Revision != runtimeState.Journal.Key.TargetRevision {
+			return errors.New("invalid proxy run")
+		}
+		wantName := "s2h-" + fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "proxy", "proxy", "live")
+		wantOwner := "s2h1:" + fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "proxy", "", "")
+		wantTarget := "s2ht1:" + fixtureToken("proxy", "", "", expectation.Revision, image, "", "0", "false")
+		proxyToken := fixtureToken("proxy")
+		wantEnv := filepath.Join(root, "runtime", "managed", "env-"+proxyToken+fixtureToken(expectation.Revision))
+		wantConfig := filepath.Join(root, "runtime", "managed", "config-"+fixtureToken("proxy", expectation.Revision)) + ":/etc/traefik/traefik.yml:ro"
+		if name != wantName || owner != wantOwner || target != wantTarget || image != expectation.ReverseProxy.Image || args[13] != wantEnv || args[19] != wantConfig || s.Containers[name].Owner != "" {
+			return errors.New("invalid proxy run")
+		}
+		s.Containers[name] = dockerContainer{Owner: owner, Target: target, Image: image, Role: "proxy", Running: true, RestartPolicy: "unless-stopped", Networks: map[string][]string{s.Network: {name}}}
+		s.effect("container-run", name, "", "", owner, target)
+		return nil
+	}
 	if len(args) == 21 && args[0] == "run" && args[1] == "--pull" && args[2] == "never" && args[3] == "-d" && args[4] == "--restart" && args[5] == "unless-stopped" && args[6] == "--label" && strings.HasPrefix(args[7], "sub2api.host=") && args[8] == "--label" && strings.HasPrefix(args[9], "sub2api.host.target=") && args[10] == "--name" && args[12] == "--network" && args[13] == s.Network && args[14] == "--network-alias" && args[16] == "-e" && args[17] == "EPUSDT_CONFIG=/data/.env" && args[18] == "-v" {
 		name, owner, target, data, image := args[11], strings.TrimPrefix(args[7], "sub2api.host="), strings.TrimPrefix(args[9], "sub2api.host.target="), args[19], args[20]
 		var runtimeState hostruntime.State
 		var expectation targetExpectation
-		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || runtimeState.Journal == nil || json.Unmarshal(mustReadFixture(filepath.Join(os.Getenv("PROVIDER_RUNTIME_TRACE"), "target.expectation.json")), &expectation) != nil || expectation.Revision != runtimeState.Journal.Key.TargetRevision {
-			return errors.New("invalid gateway run")
+		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil || runtimeState.Journal == nil {
+			return errors.New("invalid gateway run state")
+		}
+		if json.Unmarshal(mustReadFixture(filepath.Join(os.Getenv("PROVIDER_RUNTIME_TRACE"), "target.expectation.json")), &expectation) != nil || expectation.Revision != runtimeState.Journal.Key.TargetRevision {
+			return errors.New("invalid gateway run expectation")
 		}
 		var gateway expectedTargetGateway
 		var gatewayToken string
 		for _, candidate := range expectation.PaymentGateways {
 			token := fixtureToken("payment-gateway", candidate.ID)
-			if name == "s2h-"+fixtureToken("test", "edge", runtimeState.Ownership.Value, "payment-gateway", token, "live") {
+			if name == "s2h-"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "payment-gateway", token, "live") {
 				gateway, gatewayToken = candidate, token
 			}
 		}
-		if gatewayToken == "" || image != gateway.Image || data != filepath.Join(root, "runtime", "data", fixtureToken("payment-gateway-data", gatewayToken))+":/data" || args[15] != "gmpay-"+gatewayToken || s.Containers[name].Owner != "" {
-			return errors.New("invalid gateway run")
+		if gatewayToken == "" {
+			return errors.New("invalid gateway run name")
 		}
-		ownerExpected := "s2h1:" + fixtureToken("test", "edge", runtimeState.Ownership.Value, "payment-gateway", gatewayToken, "live")
+		if image != gateway.Image {
+			return errors.New("invalid gateway run image")
+		}
+		if data != filepath.Join(root, "runtime", "data", fixtureToken("payment-gateway-data", gatewayToken))+":/data" {
+			return errors.New("invalid gateway run data")
+		}
+		if args[15] != "gmpay-"+gatewayToken {
+			return errors.New("invalid gateway run alias")
+		}
+		if s.Containers[name].Owner != "" {
+			return errors.New("invalid gateway run collision")
+		}
+		ownerExpected := "s2h1:" + fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "payment-gateway", gatewayToken, "live")
 		wantTarget := "s2ht1:" + fixtureToken("payment-gateway", gatewayToken, "live", expectation.Revision, gateway.Image, "gmpay", "0", "false")
 		if owner != ownerExpected || target != wantTarget {
 			return errors.New("invalid gateway ownership")
@@ -1092,6 +1140,44 @@ func (s *dockerTrace) apply(root string, args []string) error {
 			return errors.New("invalid container probe")
 		}
 		s.Reads = append(s.Reads, "container-probe")
+		return nil
+	}
+	if len(args) == 9 && args[0] == "exec" && args[2] == "wget" && args[3] == "-q" && args[4] == "-O" && args[5] == "/dev/null" && args[6] == "--header" {
+		container, ok := s.Containers[args[1]]
+		if !ok || container.Role != "payment-gateway" {
+			return errors.New("invalid gateway route probe container")
+		}
+		var expectation targetExpectation
+		if json.Unmarshal(mustReadFixture(filepath.Join(os.Getenv("PROVIDER_RUNTIME_TRACE"), "target.expectation.json")), &expectation) != nil || expectation.ReverseProxy == nil {
+			return errors.New("missing gateway route expectation")
+		}
+		var runtimeState hostruntime.State
+		if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &runtimeState) != nil {
+			return errors.New("missing gateway route state")
+		}
+		proxyName := "s2h-" + fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "proxy", "proxy", "live")
+		proxy, ok := s.Containers[proxyName]
+		if !ok || proxy.Role != "proxy" || !proxy.Running || proxy.Owner != "s2h1:"+fixtureToken(runtimeState.Resource.Environment, runtimeState.Resource.ServerKey, runtimeState.Ownership.Value, "proxy", "", "") {
+			return errors.New("gateway route probe proxy is missing, stopped, or foreign")
+		}
+		matched := false
+		for _, gateway := range expectation.PaymentGateways {
+			if container.Image == gateway.Image && args[7] == "Host:"+gateway.Hostname && args[8] == "http://"+proxyName+":8081/" {
+				matched = true
+			}
+		}
+		if !matched {
+			return errors.New("invalid gateway route probe")
+		}
+		s.Reads = append(s.Reads, "gateway-route-probe")
+		return nil
+	}
+	if len(args) == 4 && args[0] == "exec" && args[2] == "traefik" && args[3] == "version" {
+		container, ok := s.Containers[args[1]]
+		if !ok || container.Role != "proxy" || !container.Running {
+			return errors.New("invalid proxy readiness")
+		}
+		s.Reads = append(s.Reads, "proxy-probe")
 		return nil
 	}
 	if len(args) == 4 && args[0] == "stop" && args[1] == "--time" && args[2] == "30" {
@@ -1166,6 +1252,9 @@ func validDestructiveContainer(root, name string, container dockerContainer) boo
 	var state hostruntime.State
 	if json.Unmarshal(mustReadFixture(filepath.Join(root, "state.json")), &state) != nil {
 		return false
+	}
+	if container.Role == "proxy" {
+		return name == "s2h-"+fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "proxy", "proxy", "live") && container.Owner == "s2h1:"+fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "proxy", "", "")
 	}
 	if len(container.AppToken) != 24 || strings.Trim(container.AppToken, "0123456789abcdef") != "" || container.Slot != "live" && container.Slot != "blue" && container.Slot != "green" {
 		return false
@@ -1903,6 +1992,7 @@ func writeTargetExpectation(t *testing.T, h *providerProcess, inputs property.Ma
 		t.Fatal(err)
 	}
 	expectation := targetExpectation{Revision: frozenRevisionForInputs(t, inputs)}
+	expectation.ReverseProxy = target.ReverseProxy
 	for _, app := range target.Apps {
 		expectation.Apps = append(expectation.Apps, expectedTargetApp{ID: app.ID, Image: app.Image, Hostname: app.Hostname, ReadinessPath: app.ReadinessPath, DrainSeconds: frozenDrainSeconds(t, app.DrainTimeout), DataLinks: append([]hostcontract.DataLink(nil), app.DataLinks...)})
 	}
@@ -2036,6 +2126,9 @@ func deleteRequest(t *testing.T, id string, properties *structpb.Struct, inputs 
 func createInputsWithTarget(target hostcontract.Target) property.Map {
 	inputs := createInputs()
 	secrets := hostcontract.Secrets{Apps: map[string]hostcontract.AppSecrets{}}
+	if target.ReverseProxy != nil {
+		secrets.ReverseProxy = &hostcontract.ReverseProxySecrets{DNSChallengeToken: "dns-challenge-token-canary"}
+	}
 	for _, app := range target.Apps {
 		secret := hostcontract.AppSecrets{}
 		if app.ID == "api" {
@@ -2085,10 +2178,22 @@ func frozenRevisionForInputs(t *testing.T, inputs property.Map) string {
 	if err := json.Unmarshal(mustJSON(t, secretsValue), &secrets); err != nil {
 		t.Fatal(err)
 	}
-	return frozenRevision(target, secrets)
+	resourceValue, ok := inputs.GetOk("resource")
+	if !ok {
+		t.Fatal("resource input is absent")
+	}
+	var identity hostcontract.ResourceIdentity
+	if err := json.Unmarshal(mustJSON(t, resourceValue), &identity); err != nil {
+		t.Fatal(err)
+	}
+	return frozenRevisionForResource(identity, target, secrets)
 }
 
 func frozenRevision(target hostcontract.Target, secrets hostcontract.Secrets) string {
+	return frozenRevisionForResource(hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}, target, secrets)
+}
+
+func frozenRevisionForResource(identity hostcontract.ResourceIdentity, target hostcontract.Target, secrets hostcontract.Secrets) string {
 	key, err := base64.StdEncoding.DecodeString(ciKey)
 	if err != nil {
 		panic(err)
@@ -2099,7 +2204,7 @@ func frozenRevision(target hostcontract.Target, secrets hostcontract.Secrets) st
 		Resource hostcontract.ResourceIdentity `json:"resource"`
 		Target   hostcontract.Target           `json:"target"`
 		Secrets  hostcontract.Secrets          `json:"secrets"`
-	}{"sub2api-host-target-revision-v1", hostcontract.ResourceIdentity{Environment: "test", ServerKey: "edge"}, target, secrets})
+	}{"sub2api-host-target-revision-v1", identity, target, secrets})
 	if err != nil {
 		panic(err)
 	}

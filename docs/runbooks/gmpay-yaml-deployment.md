@@ -151,8 +151,11 @@ same gateway ID on the same Host reuses that data and metadata.
 
 ## Server-Move Migration
 
-A change to `server` does not migrate data automatically. Use this explicit
-downtime sequence so the destination cannot start against an empty directory.
+A direct change to `server` is rejected because it could run source and
+destination workers concurrently and does not migrate data. Use this explicit
+downtime sequence; the completed removal apply clears the placement guard so a
+later re-add on the destination can proceed without starting against an empty
+directory.
 Verify the backup before proceeding; the hostname has no DNS publication while
 the gateway is removed. Before step 1, check whether any App or other gateway
 still consumes Cloudflare. If this gateway is the only Cloudflare consumer,

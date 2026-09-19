@@ -292,6 +292,26 @@ func TestRegisterProjectsPaymentGatewaysToSelectedHostsAndPublishesSelectedHostD
 	})
 	assertPaymentGatewayTargets(t, bravo, []hostcontract.PaymentGatewayTarget{{ID: "gateway-z", Type: "gmpay", Image: "gmwallet/epusdt:v2.0.1", Hostname: "pay-z.example.test"}})
 	assertPaymentGatewayTargets(t, charlie, nil)
+	placements := resourcesOfType(mocks.resources, hostresource.PaymentGatewayPlacementToken)
+	if len(placements) != 3 {
+		t.Fatalf("payment gateway placement registrations = %d, want 3", len(placements))
+	}
+	wantServers := map[string]string{"gateway-a": "alpha", "gateway-m": "alpha", "gateway-z": "bravo"}
+	selectedHosts := map[string]pulumi.MockResourceArgs{"alpha": alpha, "bravo": bravo}
+	for _, placement := range placements {
+		id := stringValue(t, property(placement.Inputs, "id"))
+		server := stringValue(t, property(placement.Inputs, "server"))
+		if want := wantServers[id]; server != want {
+			t.Fatalf("placement %q server = %q, want %q", id, server, want)
+		}
+		selected := selectedHosts[server]
+		if !containsURN(directDependencies(selected), placement) {
+			t.Fatalf("Host %q must depend on placement %q: %v", selected.Name, placement.Name, directDependencies(selected))
+		}
+		if containsURN(directDependencies(charlie), placement) {
+			t.Fatalf("unselected Host %q depends on placement %q", charlie.Name, placement.Name)
+		}
+	}
 
 	dns := resourcesOfType(mocks.resources, "cloudflare:index/dnsRecord:DnsRecord")
 	if len(dns) != 10 {

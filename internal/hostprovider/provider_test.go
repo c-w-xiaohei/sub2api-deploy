@@ -14,14 +14,18 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-func TestProviderSchemaHasOnlyHostAndSecretRevisionKey(t *testing.T) {
+func TestProviderSchemaHasHostPlacementGuardAndSecretRevisionKey(t *testing.T) {
 	provider := New("1.0.0")
 	schema, err := p.GetSchema(context.Background(), "sub2api-host", "1.0.0", provider)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(schema.Resources) != 1 || !schema.Resources["sub2api-host:index:Host"].InputProperties["secrets"].Secret {
+	if len(schema.Resources) != 2 || !schema.Resources["sub2api-host:index:Host"].InputProperties["secrets"].Secret {
 		t.Fatalf("unexpected schema: %#v", schema.Resources)
+	}
+	placement := schema.Resources["sub2api-host:index:PaymentGatewayPlacement"]
+	if placement.InputProperties["id"].Type != "string" || placement.InputProperties["server"].Type != "string" || len(placement.RequiredInputs) != 2 || len(placement.Required) != 2 {
+		t.Fatalf("placement schema = %#v", placement)
 	}
 	if len(schema.Functions) != 0 {
 		t.Fatalf("unexpected provider surface: %#v", schema)
@@ -41,6 +45,9 @@ func TestProviderSchemaHasOnlyHostAndSecretRevisionKey(t *testing.T) {
 	}
 	if target := schema.Types["sub2api-host:index:Target"]; target.Properties["paymentGateways"].Items.Ref != "#/types/sub2api-host:index:PaymentGatewayTarget" {
 		t.Fatalf("Target payment gateway shape = %#v", target)
+	}
+	if target := schema.Types["sub2api-host:index:Target"]; target.Properties["paymentGatewayPlacements"].AdditionalProperties.Type != "string" {
+		t.Fatalf("Target payment gateway placements shape = %#v", target)
 	}
 	if gateway := schema.Types["sub2api-host:index:PaymentGatewayTarget"]; gateway.Properties["id"].Type != "string" || gateway.Properties["type"].Type != "string" || gateway.Properties["image"].Type != "string" || gateway.Properties["hostname"].Type != "string" || len(gateway.Properties) != 4 || len(gateway.Required) != 4 {
 		t.Fatalf("PaymentGatewayTarget shape = %#v", gateway)
@@ -87,9 +94,10 @@ func TestProviderSchemaHasOnlyHostAndSecretRevisionKey(t *testing.T) {
 
 func TestCheckValidatesPaymentGatewayShapeBeforeMutation(t *testing.T) {
 	provider := New("1.0.0")
-	valid := hostInputs(property.New("edge")).Set("target", object(
+	valid := hostInputsWithGatewayProxy(property.New("edge")).Set("target", object(
 		"releaseArtifact", property.New("release"),
 		"paymentGateways", property.New(property.NewArray([]property.Value{object("id", property.New("pay-primary"), "type", property.New("gmpay"), "image", property.New("gmwallet/epusdt:v2.0.0"), "hostname", property.New("pay.example"))})),
+		"reverseProxy", object("image", property.New("traefik:v3"), "acmeEmail", property.New("ops@example.test")),
 	))
 	response, err := provider.Check(t.Context(), p.CheckRequest{Inputs: valid})
 	if err != nil || len(response.Failures) != 0 {
@@ -115,13 +123,29 @@ func TestCheckValidatesPaymentGatewayShapeBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresReverseProxyForPaymentGateway(t *testing.T) {
+	provider := New("1.0.0")
+	gateway := property.New(property.NewArray([]property.Value{object("id", property.New("pay-primary"), "type", property.New("gmpay"), "image", property.New("gmwallet/epusdt:v2.0.0"), "hostname", property.New("pay.example"))}))
+	withoutProxy := hostInputs(property.New("edge")).Set("target", object("releaseArtifact", property.New("release"), "paymentGateways", gateway))
+	response, err := provider.Check(t.Context(), p.CheckRequest{Inputs: withoutProxy})
+	if err != nil || !hasFailure(response.Failures, "target.reverseProxy") {
+		t.Fatalf("gateway without reverse proxy Check = %#v, %v", response, err)
+	}
+	withProxy := withoutProxy.Set("target", object("releaseArtifact", property.New("release"), "paymentGateways", gateway, "reverseProxy", object("image", property.New("traefik:v3"), "acmeEmail", property.New("ops@example.test"))))
+	withProxy = withProxy.Set("secrets", property.New(property.NewMap(map[string]property.Value{"reverseProxy": object("dnsChallengeToken", property.New("dns"))})).WithSecret(true))
+	response, err = provider.Check(t.Context(), p.CheckRequest{Inputs: withProxy})
+	if err != nil || len(response.Failures) != 0 {
+		t.Fatalf("gateway with reverse proxy Check = %#v, %v", response, err)
+	}
+}
+
 func TestCheckValidatesKnownPaymentGatewaysAlongsideComputedSiblings(t *testing.T) {
 	provider := New("1.0.0")
 	gateway := func(id, image, hostname string) property.Value {
 		return object("id", property.New(id), "type", property.New("gmpay"), "image", property.New(image), "hostname", property.New(hostname))
 	}
 	target := func(gateways property.Value) property.Value {
-		return object("releaseArtifact", property.New("release"), "apps", property.New(property.Computed), "paymentGateways", gateways)
+		return object("releaseArtifact", property.New("release"), "apps", property.New(property.Computed), "paymentGateways", gateways, "reverseProxy", object("image", property.New("traefik:v3"), "acmeEmail", property.New("ops@example.test")))
 	}
 	for name, value := range map[string]property.Value{
 		"invalid id":          property.New(property.NewArray([]property.Value{gateway("Pay_primary", "gmwallet/epusdt:v2.0.0", "pay.example")})),
@@ -131,13 +155,13 @@ func TestCheckValidatesKnownPaymentGatewaysAlongsideComputedSiblings(t *testing.
 		"duplicate known ids": property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:v2.0.0", "pay.example"), gateway("pay-primary", "gmwallet/epusdt:v2.0.1", "other.example")})),
 	} {
 		t.Run(name, func(t *testing.T) {
-			response, err := provider.Check(t.Context(), p.CheckRequest{Inputs: hostInputs(property.New("edge")).Set("target", target(value))})
+			response, err := provider.Check(t.Context(), p.CheckRequest{Inputs: hostInputsWithGatewayProxy(property.New("edge")).Set("target", target(value))})
 			if err != nil || len(response.Failures) == 0 {
 				t.Fatalf("known invalid gateway %s was accepted with a computed sibling: %#v, %v", name, response, err)
 			}
 		})
 	}
-	valid, err := provider.Check(t.Context(), p.CheckRequest{Inputs: hostInputs(property.New("edge")).Set("target", target(property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:v2.0.0", "pay.example")}))))})
+	valid, err := provider.Check(t.Context(), p.CheckRequest{Inputs: hostInputsWithGatewayProxy(property.New("edge")).Set("target", target(property.New(property.NewArray([]property.Value{gateway("pay-primary", "gmwallet/epusdt:v2.0.0", "pay.example")}))))})
 	if err != nil || len(valid.Failures) != 0 {
 		t.Fatalf("valid known gateway was rejected with a computed sibling: %#v, %v", valid, err)
 	}
@@ -252,6 +276,36 @@ func TestFrameworkServerDiffUsesOldInputs(t *testing.T) {
 	}
 	if diff.HasChanges {
 		t.Fatalf("equal inputs diffed: %#v", diff)
+	}
+}
+
+func TestHostDiffRejectsGatewayMoveBeforePlacementGuardAdoption(t *testing.T) {
+	old := hostInputsWithGatewayProxy(property.New("edge"))
+	oldTarget := old.Get("target").AsMap().Set("reverseProxy", object("image", property.New("traefik:v3"), "acmeEmail", property.New("ops@example.test"))).Set("paymentGateways", property.New(property.NewArray([]property.Value{object("id", property.New("primary"), "type", property.New("gmpay"), "image", property.New("gmwallet/epusdt:v2.0.0"), "hostname", property.New("pay.example.test"))})))
+	old = old.Set("target", property.New(oldTarget))
+	nextTarget := oldTarget.Delete("paymentGateways").Set("paymentGatewayPlacements", property.New(property.NewMap(map[string]property.Value{"primary": property.New("bravo")})))
+	next := old.Set("target", property.New(nextTarget))
+	if _, err := New("1.0.0").Diff(t.Context(), p.DiffRequest{OldInputs: old, Inputs: next}); err == nil || !strings.Contains(err.Error(), "remove and apply first") {
+		t.Fatalf("gateway move before guard adoption = %v", err)
+	}
+}
+
+func TestHostDiffAllowsGatewayRemovalBeforePlacementGuardAdoption(t *testing.T) {
+	old := hostInputsWithGatewayProxy(property.New("edge"))
+	oldTarget := old.Get("target").AsMap().Set("reverseProxy", object("image", property.New("traefik:v3"), "acmeEmail", property.New("ops@example.test"))).Set("paymentGateways", property.New(property.NewArray([]property.Value{object("id", property.New("primary"), "type", property.New("gmpay"), "image", property.New("gmwallet/epusdt:v2.0.0"), "hostname", property.New("pay.example.test"))})))
+	old = old.Set("target", property.New(oldTarget))
+	next := old.Set("target", property.New(oldTarget.Delete("paymentGateways")))
+	if _, err := New("1.0.0").Diff(t.Context(), p.DiffRequest{OldInputs: old, Inputs: next}); err != nil {
+		t.Fatalf("gateway staged removal = %v", err)
+	}
+}
+
+func TestHostDiffIgnoresPlacementOnlyChanges(t *testing.T) {
+	old := hostInputs(property.New("edge")).Set("target", object("releaseArtifact", property.New("release"), "paymentGatewayPlacements", property.New(property.NewMap(map[string]property.Value{"primary": property.New("edge")}))))
+	next := old.Set("target", object("releaseArtifact", property.New("release"), "paymentGatewayPlacements", property.New(property.NewMap(map[string]property.Value{"primary": property.New("bravo")}))))
+	diff, err := New("1.0.0").Diff(t.Context(), p.DiffRequest{OldInputs: old, Inputs: next})
+	if err != nil || diff.HasChanges {
+		t.Fatalf("placement-only Host update = %#v, %v", diff, err)
 	}
 }
 
@@ -553,6 +607,10 @@ func completeCrossHostInputsForUsername(includeTLS bool, tlsMode, username strin
 
 func hostInputs(server property.Value) property.Map {
 	return property.NewMap(map[string]property.Value{"resource": object("environment", property.New("prod"), "serverKey", property.New("edge")), "server": object("sshAlias", server), "target": object("releaseArtifact", property.New("release")), "secrets": property.New(property.NewMap(nil)).WithSecret(true)})
+}
+
+func hostInputsWithGatewayProxy(server property.Value) property.Map {
+	return hostInputs(server).Set("secrets", property.New(property.NewMap(map[string]property.Value{"reverseProxy": object("dnsChallengeToken", property.New("dns"))})).WithSecret(true))
 }
 
 func object(entries ...any) property.Value {

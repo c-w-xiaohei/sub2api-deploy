@@ -161,6 +161,16 @@ func TestTargetRevisionNormalizesAndCommitsHostSemantics(t *testing.T) {
 	}
 }
 
+func TestTargetRevisionIgnoresGatewayPlacementMetadata(t *testing.T) {
+	key := RevisionKey([]byte("01234567890123456789012345678901"))
+	resource := ResourceIdentity{Environment: "production", ServerKey: "edge-a"}
+	first := Target{ReleaseArtifact: "release", PaymentGatewayPlacements: map[string]string{"primary": "edge"}}
+	second := Target{ReleaseArtifact: "release", PaymentGatewayPlacements: map[string]string{"primary": "bravo"}}
+	if got, want := mustRevision(t, key, resource, first, Secrets{}), mustRevision(t, key, resource, second, Secrets{}); got != want {
+		t.Fatalf("placement metadata changed Host revision: %q != %q", got, want)
+	}
+}
+
 func TestTargetRevisionRejectsInvalidScopeAndInputWithoutLeakingSecrets(t *testing.T) {
 	key := RevisionKey([]byte("01234567890123456789012345678901"))
 	resource := ResourceIdentity{Environment: "production", ServerKey: "edge-a"}

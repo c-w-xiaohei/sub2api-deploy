@@ -3863,6 +3863,7 @@ type gatewayInspectState struct {
 	Image           string
 	RestartPolicy   string
 	Binds           []string
+	Mounts          []gatewayMount
 	Env             []string
 	PortBindings    map[string][]gatewayPortBinding
 	PublishAllPorts bool
@@ -3873,6 +3874,13 @@ type gatewayInspectState struct {
 type gatewayPortBinding struct {
 	HostIP   string `json:"HostIp"`
 	HostPort string `json:"HostPort"`
+}
+
+type gatewayMount struct {
+	Type        string
+	Source      string
+	Destination string
+	RW          bool
 }
 
 type stdoutRunner struct{ output []byte }
@@ -4321,6 +4329,7 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 				"RestartPolicy": map[string]any{"Name": state.RestartPolicy},
 				"Binds":         state.Binds, "PortBindings": encodedPortBindings, "PublishAllPorts": state.PublishAllPorts,
 			},
+			"Mounts":          state.Mounts,
 			"NetworkSettings": map[string]any{"Networks": networks},
 			"State":           map[string]any{"Running": state.Running},
 		})
@@ -4530,7 +4539,12 @@ func (r *recordingRunner) Run(_ context.Context, argv []string, stdin []byte) ([
 					bind = argv[i+1]
 				}
 			}
-			r.gatewayInspect[name] = gatewayInspectState{Image: image, RestartPolicy: "unless-stopped", Binds: []string{bind}, Env: []string{env}, PortBindings: map[string][]gatewayPortBinding{}, Networks: map[string][]string{network: {name, alias}}, Running: true}
+			parts := strings.SplitN(bind, ":", 3)
+			r.gatewayInspect[name] = gatewayInspectState{
+				Image: image, RestartPolicy: "unless-stopped", Binds: []string{bind}, Env: []string{env}, PortBindings: map[string][]gatewayPortBinding{},
+				Mounts:   []gatewayMount{{Type: "bind", Source: parts[0], Destination: "/data", RW: true}, {Type: "volume", Source: "fixture-anonymous-volume", Destination: "/app/conf", RW: true}},
+				Networks: map[string][]string{network: {name, alias}}, Running: true,
+			}
 		}
 		if r.publications == nil {
 			r.publications = map[string]map[string][]map[string]string{}

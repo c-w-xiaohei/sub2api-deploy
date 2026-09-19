@@ -7,23 +7,24 @@ import (
 	"errors"
 	"fmt"
 
-	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/c-w-xiaohei/sub2api-deploy/internal/integration/automationtest"
+	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 )
 
 const (
-	hostProviderPackage      = tokens.Package("sub2api-host")
+	hostProviderPackage       = tokens.Package("sub2api-host")
 	cloudflareProviderPackage = tokens.Package("cloudflare")
 	upstashProviderPackage    = tokens.Package("upstash")
-	hostProviderType         = tokens.Type("sub2api-host:index:Host")
+	hostProviderType          = tokens.Type("sub2api-host:index:Host")
+	placementProviderType     = tokens.Type("sub2api-host:index:PaymentGatewayPlacement")
 )
 
 func startEngineGraphProviders(ctx context.Context, trace *traceFixture) (map[string]*automationtest.ProviderServer, error) {
 	providers := map[string]p.Provider{
-		string(hostProviderPackage):      hostProvider(trace),
+		string(hostProviderPackage):       hostProvider(trace),
 		string(cloudflareProviderPackage): cloudflareProvider(trace),
 		string(upstashProviderPackage):    upstashProvider(trace),
 	}
@@ -51,7 +52,7 @@ func providerVersion(name string) string {
 func hostProvider(trace *traceFixture) p.Provider {
 	return p.Provider{
 		GetSchema: func(context.Context, p.GetSchemaRequest) (p.GetSchemaResponse, error) {
-			return p.GetSchemaResponse{Schema: providerSchema(string(hostProviderPackage), providerVersion(string(hostProviderPackage)), string(hostProviderType))}, nil
+			return p.GetSchemaResponse{Schema: hostProviderSchema()}, nil
 		},
 		Check: func(_ context.Context, req p.CheckRequest) (p.CheckResponse, error) {
 			if req.Urn.Type() == hostProviderType {
@@ -60,12 +61,21 @@ func hostProvider(trace *traceFixture) p.Provider {
 			return p.CheckResponse{Inputs: req.Inputs}, nil
 		},
 		Diff: func(_ context.Context, req p.DiffRequest) (p.DiffResponse, error) {
+			if req.Urn.Type() == placementProviderType {
+				oldServer, nextServer := placementServer(req.OldInputs), placementServer(req.Inputs)
+				if oldServer != "" && nextServer != "" && oldServer != nextServer {
+					return p.DiffResponse{}, errors.New("payment gateway server move requires remove and apply first")
+				}
+			}
 			if req.OldInputs.Equals(req.Inputs) {
 				return p.DiffResponse{HasChanges: false}, nil
 			}
 			return p.DiffResponse{HasChanges: true}, nil
 		},
 		Create: func(_ context.Context, req p.CreateRequest) (p.CreateResponse, error) {
+			if req.Urn.Type() == placementProviderType {
+				return recordingCreate(req, "placement-"+req.Urn.Name()), nil
+			}
 			if req.DryRun {
 				return p.CreateResponse{Properties: req.Properties}, nil
 			}
@@ -92,6 +102,9 @@ func hostProvider(trace *traceFixture) p.Provider {
 			}, nil
 		},
 		Delete: func(_ context.Context, req p.DeleteRequest) error {
+			if req.Urn.Type() == placementProviderType {
+				return nil
+			}
 			serverKey := hostServerKey(resource.ToResourcePropertyMap(req.Properties))
 			if serverKey == "" {
 				return errors.New("test Host input has no server key")
@@ -103,6 +116,13 @@ func hostProvider(trace *traceFixture) p.Provider {
 			return nil
 		},
 		Update: func(_ context.Context, req p.UpdateRequest) (p.UpdateResponse, error) {
+			if req.Urn.Type() == placementProviderType {
+				oldServer, nextServer := placementServer(req.OldInputs), placementServer(req.Inputs)
+				if oldServer != "" && nextServer != "" && oldServer != nextServer {
+					return p.UpdateResponse{}, errors.New("payment gateway server move requires remove and apply first")
+				}
+				return p.UpdateResponse{Properties: req.Inputs}, nil
+			}
 			properties := resource.ToResourcePropertyMap(req.Inputs)
 			serverKey := hostServerKey(properties)
 			if serverKey == "" {
@@ -207,6 +227,18 @@ func recordingCreate(req p.CreateRequest, id string) p.CreateResponse {
 
 func providerSchema(name, version, resourceType string) string {
 	return fmt.Sprintf(`{"name":%q,"version":%q,"resources":{"%s":{"inputProperties":{"resource":{"$ref":"pulumi.json#/Any"},"server":{"$ref":"pulumi.json#/Any"},"target":{"$ref":"pulumi.json#/Any"},"secrets":{"$ref":"pulumi.json#/Any"},"name":{"$ref":"pulumi.json#/Any"},"content":{"$ref":"pulumi.json#/Any"},"proxied":{"$ref":"pulumi.json#/Any"},"ttl":{"$ref":"pulumi.json#/Any"},"type":{"$ref":"pulumi.json#/Any"},"zoneId":{"$ref":"pulumi.json#/Any"},"databaseName":{"$ref":"pulumi.json#/Any"},"region":{"$ref":"pulumi.json#/Any"},"tls":{"$ref":"pulumi.json#/Any"}}}}}`, name, version, resourceType)
+}
+
+func hostProviderSchema() string {
+	return fmt.Sprintf(`{"name":%q,"version":%q,"resources":{"%s":{"inputProperties":{"resource":{"$ref":"pulumi.json#/Any"},"server":{"$ref":"pulumi.json#/Any"},"target":{"$ref":"pulumi.json#/Any"},"secrets":{"$ref":"pulumi.json#/Any"}}},"%s":{"inputProperties":{"id":{"type":"string"},"server":{"type":"string"}},"requiredInputs":["id","server"],"properties":{"id":{"type":"string"},"server":{"type":"string"}},"required":["id","server"]}}}`, hostProviderPackage, providerVersion(string(hostProviderPackage)), hostProviderType, placementProviderType)
+}
+
+func placementServer(inputs property.Map) string {
+	value, ok := inputs.GetOk("server")
+	if !ok || !value.IsString() {
+		return ""
+	}
+	return value.AsString()
 }
 
 func hostServerKey(inputs resource.PropertyMap) string {

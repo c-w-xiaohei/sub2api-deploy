@@ -1,0 +1,14 @@
+version: 1
+reverseProxy:
+  image: traefik@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  acmeEmail: ops@example.test
+servers:
+  alpha:
+    sshAlias: alpha-ssh
+    addresses:
+      public: {ipv4: 198.51.100.11}
+  bravo:
+    sshAlias: bravo-ssh
+    addresses:
+      public: {ipv4: 198.51.100.12}
+apps: {}

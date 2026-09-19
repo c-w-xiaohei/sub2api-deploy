@@ -1,0 +1,25 @@
+version: 1
+cloudflare:
+  zoneId: zone-canary
+reverseProxy:
+  image: traefik@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  acmeEmail: ops@example.test
+servers:
+  alpha:
+    sshAlias: alpha-ssh
+    addresses:
+      public: {ipv4: 198.51.100.11}
+  bravo:
+    sshAlias: bravo-ssh
+    addresses:
+      public: {ipv4: 198.51.100.12}
+paymentGateways:
+  primary:
+    type: gmpay
+    server: bravo
+    hostname: pay.example.test
+    image: gmwallet/epusdt:v2.0.0
+    publicAccess:
+      type: cloudflare
+      cloudflare: {mode: dns, connectBy: publicAddress}
+apps: {}

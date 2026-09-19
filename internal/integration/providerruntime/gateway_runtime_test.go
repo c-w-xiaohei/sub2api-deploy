@@ -27,13 +27,13 @@ func TestProviderLifecycleWithPaymentGatewayFixture(t *testing.T) {
 	inputs := gatewayFixtureInputs("sub2api-gmpay-fixture:v2.0.0")
 	created := createProviderResource(t, h, inputs)
 	writeGatewaySentinel(t, h)
-	createdEffects := dockerEffects(t, h)
+	createdEffects := gatewayDockerEffects(t, h)
 
 	// This fixture models one selected Host. Multi-Host placement remains the
 	// Task 3 Program proof; this test is intentionally limited to one Host.
 	noOp, err := updateProviderResource(t, h, updateRequest(t, created.Id, created.Properties, inputs, inputs), inputs, hostcontract.ActionInspect)
-	if err != nil || noOp == nil || !reflect.DeepEqual(createdEffects, dockerEffects(t, h)) {
-		t.Fatalf("same-tag no-op changed the Host runtime: response=%#v err=%v effects=%#v", noOp, err, dockerEffects(t, h))
+	if err != nil || noOp == nil || !reflect.DeepEqual(createdEffects, gatewayDockerEffects(t, h)) {
+		t.Fatalf("same-tag no-op changed the Host runtime: response=%#v err=%v effects=%#v", noOp, err, gatewayDockerEffects(t, h))
 	}
 
 	next := gatewayFixtureInputs("sub2api-gmpay-fixture:v2.0.1")
@@ -49,7 +49,7 @@ func TestProviderLifecycleWithPaymentGatewayFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertGatewayVersionAndData(t, h, "sub2api-gmpay-fixture:v2.0.0", "keep-gateway-data\n")
-	failureEffects := dockerEffects(t, h)
+	failureEffects := gatewayDockerEffects(t, h)
 
 	h.dropHostResponse(t, hostcontract.ActionReconcile)
 	_, err = updateProviderResourceWithTimeout(t, h, updateRequest(t, created.Id, created.Properties, inputs, next), next, matrixCreateUpdateTimeout+gatewayReadinessTimeout, hostcontract.ActionInspect, hostcontract.ActionReconcile)
@@ -57,17 +57,18 @@ func TestProviderLifecycleWithPaymentGatewayFixture(t *testing.T) {
 		t.Fatal("successful gateway update with lost Provider response unexpectedly returned success")
 	}
 	assertDroppedHostResponse(t, h, hostcontract.ActionReconcile)
-	updatedEffects := dockerEffects(t, h)
+	updatedEffects := gatewayDockerEffects(t, h)
 	updated, err := updateProviderResource(t, h, updateRequest(t, created.Id, created.Properties, inputs, next), next, hostcontract.ActionInspect)
 	if err != nil || updated == nil {
 		t.Fatalf("same revision Provider retry: %v", err)
 	}
-	if !reflect.DeepEqual(updatedEffects, dockerEffects(t, h)) {
-		t.Fatalf("same revision retry repeated gateway Docker mutations: before=%#v after=%#v", updatedEffects, dockerEffects(t, h))
+	if !reflect.DeepEqual(updatedEffects, gatewayDockerEffects(t, h)) {
+		t.Fatalf("same revision retry repeated gateway Docker mutations: before=%#v after=%#v", updatedEffects, gatewayDockerEffects(t, h))
 	}
 	assertGatewayVersionAndData(t, h, "sub2api-gmpay-fixture:v2.0.1", "keep-gateway-data\n")
 	assertGatewayMutationTrace(t, h, createdEffects, failureEffects, updatedEffects)
 	assertGatewayRunPullPolicy(t, h)
+	assertGatewayRouteProbe(t, h)
 
 	drained := createInputsWithTarget(hostcontract.Target{ReleaseArtifact: ciRelease})
 	drainedResponse, err := updateProviderResource(t, h, updateRequest(t, created.Id, updated.Properties, next, drained), drained, hostcontract.ActionInspect, hostcontract.ActionReconcile, hostcontract.ActionInspect)
@@ -95,6 +96,76 @@ func TestProviderLifecycleWithPaymentGatewayFixture(t *testing.T) {
 	}
 	if len(observation.PaymentGateways) != 1 || observation.PaymentGateways[0].ID != "primary" || !observation.PaymentGateways[0].Ready || observation.PaymentGateways[0].ActiveImage != "sub2api-gmpay-fixture:v2.0.1" {
 		t.Fatalf("gateway observation = %#v", observation.PaymentGateways)
+	}
+}
+
+func gatewayDockerEffects(t *testing.T, h *providerProcess) []dockerEffect {
+	t.Helper()
+	proxyName := gatewayProxyName(t, h)
+	var result []dockerEffect
+	for _, effect := range dockerEffects(t, h) {
+		if effect.Action == "network-create" || effect.Action == "image-pull" || effect.AppToken == fixtureToken("payment-gateway", "primary") || effect.Name == proxyName {
+			result = append(result, effect)
+		}
+	}
+	return result
+}
+
+func gatewayProxyName(t *testing.T, h *providerProcess) string {
+	t.Helper()
+	var state struct {
+		Resource  hostcontract.ResourceIdentity
+		Ownership hostcontract.OwnershipIdentity
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(h.root, "state.json")), &state); err != nil {
+		t.Fatal(err)
+	}
+	return "s2h-" + fixtureToken(state.Resource.Environment, state.Resource.ServerKey, state.Ownership.Value, "proxy", "proxy", "live")
+}
+
+func assertGatewayRouteProbe(t *testing.T, h *providerProcess) {
+	t.Helper()
+	var trace dockerTrace
+	if err := json.Unmarshal(mustRead(t, filepath.Join(h.trace, "docker-state", "state.json")), &trace); err != nil {
+		t.Fatal(err)
+	}
+	for _, read := range trace.Reads {
+		if read == "gateway-route-probe" {
+			return
+		}
+	}
+	t.Fatalf("gateway route probe trace = %#v", trace.Reads)
+}
+
+func TestProviderRuntimePlacesGatewayOnOnlySelectedHost(t *testing.T) {
+	provider := buildProviderForPrerequisite(t)
+	selected := startProviderWithApproval(t, provider, approvalExact)
+	unselected := startProviderWithApproval(t, provider, approvalExact)
+
+	selectedInputs := gatewayFixtureInputsForHost("alpha", "sub2api-gmpay-fixture:v2.0.0")
+	unselectedInputs := createInputsWithTarget(hostcontract.Target{ReleaseArtifact: ciRelease}).Set("resource", jsonProperty(hostcontract.ResourceIdentity{Environment: "test", ServerKey: "bravo"}))
+	createProviderResource(t, selected, selectedInputs)
+	createProviderResource(t, unselected, unselectedInputs)
+
+	writeGatewaySentinel(t, selected)
+	assertGatewayVersionAndData(t, selected, "sub2api-gmpay-fixture:v2.0.0", "keep-gateway-data\n")
+	for _, effect := range dockerEffects(t, unselected) {
+		if effect.Action == "image-pull" || effect.Action == "container-run" {
+			t.Fatalf("unselected Host mutated a gateway: %#v", dockerEffects(t, unselected))
+		}
+	}
+	var inventory struct {
+		Objects []struct {
+			Role string `json:"role"`
+		} `json:"objects"`
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(unselected.root, "runtime", "managed", "inventory.json")), &inventory); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range inventory.Objects {
+		if object.Role == "payment-gateway" || object.Role == "payment-gateway-meta" {
+			t.Fatalf("unselected Host retained gateway state: %#v", inventory.Objects)
+		}
 	}
 }
 
@@ -172,7 +243,7 @@ func writeFixtureJSON(t *testing.T, path string, value any) {
 
 func assertGatewayMutationTrace(t *testing.T, h *providerProcess, initial, afterFailure, afterSuccess []dockerEffect) {
 	t.Helper()
-	if len(initial) != 3 || initial[0].Action != "network-create" || initial[1].Action != "image-pull" || initial[2].Action != "container-run" {
+	if len(initial) != 4 || initial[0].Action != "network-create" || initial[1].Action != "container-run" || initial[1].Name != gatewayProxyName(t, h) || initial[2].Action != "image-pull" || initial[3].Action != "container-run" {
 		t.Fatalf("gateway create trace = %#v", initial)
 	}
 	if len(afterFailure) <= len(initial) || !reflect.DeepEqual(afterFailure[:len(initial)], initial) {
@@ -222,13 +293,18 @@ func assertGatewayRunPullPolicy(t *testing.T, h *providerProcess) {
 }
 
 func gatewayFixtureInputs(image string) property.Map {
+	return gatewayFixtureInputsForHost("edge", image)
+}
+
+func gatewayFixtureInputsForHost(serverKey, image string) property.Map {
 	target := hostcontract.Target{
 		ReleaseArtifact: ciRelease,
+		ReverseProxy:    &hostcontract.ReverseProxyTarget{Image: "traefik:v3", ACMEEmail: "ops@example.test"},
 		PaymentGateways: []hostcontract.PaymentGatewayTarget{{
 			ID: "primary", Type: "gmpay", Image: image, Hostname: "pay.example",
 		}},
 	}
-	return createInputsWithTarget(target)
+	return createInputsWithTarget(target).Set("resource", jsonProperty(hostcontract.ResourceIdentity{Environment: "test", ServerKey: serverKey}))
 }
 
 func writeGatewaySentinel(t *testing.T, h *providerProcess) {

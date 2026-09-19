@@ -26,6 +26,7 @@ var releaseArtifactPattern = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
 const importTargetConfigKey = "sub2api-environment:hostImportTarget"
 
 type hostResource struct{ pulumi.CustomResourceState }
+type paymentGatewayPlacementResource struct{ pulumi.CustomResourceState }
 
 type managedRedisInputs struct {
 	ProviderID pulumi.StringInput
@@ -96,7 +97,11 @@ func Register(ctx *pulumi.Context, releaseArtifact string, configYAML, secretsYA
 		}
 	}
 
-	hosts, err := registerHosts(ctx, validated, secrets, releaseArtifact, managedRedis, importTarget, key)
+	placements, err := registerPaymentGatewayPlacements(ctx, validated.Config)
+	if err != nil {
+		return err
+	}
+	hosts, err := registerHosts(ctx, validated, secrets, releaseArtifact, managedRedis, placements, importTarget, key)
 	if err != nil {
 		return err
 	}
@@ -177,7 +182,22 @@ func importPreflight(ctx *pulumi.Context, validated environment.ValidatedConfig,
 	return importTarget, hostcontract.RevisionKey(decoded), nil
 }
 
-func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, secrets environment.Secrets, release string, managed map[string]managedRedisInputs, importTarget string, key hostcontract.RevisionKey) (map[string]*hostResource, error) {
+func registerPaymentGatewayPlacements(ctx *pulumi.Context, config environment.Config) (map[string]*paymentGatewayPlacementResource, error) {
+	placements := make(map[string]*paymentGatewayPlacementResource, len(config.PaymentGateways))
+	for _, id := range sortedPaymentGatewayIDs(config) {
+		var placement paymentGatewayPlacementResource
+		if err := ctx.RegisterResource(hostresource.PaymentGatewayPlacementToken, "payment-gateway-placement-"+id, pulumi.Map{
+			"id":     pulumi.String(id),
+			"server": pulumi.String(config.PaymentGateways[id].Server),
+		}, &placement); err != nil {
+			return nil, err
+		}
+		placements[id] = &placement
+	}
+	return placements, nil
+}
+
+func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, secrets environment.Secrets, release string, managed map[string]managedRedisInputs, placements map[string]*paymentGatewayPlacementResource, importTarget string, key hostcontract.RevisionKey) (map[string]*hostResource, error) {
 	hosts := make(map[string]*hostResource, len(validated.ServerIDs))
 	dockerDependencies := dockerDataOwnerDependencies(validated.Config)
 	order, err := hostOrderWithDockerDataDependencies(validated.Config, dockerDependencies)
@@ -186,8 +206,14 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 	}
 	for _, serverID := range order {
 		var host hostResource
+		dependencies := hostDependencies(serverID, validated.Config, hosts, dockerDependencies)
+		for _, gatewayID := range sortedPaymentGatewayIDs(validated.Config) {
+			if validated.PaymentGateways[gatewayID].Server == serverID {
+				dependencies = append(dependencies, placements[gatewayID])
+			}
+		}
 		var options []pulumi.ResourceOption
-		if dependencies := hostDependencies(serverID, validated.Config, hosts, dockerDependencies); len(dependencies) != 0 {
+		if len(dependencies) != 0 {
 			options = append(options, pulumi.DependsOn(dependencies))
 		}
 		inputs := pulumi.Map{
@@ -210,7 +236,6 @@ func registerHosts(ctx *pulumi.Context, validated environment.ValidatedConfig, s
 	}
 	return hosts, nil
 }
-
 func hostImportID(key hostcontract.RevisionKey, inputs pulumi.Map) pulumi.IDOutput {
 	return pulumi.ToOutput(inputs).ApplyT(func(value any) (pulumi.ID, error) {
 		payload, err := json.Marshal(value)
@@ -448,6 +473,13 @@ func hostTarget(config environment.Config, secrets environment.Secrets, release,
 	}
 	if len(gateways) != 0 {
 		target["paymentGateways"] = gateways
+	}
+	placements := pulumi.Map{}
+	for _, id := range sortedPaymentGatewayIDs(config) {
+		placements[id] = pulumi.String(config.PaymentGateways[id].Server)
+	}
+	if len(placements) != 0 {
+		target["paymentGatewayPlacements"] = placements
 	}
 	if len(services) != 0 {
 		target["dataServices"] = services

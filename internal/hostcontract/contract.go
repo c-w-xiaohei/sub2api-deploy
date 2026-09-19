@@ -102,13 +102,14 @@ type TunnelConnectorTarget struct {
 	AppIDs   []string `json:"appIds,omitempty"`
 }
 type Target struct {
-	ReleaseArtifact string                   `json:"releaseArtifact"`
-	Apps            []AppTarget              `json:"apps,omitempty"`
-	PaymentGateways []PaymentGatewayTarget   `json:"paymentGateways,omitempty"`
-	DataServices    []LocalDataServiceTarget `json:"dataServices,omitempty"`
-	ReverseProxy    *ReverseProxyTarget      `json:"reverseProxy,omitempty"`
-	MicroSocks      *MicroSocksTarget        `json:"microSocks,omitempty"`
-	Connectors      []TunnelConnectorTarget  `json:"connectors,omitempty"`
+	ReleaseArtifact          string                   `json:"releaseArtifact"`
+	Apps                     []AppTarget              `json:"apps,omitempty"`
+	PaymentGateways          []PaymentGatewayTarget   `json:"paymentGateways,omitempty"`
+	PaymentGatewayPlacements map[string]string        `json:"paymentGatewayPlacements,omitempty"`
+	DataServices             []LocalDataServiceTarget `json:"dataServices,omitempty"`
+	ReverseProxy             *ReverseProxyTarget      `json:"reverseProxy,omitempty"`
+	MicroSocks               *MicroSocksTarget        `json:"microSocks,omitempty"`
+	Connectors               []TunnelConnectorTarget  `json:"connectors,omitempty"`
 }
 
 type DataCredentials struct {
@@ -292,6 +293,9 @@ func TargetRevision(key RevisionKey, resource ResourceIdentity, target Target, s
 	if err := validate(target, secrets); err != nil {
 		return "", fmt.Errorf("invalid revision input")
 	}
+	// Placement metadata protects the Provider's cross-Host move admission; it
+	// does not alter this Host's runtime contract.
+	target.PaymentGatewayPlacements = nil
 	payload, err := canonicalJSON(struct {
 		Domain   string           `json:"domain"`
 		Resource ResourceIdentity `json:"resource"`
@@ -328,6 +332,7 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 	}
 	target.PaymentGateways = append([]PaymentGatewayTarget(nil), target.PaymentGateways...)
 	sort.Slice(target.PaymentGateways, func(i, j int) bool { return target.PaymentGateways[i].ID < target.PaymentGateways[j].ID })
+	target.PaymentGatewayPlacements = copyStrings(target.PaymentGatewayPlacements)
 	if target.MicroSocks != nil {
 		microSocks := *target.MicroSocks
 		target.MicroSocks = &microSocks
@@ -373,6 +378,9 @@ func normalize(target Target, secrets Secrets) (Target, Secrets) {
 	}
 	if len(target.PaymentGateways) == 0 {
 		target.PaymentGateways = nil
+	}
+	if len(target.PaymentGatewayPlacements) == 0 {
+		target.PaymentGatewayPlacements = nil
 	}
 	if len(target.DataServices) == 0 {
 		target.DataServices = nil
@@ -836,6 +844,11 @@ func validTargetStrings(v Target) bool {
 	}
 	for _, gateway := range v.PaymentGateways {
 		if !valid(gateway.ID) || !valid(gateway.Type) || !valid(gateway.Image) || !valid(gateway.Hostname) {
+			return false
+		}
+	}
+	for id, server := range v.PaymentGatewayPlacements {
+		if !valid(id) || !valid(server) {
 			return false
 		}
 	}
