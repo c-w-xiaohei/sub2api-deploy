@@ -1,6 +1,4 @@
 version: 1
-cloudflare:
-  zoneId: zone-canary
 reverseProxy:
   image: traefik@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   acmeEmail: ops@example.test
