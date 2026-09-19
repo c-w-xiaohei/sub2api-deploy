@@ -13,6 +13,18 @@ servers:
     sshAlias: bravo-ssh
     addresses:
       public: {ipv4: 198.51.100.12}
+postgres:
+  app-postgres:
+    type: external
+    host: postgres.external.test
+    port: 5433
+    tls: {mode: verify-full}
+redis:
+  app-redis:
+    type: external
+    host: redis.external.test
+    port: 6381
+    tls: true
 paymentGateways:
   primary:
     type: gmpay
@@ -22,4 +34,17 @@ paymentGateways:
     publicAccess:
       type: cloudflare
       cloudflare: {mode: dns, connectBy: publicAddress}
-apps: {}
+apps:
+  app:
+    hostname: app.example.test
+    image: ghcr.io/example/sub2api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    initialAdminEmail: admin@example.test
+    readinessPath: /ready
+    environment: {FEATURE_FLAG: enabled}
+    servers: [alpha, bravo]
+    postgres: {name: app-postgres, database: sub2api}
+    redis: {name: app-redis, database: 0}
+    publicAccess:
+      type: cloudflare
+      servers: [alpha, bravo]
+      cloudflare: {mode: dns, connectBy: publicAddress}
